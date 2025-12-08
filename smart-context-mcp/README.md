@@ -22,11 +22,13 @@ Smart Context MCP solves these problems with intelligent AST-based analysis, sur
 - **Interval Merging**: Automatically merge overlapping code regions to reduce token usage
 
 ### 2. 🛡️ Safe Atomic Editing
-- **Fuzzy Matching**: Tolerates whitespace differences and minor variations
-- **Context Validation**: Uses before/after context anchors to ensure correct match location
-- **Automatic Backups**: Timestamped backups with configurable retention policy
-- **Transactional Edits**: `batch_edit` applies all-or-nothing changes across multiple files
-- **Undo/Redo Support**: Full edit history with inverse operations
+- **Advanced Fuzzy Matching**: Dynamic tolerance and optimized boundary detection for robust edits.
+- **Intelligent Diagnostics**: Detailed failure analysis suggesting similar lines and identifying context mismatches when edits fail.
+- **Match Confidence Scoring**: Resolves ambiguity by ranking candidates based on exactness, context, and Levenshtein distance.
+- **Context Validation**: Uses before/after context anchors to ensure correct match location.
+- **Automatic Backups**: Timestamped backups with configurable retention policy.
+- **Transactional Edits**: `batch_edit` applies all-or-nothing changes across multiple files.
+- **Undo/Redo Support**: Full edit history with inverse operations.
 
 ### 3. 🧠 Project Intelligence
 - **Symbol Search**: AST-based search for classes, functions, methods across the project

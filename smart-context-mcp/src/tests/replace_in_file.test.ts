@@ -103,7 +103,7 @@ describe('SmartContextServer - edit_file', () => {
         const error: EditResult = JSON.parse(response.content[0].text);
         expect(error.errorCode).toBe('AmbiguousMatch');
         expect(error.message).toContain('Found 2 occurrences');
-        expect(error.suggestion).toContain('Refine your request by adding a \'lineRange\'');
+        expect(error.suggestion).toContain('Ambiguity detected');
         expect(error.details?.conflictingLines).toEqual([3, 4]);
     });
 

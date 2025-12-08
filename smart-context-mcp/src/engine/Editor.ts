@@ -3,7 +3,7 @@ import { promisify } from "util";
 import * as path from "path";
 import * as crypto from "crypto";
 import { MyersDiff } from "./Diff.js";
-import * as levenshtein from "fast-levenshtein";
+import levenshtein from "fast-levenshtein";
 import { Edit, EditOperation, EditResult, LineRange } from "../types.js";
 import { LineCounter } from "./LineCounter.js";
 
@@ -18,6 +18,8 @@ interface Match {
     replacement: string;
     original: string;
     lineNumber: number;
+    confidence?: number;
+    matchType?: 'exact' | 'whitespace-fuzzy' | 'levenshtein';
 }
 
 export class AmbiguousMatchError extends Error {
@@ -111,13 +113,17 @@ export class EditorEngine {
     }
 
     private createFuzzyRegex(target: string): RegExp {
-        const escaped = this.escapeRegExp(target);
-        const words = escaped.split(/\s+/).filter((word) => word.length > 0);
-
+        // Normalize target whitespace first
+        const normalized = target.trim().replace(/\s+/g, ' ');
+        const escaped = this.escapeRegExp(normalized);
+        const words = escaped.split(/\s/).filter((word) => word.length > 0);
+        
         if (words.length === 0) {
-            return this.createExactRegex(target);
+             // If target is only whitespace, match any whitespace sequence
+            return /\s+/g;
         }
 
+        // Allow flexible whitespace: \s* for optional, \s+ for required
         const corePattern = words.join("\\s+");
         
         const needsStart = /^[a-zA-Z0-9_]/.test(words[0]);
@@ -138,9 +144,19 @@ export class EditorEngine {
 
     private isBoundaryPosition(content: string, index: number): boolean {
         if (index === 0) return true;
+        if (index >= content.length) return false;
+        
         const prev = content[index - 1];
         const curr = content[index];
-        return /\s/.test(prev) && !/\s/.test(curr); 
+        
+        // Word boundaries: whitespace or punctuation to alphanumeric
+        const isWordBoundary = (
+            /\s/.test(prev) && !/\s/.test(curr)
+        ) || (
+            /[^\w]/.test(prev) && /\w/.test(curr)
+        );
+        
+        return isWordBoundary;
     }
 
     private findLevenshteinCandidates(
@@ -151,40 +167,83 @@ export class EditorEngine {
         lineRange?: LineRange
     ): Match[] {
         const targetLen = target.length;
-        if (targetLen >= 256) {
-             throw new Error(`Target string for Levenshtein fuzzy matching exceeds 256 characters.`);
+        
+        if (targetLen >= 512) {
+            throw new Error(
+                `Levenshtein fuzzy matching works best with strings under 512 characters.\n` +
+                `Your target is ${targetLen} characters.\n` +
+                `Suggestions:\n` +
+                `- Break into smaller edits\n` +
+                `- Use fuzzyMode: "whitespace" instead\n` +
+                `- Use indexRange for precise character-based replacement`
+            );
         }
 
-        const tolerance = Math.floor(targetLen * 0.3); // 30% threshold
+        // Dynamic tolerance: smaller strings need stricter matching
+        const tolerance = targetLen < 10 
+            ? Math.max(1, Math.floor(targetLen * 0.2))  // 20% for short strings
+            : Math.floor(targetLen * 0.3);  // 30% for longer strings
+        
         const windowSize = targetLen + tolerance;
         const candidates: { start: number; end: number; distance: number; original: string }[] = [];
         
-        // Optimize: scan only relevant range if lineRange provided
-        // But LineCounter doesn't support reverse lookup (line -> index).
-        // Actually, we can just iterate index and check line number? 
-        // No, that's O(N log N).
-        // Ideally we need line->index lookup. 
-        // For now, let's scan full content but filter by line number efficiently.
-        // Or just scan full content.
+        // Optimize: Use lineRange to constrain search space
+        let searchStart = 0;
+        let searchEnd = content.length;
+        
+        if (lineRange) {
+            const lines = content.split('\n');
+            let charOffset = 0;
+            // Map line numbers to character offsets
+            // Note: LineCounter is 0-indexed internally? Editor usually passes 1-based lineRange.
+            // Let's assume lineRange is 1-based as per usual user input.
+            // LineCounter.getLineNumber returns 1-based.
+            
+            // We can iterate lines to find start/end indices.
+            // But getting ALL lines might be heavy. 
+            // Since we don't have a reverse LineCounter, we scan.
+            
+            for (let i = 0; i < lines.length; i++) {
+                const currentLineNum = i + 1;
+                const lineLen = lines[i].length + 1; // +1 for newline (approx, split consumes it)
+                
+                if (currentLineNum === lineRange.start) {
+                    searchStart = charOffset;
+                }
+                if (currentLineNum === lineRange.end) {
+                    searchEnd = charOffset + lines[i].length; 
+                    // We don't break immediately because we might need to finish the line?
+                    // actually if lineRange.end is the last line, searchEnd is end of that line.
+                    break; 
+                }
+                charOffset += lineLen;
+            }
+        }
         
         const MAX_OPS = 1000000;
         let ops = 0;
 
-        for (let i = 0; i <= content.length - targetLen; i++) {
+        for (let i = searchStart; i <= searchEnd - targetLen && i <= content.length - targetLen; i++) {
             ops++;
             if (ops > MAX_OPS) {
-                throw new Error("Fuzzy search timed out (exceeded max operations). Please refine your search.");
+                throw new Error(
+                    `Fuzzy search exceeded computational limit.\n` +
+                    `Suggestions:\n` +
+                    `- Add lineRange to narrow search scope\n` +
+                    `- Use more specific targetString\n` +
+                    `- Try fuzzyMode: "whitespace" instead`
+                );
             }
 
-            // Boundary optimization: Only start matching at word boundaries
-            // This reduces the number of expensive Levenshtein calls
             if (!this.isBoundaryPosition(content, i)) continue;
 
-            const windowEnd = Math.min(i + windowSize, content.length);
+            const windowEnd = Math.min(i + windowSize, searchEnd);
             const window = content.substring(i, windowEnd);
 
-            for (let len = targetLen - tolerance; len <= targetLen + tolerance; len++) {
-                if (len <= 0 || len > window.length) continue;
+            const minLen = Math.max(1, targetLen - tolerance);
+            const maxLen = Math.min(window.length, targetLen + tolerance);
+            
+            for (let len = minLen; len <= maxLen; len++) {
                 const candidateStr = window.substring(0, len);
                 const distance = levenshtein.get(target, candidateStr);
 
@@ -195,8 +254,6 @@ export class EditorEngine {
                         distance,
                         original: candidateStr
                     });
-                    // If we found a good match at this position, we might want to skip minor variations?
-                    // But we'll dedupe later.
                 }
             }
         }
@@ -212,25 +269,195 @@ export class EditorEngine {
             );
             
             if (!isOverlapping) {
-                // Check context/lineRange filters here?
-                // For now, return all, filter in findMatch
                 const lineNumber = lineCounter.getLineNumber(cand.start);
-                
-                if (lineRange) {
-                    if (lineNumber < lineRange.start || lineNumber > lineRange.end) continue;
-                }
-
                 uniqueMatches.push({
                     start: cand.start,
                     end: cand.end,
                     replacement,
                     original: cand.original,
-                    lineNumber
+                    lineNumber,
+                    matchType: 'levenshtein'
                 });
             }
         }
 
         return uniqueMatches;
+    }
+
+    private scoreMatchConfidence(
+        match: Match,
+        edit: Edit,
+        content: string
+    ): number {
+        let score = 0.5;  // Base score
+        
+        // Exact match = highest confidence
+        if (match.original === edit.targetString) {
+            score = 1.0;
+        }
+        // Levenshtein = lower confidence based on distance
+        else if (edit.fuzzyMode === 'levenshtein') {
+            const distance = levenshtein.get(edit.targetString, match.original);
+            const maxDistance = Math.floor(edit.targetString.length * 0.3);
+            score = 0.5 + (0.5 * (1 - distance / (maxDistance || 1)));
+        }
+        // Whitespace fuzzy = medium confidence
+        else if (edit.fuzzyMode === 'whitespace') {
+            score = 0.8;
+        }
+        
+        // Boost score if context matches
+        if (edit.beforeContext || edit.afterContext) {
+            score = Math.min(1.0, score + 0.15);
+        }
+        
+        // Boost score if lineRange constrains search
+        if (edit.lineRange) {
+            score = Math.min(1.0, score + 0.1);
+        }
+        
+        return score;
+    }
+
+    private generateMatchFailureDiagnostics(
+        content: string,
+        edit: Edit,
+        matches: Match[],
+        filteredMatches: Match[]
+    ): string {
+        const diagnostics: string[] = [];
+        
+        diagnostics.push(`Target not found: "${edit.targetString}"`);
+        diagnostics.push(`\nDiagnostics:`);
+        
+        const mode = edit.fuzzyMode || 'exact';
+        diagnostics.push(`- Matching mode: ${mode}`);
+        
+        if (matches.length === 0) {
+            diagnostics.push(`- Initial search found 0 matches`);
+            diagnostics.push(`- Tip: Try fuzzyMode: "whitespace" or "levenshtein"`);
+            
+            // Suggest similar strings using Levenshtein (simple line scan)
+            const lines = content.split('\n');
+            const targetWords = edit.targetString.toLowerCase().split(/\s+/);
+            const potentialMatches: Array<{line: number, text: string, score: number}> = [];
+            
+            lines.forEach((line, idx) => {
+                const lineWords = line.toLowerCase().split(/\s+/);
+                const commonWords = targetWords.filter(w => lineWords.includes(w));
+                if (commonWords.length > 0 && targetWords.length > 0) {
+                    potentialMatches.push({
+                        line: idx + 1,
+                        text: line.trim().substring(0, 80),
+                        score: commonWords.length / targetWords.length
+                    });
+                }
+            });
+            
+            if (potentialMatches.length > 0) {
+                potentialMatches.sort((a, b) => b.score - a.score);
+                diagnostics.push(`\n- Potential similar lines found:`);
+                potentialMatches.slice(0, 3).forEach(m => {
+                    diagnostics.push(`  Line ${m.line}: "${m.text}"`);
+                });
+            }
+        } else {
+            diagnostics.push(`- Initial search found ${matches.length} match(es)`);
+            diagnostics.push(`- After filtering: ${filteredMatches.length} match(es)`);
+            
+            if (edit.lineRange) {
+                const lineFiltered = matches.filter(m => 
+                    m.lineNumber < edit.lineRange!.start || m.lineNumber > edit.lineRange!.end
+                );
+                if (lineFiltered.length > 0) {
+                    diagnostics.push(`- ${lineFiltered.length} match(es) outside lineRange [${edit.lineRange.start}, ${edit.lineRange.end}]:`);
+                    lineFiltered.forEach(m => {
+                        diagnostics.push(`  Line ${m.lineNumber}: "${m.original.substring(0, 50)}..."`);
+                    });
+                }
+            }
+            
+            if (edit.beforeContext) {
+                const contextFailed = matches.filter(m => {
+                    const searchStart = edit.anchorSearchRange?.chars
+                        ? Math.max(0, m.start - edit.anchorSearchRange.chars)
+                        : 0;
+                    const preceding = content.substring(searchStart, m.start);
+                    if (edit.fuzzyMode === "whitespace") {
+                        return !preceding.replace(/\s+/g, " ").includes(edit.beforeContext!.replace(/\s+/g, " "));
+                    }
+                    return !preceding.includes(edit.beforeContext!);
+                });
+                
+                if (contextFailed.length > 0) {
+                    diagnostics.push(`- ${contextFailed.length} match(es) failed beforeContext: "${edit.beforeContext}"`);
+                }
+            }
+            
+            if (edit.afterContext) {
+                const contextFailed = matches.filter(m => {
+                    const searchEnd = edit.anchorSearchRange?.chars
+                        ? Math.min(content.length, m.end + edit.anchorSearchRange.chars)
+                        : content.length;
+                    const following = content.substring(m.end, searchEnd);
+                    if (edit.fuzzyMode === "whitespace") {
+                        return !following.replace(/\s+/g, " ").includes(edit.afterContext!.replace(/\s+/g, " "));
+                    }
+                    return !following.includes(edit.afterContext!);
+                });
+                
+                if (contextFailed.length > 0) {
+                    diagnostics.push(`- ${contextFailed.length} match(es) failed afterContext: "${edit.afterContext}"`);
+                }
+            }
+        }
+        
+        diagnostics.push(`\nSuggestions:`);
+        if (matches.length === 0) {
+            diagnostics.push(`- Verify the target string exists in the file`);
+            diagnostics.push(`- Check for typos or whitespace differences`);
+            diagnostics.push(`- Try: fuzzyMode: "whitespace" for flexible whitespace`);
+            diagnostics.push(`- Try: fuzzyMode: "levenshtein" for typo tolerance`);
+        } else {
+            diagnostics.push(`- Remove or adjust lineRange`);
+            diagnostics.push(`- Adjust beforeContext/afterContext`);
+        }
+        
+        return diagnostics.join('\n');
+    }
+
+    private generateAmbiguousMatchError(
+        content: string,
+        edit: Edit,
+        matches: Match[]
+    ): AmbiguousMatchError {
+        const scoredMatches = matches.map(m => ({
+            ...m,
+            confidence: this.scoreMatchConfidence(m, edit, content)
+        })).sort((a, b) => b.confidence! - a.confidence!);
+        
+        const lines = content.split('\n');
+        
+        const contextSnippets = scoredMatches.map(m => {
+            const line = lines[m.lineNumber - 1];
+            return `Line ${m.lineNumber} (confidence: ${(m.confidence! * 100).toFixed(0)}%): "${line.trim().substring(0, 80)}..."`;
+        });
+        
+        const message = [
+            `Ambiguous match for "${edit.targetString}". Found ${matches.length} occurrences:`,
+            '',
+            ...contextSnippets.slice(0, 5), // Show top 5
+            matches.length > 5 ? `... and ${matches.length - 5} more.` : '',
+            '',
+            `Best match appears to be line ${scoredMatches[0].lineNumber}.`,
+            `Resolution strategies:`,
+            `1. Add lineRange: { start: ${scoredMatches[0].lineNumber}, end: ${scoredMatches[0].lineNumber} }`,
+            `2. Add beforeContext/afterContext`
+        ].join('\n');
+        
+        return new AmbiguousMatchError(message, { 
+            conflictingLines: matches.map(m => m.lineNumber)
+        });
     }
 
     private findMatch(content: string, edit: Edit, lineCounter: LineCounter): Match {
@@ -244,13 +471,13 @@ export class EditorEngine {
                  end: m.index! + m[0].length,
                  replacement: edit.replacementString,
                  original: m[0],
-                 lineNumber: lineCounter.getLineNumber(m.index!)
+                 lineNumber: lineCounter.getLineNumber(m.index!),
+                 matchType: 'exact' as const
              }));
 
              if (exactMatches.length > 0) {
                  matches = exactMatches;
              } else {
-                 // Fallback to sliding window
                  matches = this.findLevenshteinCandidates(content, edit.targetString, edit.replacementString, lineCounter, edit.lineRange);
              }
         } else {
@@ -265,11 +492,11 @@ export class EditorEngine {
                 end: m.index! + m[0].length,
                 replacement: edit.replacementString,
                 original: m[0],
-                lineNumber: lineCounter.getLineNumber(m.index!)
+                lineNumber: lineCounter.getLineNumber(m.index!),
+                matchType: (edit.fuzzyMode === 'whitespace' ? 'whitespace-fuzzy' : 'exact')
             }));
         }
 
-        // Filter matches
         const filteredMatches = matches.filter(match => {
             if (edit.lineRange) {
                 if (match.lineNumber < edit.lineRange.start || match.lineNumber > edit.lineRange.end) return false;
@@ -306,14 +533,10 @@ export class EditorEngine {
         });
 
         if (filteredMatches.length === 0) {
-            throw new Error(`Target not found: "${edit.targetString}"`);
+            throw new Error(this.generateMatchFailureDiagnostics(content, edit, matches, filteredMatches));
         }
         if (filteredMatches.length > 1) {
-            const conflictingLines = filteredMatches.map(m => m.lineNumber);
-            throw new AmbiguousMatchError(
-                `Ambiguous match for "${edit.targetString}". Found ${filteredMatches.length} occurrences.`,
-                { conflictingLines }
-            );
+            throw this.generateAmbiguousMatchError(content, edit, filteredMatches);
         }
 
         return filteredMatches[0];
@@ -346,6 +569,7 @@ export class EditorEngine {
                     replacement: edit.replacementString,
                     original: existing,
                     lineNumber: lineCounter.getLineNumber(start),
+                    matchType: 'exact'
                 });
             } else {
                 const match = this.findMatch(originalContent, edit, lineCounter);
@@ -358,7 +582,7 @@ export class EditorEngine {
         for (let i = 0; i < plannedMatches.length - 1; i++) {
             if (plannedMatches[i].end > plannedMatches[i + 1].start) {
                 throw new Error(
-                    `Conflict detected: Edit for "${plannedMatches[i].original}" (chars ${plannedMatches[i].start}-${plannedMatches[i].end}) overlaps with "${plannedMatches[i + 1].original}" (chars ${plannedMatches[i + 1].start}-${plannedMatches[i + 1].end}).`
+                    `Conflict detected: Edit for "${plannedMatches[i].original}" overlaps with "${plannedMatches[i + 1].original}".`
                 );
             }
         }
@@ -387,7 +611,7 @@ export class EditorEngine {
                     message: error.message,
                     details: { conflictingLines: error.conflictingLines },
                     suggestion:
-                        `Ambiguity detected. Refine your request by adding a 'lineRange' parameter to specify which occurrence to target. Conflicting lines are: ${error.conflictingLines.join(", ")}.`,
+                        `Ambiguity detected. See error message for details and resolution strategies.`,
                     errorCode: "AmbiguousMatch",
                 };
             }

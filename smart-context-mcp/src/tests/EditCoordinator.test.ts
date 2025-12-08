@@ -1,3 +1,4 @@
+import { jest, describe, it, beforeEach, expect } from '@jest/globals';
 import { EditCoordinator } from "../engine/EditCoordinator.js";
 import { EditorEngine } from "../engine/Editor.js";
 import { HistoryEngine } from "../engine/History.js";
@@ -5,11 +6,11 @@ import { BatchOperation, Edit, EditOperation, EditResult } from "../types.js";
 import * as path from "path";
 
 describe("EditCoordinator", () => {
-  let mockEditorEngine: { applyEdits: jest.Mock } & Partial<EditorEngine>;
+  let mockEditorEngine: { applyEdits: ReturnType<typeof jest.fn> } & Partial<EditorEngine>;
   let mockHistoryEngine: {
-    pushOperation: jest.Mock;
-    undo: jest.Mock;
-    redo: jest.Mock;
+    pushOperation: ReturnType<typeof jest.fn>;
+    undo: ReturnType<typeof jest.fn>;
+    redo: ReturnType<typeof jest.fn>;
   } & Partial<HistoryEngine>;
   const rootPath = "/project/root";
 
