@@ -1,0 +1,57 @@
+{
+  "name": "smart-context-mcp",
+  "version": "2.2.0",
+  "type": "module",
+  "bin": {
+    "smart-context-mcp": "dist/index.js"
+  },
+  "files": ["dist", "node_modules/tree-sitter-wasms", "LICENSE","README.md"],
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "test": "NODE_OPTIONS=--experimental-vm-modules jest dist",
+    "test:coverage": "NODE_OPTIONS=--experimental-vm-modules jest dist --coverage",
+    "build": "tsc",
+    "start": "tsx src/index.ts"
+  },
+  "keywords": [
+    "modelcontextprotocol",
+    "mcp",
+    "context",
+    "vibe-coding",
+    "developer tools",
+    "ai-assisted coding",
+    "smart context",
+    "editor",
+    "file analysis"
+  ],
+  "author": "devkwan",
+  "license": "MIT",
+  "description": "",
+  "jest": {
+    "collectCoverage": true,
+    "coverageDirectory": "coverage",
+    "testPathIgnorePatterns": [
+      "/node_modules/",
+      "/backup/",
+      "/dist/tests/performance/"
+    ]
+  },
+  "devDependencies": {
+    "@types/fast-levenshtein": "^0.0.3",
+    "@types/jest": "^29.5.12",
+    "@types/node": "^20.11.16",
+    "jest": "^29.7.0",
+    "typescript": "^5.3.3"
+  },
+  "dependencies": {
+    "@google/generative-ai": "^0.2.1",
+    "@modelcontextprotocol/sdk": "^1.24.3",
+    "fast-levenshtein": "^2.0.6",
+    "ignore": "^5.2.0",
+    "tree-sitter-wasms": "^0.1.13",
+    "web-tree-sitter": "^0.25.10",
+    "tsx": "^4.7.0"
+  }
+}
