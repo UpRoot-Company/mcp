@@ -46,10 +46,10 @@ describe('ReferenceFinder', () => {
         if (fs.existsSync(testDir)) fs.rmSync(testDir, { recursive: true, force: true });
     });
 
-    beforeEach(async () => {
+        beforeEach(async () => {
         const generator = new SkeletonGenerator();
         const index = new SymbolIndex(testDir, generator, []);
-        const resolver = new ModuleResolver();
+        const resolver = new ModuleResolver(testDir);
         graph = new DependencyGraph(testDir, index, resolver);
         
         await graph.build();

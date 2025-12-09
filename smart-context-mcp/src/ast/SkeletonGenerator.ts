@@ -14,25 +14,25 @@ const LANGUAGE_CONFIG: Record<string, FoldQuery> = {
         query: `
             (statement_block) @fold
         `,
-        replacement: '{ ... }'
+        replacement: '{ /* ... implementation hidden ... */ }'
     },
     tsx: {
         query: `
             (statement_block) @fold
         `,
-        replacement: '{ ... }'
+        replacement: '{ /* ... implementation hidden ... */ }'
     },
     javascript: {
         query: `
             (statement_block) @fold
         `,
-        replacement: '{ ... }'
+        replacement: '{ /* ... implementation hidden ... */ }'
     },
     python: {
         query: `
             (block) @fold
         `,
-        replacement: '...',
+        replacement: '... # implementation hidden',
         shouldFold: (node: any) => {
             if (node.parent && node.parent.type === 'class_definition') {
                 return false;
@@ -64,6 +64,15 @@ export class SkeletonGenerator {
         let tree: any | null = null;
         try {
             tree = parser.parse(content);
+
+            const maybeHasError = tree?.rootNode?.hasError;
+            const rootHasError = typeof maybeHasError === 'function'
+                ? maybeHasError.call(tree.rootNode)
+                : Boolean(maybeHasError);
+
+            if (rootHasError) {
+                throw new Error('Tree-sitter parse error detected while building skeleton');
+            }
             const queryKey = `${lang.name}:${config.query}`; 
             let query = this.queryCache.get(queryKey);
             if (!query) {

@@ -24,6 +24,7 @@ import { FileSearchResult, ReadFragmentResult, EditResult, DirectoryTree, Edit }
 
 const readFileAsync = promisify(fs.readFile);
 const writeFileAsync = promisify(fs.writeFile);
+const statAsync = promisify(fs.stat);
 
 export class SmartContextServer {
     private server: Server;
@@ -42,7 +43,7 @@ export class SmartContextServer {
     private dependencyGraph: DependencyGraph;
     private referenceFinder: ReferenceFinder;
 
-    constructor(rootPath: string) {
+        constructor(rootPath: string) {
         console.error("DEBUG: SmartContextServer constructor started");
         this.server = new Server({
             name: "smart-context-mcp",
@@ -65,7 +66,7 @@ export class SmartContextServer {
         this.skeletonGenerator = new SkeletonGenerator();
         this.astManager = AstManager.getInstance();
         this.symbolIndex = new SymbolIndex(this.rootPath, this.skeletonGenerator, this.ignoreGlobs);
-        this.moduleResolver = new ModuleResolver();
+        this.moduleResolver = new ModuleResolver(this.rootPath);
         this.dependencyGraph = new DependencyGraph(this.rootPath, this.symbolIndex, this.moduleResolver);
         this.referenceFinder = new ReferenceFinder(this.rootPath, this.dependencyGraph, this.symbolIndex, this.skeletonGenerator, this.moduleResolver);
 
@@ -131,11 +132,12 @@ export class SmartContextServer {
                 tools: [
                     {
                         name: "read_file",
-                        description: "Reads the entire content of a file.",
+                        description: "Reads file content. By default, it returns a 'Smart Profile' (metadata, skeleton, dependencies) to save context. Set 'full: true' strictly only when you need the entire raw content.",
                         inputSchema: {
                             type: "object",
                             properties: {
-                                filePath: { type: "string" }
+                                filePath: { type: "string" },
+                                full: { type: "boolean", description: "If true, reads the entire raw content. Defaults to false (returns profile).", default: false }
                             },
                             required: ["filePath"]
                         }
@@ -361,7 +363,66 @@ export class SmartContextServer {
                 case "read_file": {
                     const absPath = this._getAbsPathAndVerify(args.filePath);
                     const content = await readFileAsync(absPath, 'utf-8');
-                    return { content: [{ type: "text", text: content }] };
+
+                    if (args?.full) {
+                        return { content: [{ type: "text", text: content }] };
+                    }
+
+                    const [stats, outgoingDeps, incomingRefs] = await Promise.all([
+                        statAsync(absPath),
+                        this.dependencyGraph.getDependencies(absPath, 'outgoing'),
+                        this.dependencyGraph.getDependencies(absPath, 'incoming')
+                    ]);
+
+                    let skeleton = `// Skeleton generation failed or not applicable for this file type.`;
+                    try {
+                        skeleton = await this.skeletonGenerator.generateSkeleton(absPath, content);
+                    } catch (error) {
+                        console.error(`Skeleton generation failed for ${absPath}:`, error);
+                        // Fallback to full content only if the file is small, otherwise show error message
+                        if (content.length < 5000) { // arbitrary limit, can be tuned
+                            skeleton = `// Skeleton generation failed. Displaying full content due to small file size.\n${content}`;
+                        } else {
+                            skeleton = `// Skeleton generation failed. File too large to display full content as fallback.`;
+                        }
+                    }
+
+                    const relativePath = path.relative(this.rootPath, absPath) || path.basename(absPath);
+                    const sizeKb = stats.size / 1024;
+                    const lineCount = content.length === 0 ? 0 : (content.split(/\r?\n/).filter(line => line.trim() !== '')).length;
+                    const extension = path.extname(absPath).replace(/^\./, '') || 'unknown';
+
+                    const formatList = (items: string[]) => {
+                        if (!items || items.length === 0) return 'None';
+                        return items.join(', ');
+                    };
+                    const incomingFormatted = (() => {
+                        if (!incomingRefs || incomingRefs.length === 0) return 'None';
+                        const top = incomingRefs.slice(0, 5);
+                        const remainder = incomingRefs.length - top.length;
+                        const base = top.join(', ');
+                        return remainder > 0 ? `${base}, and ${remainder} others` : base;
+                    })();
+
+                    const profile = [
+                        'Metadata',
+                        `- Path: ${relativePath}`,
+                        `- Size: ${sizeKb.toFixed(2)} KB`,
+                        `- Lines: ${lineCount}`,
+                        `- Language: ${extension}`,
+                        '',
+                        'Relationships',
+                        `- Imports: ${formatList(outgoingDeps || [])}`,
+                        `- Used By: ${incomingFormatted}`,
+                        '',
+                        'Skeleton',
+                        skeleton,
+                        '',
+                        'Hint',
+                        'Use read_fragment for focused slices or call read_file with full=true for the raw document.'
+                    ].join('\n');
+
+                    return { content: [{ type: "text", text: profile }] };
                 }
                 case "read_file_skeleton": {
                     const absPath = this._getAbsPathAndVerify(args.filePath);
@@ -576,4 +637,3 @@ if (import.meta.url === url.pathToFileURL(process.argv[1]).href) {
     const server = new SmartContextServer(process.cwd());
     server.run().catch(console.error);
 }
-

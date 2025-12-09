@@ -24,14 +24,24 @@ describe('ModuleResolver', () => {
         // Priority test: baz.ts and baz.js
         fs.writeFileSync(path.join(testDir, 'baz.ts'), '');
         fs.writeFileSync(path.join(testDir, 'baz.js'), '');
+
+        fs.writeFileSync(path.join(testDir, 'tsconfig.json'), JSON.stringify({
+            compilerOptions: {
+                baseUrl: '.',
+                paths: {
+                    '@utils/*': ['utils/*'],
+                    '@component': ['component.tsx']
+                }
+            }
+        }, null, 2));
     });
 
     afterAll(() => {
         if (fs.existsSync(testDir)) fs.rmSync(testDir, { recursive: true, force: true });
     });
 
-    beforeEach(() => {
-        resolver = new ModuleResolver();
+        beforeEach(() => {
+        resolver = new ModuleResolver(testDir);
     });
 
     it('should resolve relative path with extension', () => {
@@ -68,5 +78,17 @@ describe('ModuleResolver', () => {
         const absPath = path.join(testDir, 'foo.ts');
         const resolved = resolver.resolve('/any/context', absPath); // Context ignored for abs path
         expect(resolved).toBe(absPath);
+    });
+
+    it('should resolve tsconfig wildcard alias', () => {
+        const context = path.join(testDir, 'main.ts');
+        const resolved = resolver.resolve(context, '@utils/index');
+        expect(resolved).toBe(path.join(testDir, 'utils', 'index.ts'));
+    });
+
+    it('should resolve tsconfig direct alias', () => {
+        const context = path.join(testDir, 'main.ts');
+        const resolved = resolver.resolve(context, '@component');
+        expect(resolved).toBe(path.join(testDir, 'component.tsx'));
     });
 });

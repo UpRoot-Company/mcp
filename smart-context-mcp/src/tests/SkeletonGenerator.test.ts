@@ -17,7 +17,7 @@ describe('SkeletonGenerator', () => {
         }
         `;
         const skeleton = await generator.generateSkeleton('test.ts', code);
-        expect(skeleton).toContain('function add(a: number, b: number): number { ... }');
+        expect(skeleton).toContain('function add(a: number, b: number): number { /* ... implementation hidden ... */ }');
         expect(skeleton).not.toContain('return a + b');
     });
 
@@ -31,7 +31,7 @@ describe('SkeletonGenerator', () => {
         `;
         const skeleton = await generator.generateSkeleton('test.ts', code);
         expect(skeleton).toContain('class MyClass {');
-        expect(skeleton).toContain('method(): void { ... }');
+        expect(skeleton).toContain('method(): void { /* ... implementation hidden ... */ }');
         expect(skeleton).not.toContain("console.log('body')");
     });
 
@@ -45,7 +45,7 @@ describe('SkeletonGenerator', () => {
         `;
         const skeleton = await generator.generateSkeleton('test.ts', code);
         // Should become: function outer() { ... }
-        expect(skeleton).toContain('function outer() { ... }');
+        expect(skeleton).toContain('function outer() { /* ... implementation hidden ... */ }');
         expect(skeleton).not.toContain('if (true)');
     });
 

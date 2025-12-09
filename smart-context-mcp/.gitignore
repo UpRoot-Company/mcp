@@ -1,0 +1,12 @@
+# smart-context-mcp
+.mcp/
+
+# test output
+coverage/
+
+# build output
+dist/
+
+# documentation output
+
+docs/

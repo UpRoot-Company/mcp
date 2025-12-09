@@ -82,8 +82,20 @@ export class AstManager {
             try {
                 const wasmPath = this.getWasmPath(langName);
                 lang = await Language.load(wasmPath);
-                const wrappedLang = { ...lang, name: langName }; // Workaround for web-tree-sitter's Language.name getter issue
-                this.languages.set(langName, wrappedLang);
+
+                // Ensure the language object reports its name without breaking the native instance
+                try {
+                    Object.defineProperty(lang, 'name', {
+                        configurable: true,
+                        enumerable: true,
+                        value: langName
+                    });
+                } catch (defineError) {
+                    // Fallback assignment for environments that allow direct mutation
+                    (lang as any).name = langName;
+                }
+
+                this.languages.set(langName, lang);
             } catch (error) {
                 console.warn(`Failed to load grammar for language ${langName}:`, error);
                 throw error; // Re-throw to indicate specific language load failure
