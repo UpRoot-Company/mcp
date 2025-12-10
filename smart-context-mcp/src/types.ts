@@ -80,6 +80,26 @@ export interface ToolSuggestion {
     exampleArgs?: Record<string, unknown>;
 }
 
+export type ImpactRiskLevel = 'low' | 'medium' | 'high';
+
+export interface ImpactPreview {
+    filePath: string;
+    riskLevel: ImpactRiskLevel;
+    summary: {
+        incomingCount: number;
+        outgoingCount: number;
+        impactedFiles: string[];
+    };
+    editCount: number;
+    suggestedTests?: string[];
+    notes?: string[];
+}
+
+export interface BatchEditGuidance {
+    clusters: Array<{ files: string[]; reason: string }>;
+    companionSuggestions: Array<{ filePath: string; reason: string }>;
+}
+
 export interface MatchDiagnostics {
     attempts: {
         mode: string;
@@ -98,6 +118,10 @@ export interface EditResult {
     details?: ErrorDetails;
     suggestion?: ToolSuggestion;
     errorCode?: string;
+    warnings?: string[];
+    impactPreview?: ImpactPreview;
+    impactPreviews?: ImpactPreview[];
+    batchGuidance?: BatchEditGuidance;
     /**
      * Metadata about the edit operation, including inverse edits for undo.
      */
@@ -188,7 +212,7 @@ export interface BaseSymbolInfo {
 }
 
 export interface DefinitionSymbol extends BaseSymbolInfo {
-    type: 'class' | 'function' | 'method' | 'interface' | 'variable' | 'export_specifier';
+    type: 'class' | 'function' | 'method' | 'interface' | 'variable' | 'export_specifier' | 'type_alias';
     signature?: string;
     parameters?: string[];
     returnType?: string;
@@ -239,6 +263,70 @@ export interface CallGraphNode {
 export interface CallGraphResult {
     root: CallGraphNode;
     visitedNodes: Record<string, CallGraphNode>;
+    truncated: boolean;
+}
+
+export type TypeRelationKind = 'extends' | 'implements' | 'alias' | 'constraint' | 'usage';
+
+export interface TypeRelationInfo {
+    targetName: string;
+    relationKind: TypeRelationKind;
+    confidence: CallConfidence;
+}
+
+export interface TypeGraphEdge {
+    fromSymbolId: string;
+    toSymbolId: string;
+    relationKind: TypeRelationKind;
+    confidence: CallConfidence;
+}
+
+export interface TypeGraphNode {
+    symbolId: string;
+    symbolName: string;
+    filePath: string;
+    symbolType: DefinitionSymbol['type'];
+    range: DefinitionSymbol['range'];
+    parents: TypeGraphEdge[];
+    dependencies: TypeGraphEdge[];
+}
+
+export interface TypeGraphResult {
+    root: TypeGraphNode;
+    visitedNodes: Record<string, TypeGraphNode>;
+    truncated: boolean;
+}
+
+export type DataFlowStepType = 'definition' | 'parameter' | 'assignment' | 'mutation' | 'usage' | 'call_argument' | 'return';
+
+export type DataFlowRelation = 'next';
+
+export interface DataFlowStep {
+    id: string;
+    stepType: DataFlowStepType;
+    filePath: string;
+    range: {
+        startLine: number;
+        startColumn: number;
+        endLine: number;
+        endColumn: number;
+    };
+    textSnippet: string;
+    symbolName?: string;
+    metadata?: Record<string, unknown>;
+}
+
+export interface DataFlowEdge {
+    fromStepId: string;
+    toStepId: string;
+    relation: DataFlowRelation;
+}
+
+export interface DataFlowResult {
+    sourceStepId: string;
+    steps: Record<string, DataFlowStep>;
+    orderedStepIds: string[];
+    edges: DataFlowEdge[];
     truncated: boolean;
 }
 

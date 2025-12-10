@@ -176,6 +176,7 @@ export class SkeletonGenerator {
                         (function_declaration name: (identifier) @name) @definition
                         (method_definition name: (property_identifier) @name) @definition
                         (interface_declaration name: (type_identifier) @name) @definition
+                        (type_alias_declaration name: (type_identifier) @name) @definition
                         (variable_declarator name: (identifier) @name) @definition
                         (import_statement) @import
                         (export_statement) @export
@@ -777,6 +778,8 @@ export class SkeletonGenerator {
                 return 'function';
             case 'variable_declarator':
                 return 'variable';
+            case 'type_alias_declaration':
+                return 'type_alias';
             default:
                 return undefined;
         }

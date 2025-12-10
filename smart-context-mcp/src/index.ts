@@ -21,9 +21,11 @@ import { ModuleResolver } from "./ast/ModuleResolver.js";
 import { DependencyGraph } from "./ast/DependencyGraph.js";
 import { ReferenceFinder } from "./ast/ReferenceFinder.js";
 import { CallGraphBuilder, CallGraphDirection } from "./ast/CallGraphBuilder.js";
+import { TypeDependencyTracker, TypeDependencyDirection } from "./ast/TypeDependencyTracker.js";
+import { DataFlowTracer } from "./ast/DataFlowTracer.js";
 import { FileProfiler, FileMetadataAnalysis } from "./engine/FileProfiler.js";
 import { AgentWorkflowGuidance } from "./engine/AgentPlaybook.js";
-import { FileSearchResult, ReadFragmentResult, EditResult, DirectoryTree, Edit, EngineConfig, SmartFileProfile, SymbolInfo, ToolSuggestion } from "./types.js";
+import { FileSearchResult, ReadFragmentResult, EditResult, DirectoryTree, Edit, EngineConfig, SmartFileProfile, SymbolInfo, ToolSuggestion, ImpactPreview, BatchEditGuidance } from "./types.js";
 
 const readFileAsync = promisify(fs.readFile);
 const writeFileAsync = promisify(fs.writeFile);
@@ -47,6 +49,8 @@ export class SmartContextServer {
     private dependencyGraph: DependencyGraph;
     private referenceFinder: ReferenceFinder;
     private callGraphBuilder: CallGraphBuilder;
+    private typeDependencyTracker: TypeDependencyTracker;
+    private dataFlowTracer: DataFlowTracer;
     private sigintListener?: () => Promise<void>;
 
         constructor(rootPath: string) {
@@ -78,6 +82,8 @@ export class SmartContextServer {
         this.dependencyGraph = new DependencyGraph(this.rootPath, this.symbolIndex, this.moduleResolver);
         this.referenceFinder = new ReferenceFinder(this.rootPath, this.dependencyGraph, this.symbolIndex, this.skeletonGenerator, this.moduleResolver);
         this.callGraphBuilder = new CallGraphBuilder(this.rootPath, this.symbolIndex, this.moduleResolver);
+        this.typeDependencyTracker = new TypeDependencyTracker(this.rootPath, this.symbolIndex);
+        this.dataFlowTracer = new DataFlowTracer(this.rootPath, this.symbolIndex);
 
         const engineConfig: EngineConfig = {
             rootPath: this.rootPath,
@@ -144,6 +150,11 @@ export class SmartContextServer {
                 `SecurityViolation: File path is outside the allowed root directory.`);
         }
         return absPath;
+    }
+
+    private normalizeRelativePath(absPath: string): string {
+        const relative = path.relative(this.rootPath, absPath) || path.basename(absPath);
+        return relative.replace(/\\/g, '/');
     }
 
     private async buildSmartFileProfile(absPath: string, content: string, stats: fs.Stats): Promise<SmartFileProfile> {
@@ -284,6 +295,135 @@ export class SmartContextServer {
         };
     }
 
+    private async previewEditImpact(absPath: string, editCount: number): Promise<ImpactPreview | null> {
+        try {
+            const relativePath = this.normalizeRelativePath(absPath);
+            const [incoming, outgoing] = await Promise.all([
+                this.dependencyGraph.getTransitiveDependencies(absPath, 'incoming', 4),
+                this.dependencyGraph.getTransitiveDependencies(absPath, 'outgoing', 3)
+            ]);
+            const impactedFiles = Array.from(new Set([...incoming, ...outgoing])).slice(0, 25);
+            const suggestedTests = this.detectTestFiles(incoming);
+            const riskMetric = incoming.length * 2 + outgoing.length + editCount;
+            let riskLevel: ImpactPreview['riskLevel'] = 'low';
+            if (riskMetric >= 25) {
+                riskLevel = 'high';
+            } else if (riskMetric >= 8) {
+                riskLevel = 'medium';
+            }
+
+            const notes: string[] = [];
+            if (riskLevel === 'high') {
+                notes.push('High downstream or upstream reach detected. Consider splitting the edit or expanding tests.');
+            } else if (riskLevel === 'medium') {
+                notes.push('Multiple files depend on this target; double-check callers before applying edits.');
+            }
+            if (!suggestedTests.length) {
+                notes.push('No related test files detected for the impacted set.');
+            }
+
+            return {
+                filePath: relativePath,
+                riskLevel,
+                summary: {
+                    incomingCount: incoming.length,
+                    outgoingCount: outgoing.length,
+                    impactedFiles
+                },
+                editCount,
+                suggestedTests,
+                notes
+            };
+        } catch (error) {
+            if (ENABLE_DEBUG_LOGS) {
+                console.error('[ImpactPreview] Failed to compute impact preview', error);
+            }
+            return null;
+        }
+    }
+
+    private async buildBatchEditGuidance(fileEdits: { filePath: string }[]): Promise<BatchEditGuidance | null> {
+        if (!fileEdits || fileEdits.length <= 1) {
+            return null;
+        }
+
+        const normalized = fileEdits.map(entry => ({
+            abs: entry.filePath,
+            rel: this.normalizeRelativePath(entry.filePath)
+        }));
+        const editSet = new Set(normalized.map(entry => entry.rel));
+        const adjacency = new Map<string, Set<string>>();
+        const dependencyCache = new Map<string, { incoming: string[]; outgoing: string[] }>();
+
+        await Promise.all(normalized.map(async ({ abs, rel }) => {
+            const [incoming, outgoing] = await Promise.all([
+                this.dependencyGraph.getDependencies(abs, 'incoming'),
+                this.dependencyGraph.getDependencies(abs, 'outgoing')
+            ]);
+            dependencyCache.set(rel, { incoming, outgoing });
+            const neighborSet = new Set<string>();
+            for (const candidate of [...incoming, ...outgoing]) {
+                if (editSet.has(candidate)) {
+                    neighborSet.add(candidate);
+                }
+            }
+            adjacency.set(rel, neighborSet);
+        }));
+
+        const clusters: BatchEditGuidance['clusters'] = [];
+        const visited = new Set<string>();
+        for (const rel of editSet) {
+            if (visited.has(rel)) continue;
+            const queue = [rel];
+            const group: string[] = [];
+            while (queue.length > 0) {
+                const current = queue.shift()!;
+                if (visited.has(current)) continue;
+                visited.add(current);
+                group.push(current);
+                const neighbors = adjacency.get(current);
+                if (!neighbors) continue;
+                for (const neighbor of neighbors) {
+                    if (!visited.has(neighbor)) {
+                        queue.push(neighbor);
+                    }
+                }
+            }
+            if (group.length > 1) {
+                clusters.push({ files: group, reason: 'These files share direct import/export relationships.' });
+            }
+        }
+
+        const companionSuggestions: BatchEditGuidance['companionSuggestions'] = [];
+        const seenSuggestions = new Set<string>();
+        outer: for (const [rel, deps] of dependencyCache) {
+            for (const candidate of deps.incoming) {
+                if (editSet.has(candidate) || seenSuggestions.has(candidate)) continue;
+                seenSuggestions.add(candidate);
+                companionSuggestions.push({
+                    filePath: candidate,
+                    reason: `${candidate} imports or references ${rel}`
+                });
+                if (companionSuggestions.length >= 8) break outer;
+            }
+            for (const candidate of deps.outgoing) {
+                if (editSet.has(candidate) || seenSuggestions.has(candidate)) continue;
+                seenSuggestions.add(candidate);
+                companionSuggestions.push({
+                    filePath: candidate,
+                    reason: `${rel} depends on ${candidate}`
+                });
+                if (companionSuggestions.length >= 8) break outer;
+            }
+        }
+
+        if (clusters.length === 0 && companionSuggestions.length === 0) {
+            return null;
+        }
+
+        return { clusters, companionSuggestions };
+    }
+
     private _createErrorResponse(code: string, message: string, suggestion?: string | ToolSuggestion | ToolSuggestion[], details?: any): { isError: true; content: { type: "text"; text: string; }[] } {
         return {
             isError: true,
@@ -382,6 +522,34 @@ export class SmartContextServer {
                                 maxDepth: { type: "number", default: 3 }
                             },
                             required: ["symbolName", "filePath"]
+                        }
+                    },
+                    {
+                        name: "analyze_type_dependencies",
+                        description: "Traces TypeScript class/interface/type-alias relationships (extends, implements, alias, constraints).",
+                        inputSchema: {
+                            type: "object",
+                            properties: {
+                                symbolName: { type: "string" },
+                                filePath: { type: "string" },
+                                direction: { type: "string", enum: ["incoming", "outgoing", "both"], default: "both" },
+                                maxDepth: { type: "number", default: 2 }
+                            },
+                            required: ["symbolName", "filePath"]
+                        }
+                    },
+                    {
+                        name: "trace_data_flow",
+                        description: "Traces how a variable moves through definitions, assignments, calls, and returns.",
+                        inputSchema: {
+                            type: "object",
+                            properties: {
+                                variableName: { type: "string" },
+                                fromFile: { type: "string" },
+                                fromLine: { type: "number" },
+                                maxSteps: { type: "number", default: 10 }
+                            },
+                            required: ["variableName", "fromFile"]
                         }
                     },
                     {
@@ -672,6 +840,53 @@ export class SmartContextServer {
 
                     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
                 }
+                case "analyze_type_dependencies": {
+                    if (!args?.symbolName) {
+                        return this._createErrorResponse("MissingParameter", "Provide 'symbolName' to analyze_type_dependencies.");
+                    }
+                    if (!args?.filePath) {
+                        return this._createErrorResponse("MissingParameter", "Provide 'filePath' to analyze_type_dependencies.");
+                    }
+
+                    const absPath = this._getAbsPathAndVerify(args.filePath);
+                    const requestedDirection = typeof args.direction === "string" ? args.direction : "both";
+                    const direction: TypeDependencyDirection = ["incoming", "outgoing", "both"].includes(requestedDirection)
+                        ? requestedDirection as TypeDependencyDirection
+                        : "both";
+                    const maxDepth = typeof args.maxDepth === "number" ? args.maxDepth : 2;
+
+                    const result = await this.typeDependencyTracker.analyzeType(args.symbolName, absPath, direction, maxDepth);
+                    if (!result) {
+                        return this._createErrorResponse(
+                            "SymbolNotFound",
+                            `Could not locate type symbol '${args.symbolName}' in ${args.filePath}. Ensure the declaration exists and has been indexed.`
+                        );
+                    }
+
+                    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+                }
+                case "trace_data_flow": {
+                    if (!args?.variableName) {
+                        return this._createErrorResponse("MissingParameter", "Provide 'variableName' to trace_data_flow.");
+                    }
+                    if (!args?.fromFile) {
+                        return this._createErrorResponse("MissingParameter", "Provide 'fromFile' to trace_data_flow.");
+                    }
+
+                    const absPath = this._getAbsPathAndVerify(args.fromFile);
+                    const fromLine = typeof args.fromLine === "number" ? args.fromLine : undefined;
+                    const maxSteps = typeof args.maxSteps === "number" ? args.maxSteps : 10;
+
+                    const result = await this.dataFlowTracer.traceVariable(args.variableName, absPath, fromLine, maxSteps);
+                    if (!result) {
+                        return this._createErrorResponse(
+                            "DataFlowUnavailable",
+                            `Could not trace data flow for '${args.variableName}' in ${args.fromFile}. Ensure the variable exists in the provided context.`
+                        );
+                    }
+
+                    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+                }
                 case "find_symbol_references": {
                     const absPath = this._getAbsPathAndVerify(args.contextFile);
                     const results = await this.referenceFinder.findReferences(args.symbolName, absPath);
@@ -708,6 +923,8 @@ export class SmartContextServer {
                     this.moduleResolver.clearCache();
                     await this.dependencyGraph.build();
                     this.callGraphBuilder.clearCaches();
+                    this.typeDependencyTracker.clearCaches();
+                    this.typeDependencyTracker.clearCaches();
                     const status = await this.dependencyGraph.getIndexStatus();
                     return { content: [{ type: "text", text: JSON.stringify({ message: "Index rebuilt successfully", status }, null, 2) }] };
                 }
@@ -715,6 +932,7 @@ export class SmartContextServer {
                     const absPath = this._getAbsPathAndVerify(args.filePath);
                     await this.dependencyGraph.invalidateFile(absPath);
                     this.callGraphBuilder.invalidateFile(absPath);
+                    this.typeDependencyTracker.invalidateFile(absPath);
                     const status = await this.dependencyGraph.getIndexStatus();
                     return { content: [{ type: "text", text: JSON.stringify({ message: `Invalidated ${args.filePath}`, status }, null, 2) }] };
                 }
@@ -726,6 +944,7 @@ export class SmartContextServer {
                     const absDir = this._getAbsPathAndVerify(dirArg);
                     await this.dependencyGraph.invalidateDirectory(absDir);
                     this.callGraphBuilder.invalidateDirectory(absDir);
+                    this.typeDependencyTracker.invalidateDirectory(absDir);
                     const status = await this.dependencyGraph.getIndexStatus();
                     return { content: [{ type: "text", text: JSON.stringify({ message: `Invalidated directory ${dirArg}`, status }, null, 2) }] };
                 }
@@ -756,6 +975,7 @@ export class SmartContextServer {
                     const absPath = this._getAbsPathAndVerify(args.filePath);
                     await writeFileAsync(absPath, args.content);
                     this.callGraphBuilder.invalidateFile(absPath);
+                    this.typeDependencyTracker.invalidateFile(absPath);
                     return { content: [{ type: "text", text: `Successfully wrote to ${args.filePath}` }] };
                 }
                 case "edit_file": {
@@ -768,22 +988,51 @@ export class SmartContextServer {
                         delete edit.fuzzyMatch;
                         return edit;
                     });
+
+                    const impactPreview = await this.previewEditImpact(absPath, adaptedEdits.length);
                     
                     const result: EditResult = await this.editCoordinator.applyEdits(absPath, adaptedEdits as Edit[], args.dryRun);
                     
                     if (!result.success) {
                         const errorCode = result.errorCode || "EditFailed";
-                        const details = result.details;
+                        const details = {
+                            ...result.details,
+                            impactPreview
+                        };
                         return this._createErrorResponse(errorCode as string, result.message || "Unknown error", result.suggestion, details);
                     }
                     if (!args.dryRun) {
                         this.callGraphBuilder.invalidateFile(absPath);
+                        this.typeDependencyTracker.invalidateFile(absPath);
+                    }
+
+                    if (impactPreview) {
+                        result.impactPreview = impactPreview;
+                        if (impactPreview.riskLevel !== 'low') {
+                            const warningText = `Impact preview: ${impactPreview.summary.incomingCount} upstream and ${impactPreview.summary.outgoingCount} downstream files linked.`;
+                            result.warnings = [...(result.warnings ?? []), warningText];
+                            if (impactPreview.riskLevel === 'high') {
+                                result.warnings.push('High risk edit detected. Run analyze_symbol_impact before committing.');
+                                if (!result.suggestion) {
+                                    result.suggestion = {
+                                        toolName: "analyze_symbol_impact",
+                                        rationale: "Inspect symbol-level callers/callees for this file before finalizing a risky edit.",
+                                        exampleArgs: {
+                                            symbolName: path.basename(absPath).split('.')[0],
+                                            filePath: args.filePath,
+                                            direction: "both",
+                                            maxDepth: 3
+                                        }
+                                    };
+                                }
+                            }
+                        }
                     }
                     // History is now handled by EditCoordinator
                     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
                 }
                 case "batch_edit": {
-                    const fileEdits = args.fileEdits.map((fileEdit: any) => {
+                    const fileEdits: { filePath: string; edits: Edit[] }[] = args.fileEdits.map((fileEdit: any) => {
                          const absPath = this._getAbsPathAndVerify(fileEdit.filePath);
                          const adaptedEdits = fileEdit.edits.map((edit: any) => {
                             if (edit.fuzzyMatch === true) {
@@ -794,18 +1043,67 @@ export class SmartContextServer {
                         });
                         return { filePath: absPath, edits: adaptedEdits };
                     });
+
+                    const [impactPreviews, batchGuidance] = await Promise.all([
+                        Promise.all(fileEdits.map(entry => this.previewEditImpact(entry.filePath, entry.edits.length))),
+                        this.buildBatchEditGuidance(fileEdits)
+                    ]);
                     
                     const result: EditResult = await this.editCoordinator.applyBatchEdits(fileEdits, args.dryRun);
 
                      if (!result.success) {
                         const errorCode = result.errorCode || "BatchEditFailed";
-                        const details = result.details;
+                        const details = {
+                            ...result.details,
+                            impactPreviews: impactPreviews.filter((preview): preview is ImpactPreview => Boolean(preview)),
+                            batchGuidance
+                        };
                         return this._createErrorResponse(errorCode as string, result.message || "Unknown error", result.suggestion, details);
                     }
                     if (!args.dryRun) {
                         for (const fileEdit of fileEdits) {
                             this.callGraphBuilder.invalidateFile(fileEdit.filePath);
+                            this.typeDependencyTracker.invalidateFile(fileEdit.filePath);
                         }
+                    }
+
+                    const realizedPreviews = impactPreviews.filter((preview): preview is ImpactPreview => Boolean(preview));
+                    if (realizedPreviews.length > 0) {
+                        result.impactPreviews = realizedPreviews;
+                        const maxRisk = realizedPreviews.reduce((acc, preview) => {
+                            const score = preview.riskLevel === 'high' ? 2 : preview.riskLevel === 'medium' ? 1 : 0;
+                            return Math.max(acc, score);
+                        }, 0);
+                        if (maxRisk > 0) {
+                            const warning = maxRisk === 2
+                                ? 'High risk batch edit: multiple files have far-reaching dependencies.'
+                                : 'Medium risk batch edit: affected files share several dependencies.';
+                            result.warnings = [...(result.warnings ?? []), warning];
+                            if (!result.suggestion) {
+                                result.suggestion = {
+                                    toolName: maxRisk === 2 ? 'analyze_symbol_impact' : 'analyze_impact',
+                                    rationale: maxRisk === 2
+                                        ? 'Inspect symbol-level callers/callees before finalizing this batch edit.'
+                                        : 'Review file-level dependencies before applying all edits.',
+                                    exampleArgs: maxRisk === 2
+                                        ? {
+                                            symbolName: path.basename(fileEdits[0].filePath).split('.')[0],
+                                            filePath: path.relative(this.rootPath, fileEdits[0].filePath),
+                                            direction: 'both',
+                                            maxDepth: 3
+                                        }
+                                        : {
+                                            filePath: path.relative(this.rootPath, fileEdits[0].filePath),
+                                            direction: 'incoming',
+                                            maxDepth: 5
+                                        }
+                                };
+                            }
+                        }
+                    }
+
+                    if (batchGuidance) {
+                        result.batchGuidance = batchGuidance;
                     }
                     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
                 }
@@ -856,6 +1154,7 @@ export class SmartContextServer {
                     }
 
                     this.callGraphBuilder.clearCaches();
+                    this.typeDependencyTracker.clearCaches();
 
                     return {
                         content: [

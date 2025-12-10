@@ -55,6 +55,13 @@ export const AgentWorkflowGuidance: {
                 hint: "Prefer `lineRange` + `expectedHash`; set `normalization` to `whitespace`/`structural` when formatting is inconsistent."
             },
             {
+                name: "Impact Analysis",
+                description: "Preview how far the planned change propagates before mutating files.",
+                tools: ["analyze_symbol_impact", "analyze_impact", "trace_data_flow"],
+                hint: "Run these tools (or review the auto-preview) to understand callers, callees, and data-flow chains before `edit_file`.",
+                best_practice: "Pause when warnings flag medium/high risk. Split large impacts or add targeted tests before editing."
+            },
+            {
                 name: "Edit & Modify",
                 description: "Apply atomic edits and ensure they can be undone.",
                 tools: ["edit_file", "batch_edit"],
@@ -115,6 +122,6 @@ export const AgentWorkflowGuidance: {
         }
     ],
     metadata: {
-        version: "2025-12-09"
+        version: "2025-12-10"
     }
 };
