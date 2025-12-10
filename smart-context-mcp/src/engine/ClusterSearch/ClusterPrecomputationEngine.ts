@@ -1,3 +1,4 @@
+import * as path from "path";
 import { HotSpotDetector, HotSpot } from "./HotSpotDetector.js";
 import type { ClusterSearchOptions } from "./index.js";
 
@@ -109,9 +110,27 @@ export class ClusterPrecomputationEngine {
 
     private async precomputeHotSpot(hotSpot: HotSpot): Promise<void> {
         try {
-            await this.executeSearch(hotSpot.symbol.name, this.config.precomputeOptions);
+            const scopedQuery = this.buildScopedQuery(hotSpot);
+            await this.executeSearch(scopedQuery, this.config.precomputeOptions);
         } catch (error) {
             this.logger(`[ClusterPrecompute] failed for ${hotSpot.symbol.name}`, error);
         }
+    }
+
+    private buildScopedQuery(hotSpot: HotSpot): string {
+        const fileToken = this.extractFileHint(hotSpot.filePath);
+        return fileToken ? `${hotSpot.symbol.name} in:${fileToken}` : hotSpot.symbol.name;
+    }
+
+    private extractFileHint(filePath: string): string | null {
+        if (!filePath) {
+            return null;
+        }
+        const baseName = path.basename(filePath).trim();
+        if (!baseName) {
+            return null;
+        }
+        // Query parser splits tokens on whitespace, so use the first segment as a stable hint.
+        return baseName.split(/\s+/)[0];
     }
 }

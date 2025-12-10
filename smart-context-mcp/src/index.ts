@@ -112,6 +112,9 @@ export class SmartContextServer {
                 }
                 return this.astManager.warmup();
             })
+            .then(() => {
+                this.clusterSearchEngine.startBackgroundTasks();
+            })
             .catch(error => {
                 if (ENABLE_DEBUG_LOGS) {
                     console.error("AstManager initialization failed:", error);
@@ -119,7 +122,6 @@ export class SmartContextServer {
             });
 
         this.setupHandlers();
-        this.clusterSearchEngine.startBackgroundTasks();
         this.server.onerror = (error) => console.error("[MCP Error]", error);
 
         this.sigintListener = async () => {
