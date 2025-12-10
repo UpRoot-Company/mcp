@@ -2,7 +2,7 @@ import { exec } from "child_process";
 import { promisify } from "util";
 import * as path from "path";
 import { BM25Ranking } from "./Ranking.js";
-import { FileSearchResult, Document } from "../types.js";
+import { FileSearchResult, Document, SearchOptions } from "../types.js";
 
 const execAsync = promisify(exec);
 
@@ -16,7 +16,7 @@ const BUILTIN_EXCLUDE_GLOBS = [
     "**/*.spec.*"
 ];
 
-export interface ScoutArgs {
+export interface ScoutArgs extends SearchOptions {
     keywords?: string[];
     patterns?: string[];
     includeGlobs?: string[];
@@ -35,22 +35,41 @@ export class SearchEngine {
         this.defaultExcludeGlobs = Array.from(new Set(combined));
     }
 
-    public escapeRegExp(value: string): string {
-        return `\\b${value.replace(/[.*+?^${}()|[\\]\\]/g, "\\$&")}\\b`;
+    public escapeRegExp(value: string, options: SearchOptions = {}): string {
+        const escaped = value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        return options.wordBoundary ? `\\b${escaped}\\b` : escaped;
     }
 
     public async runGrep(
         searchPattern: string,
         currentGrepCwd: string,
-        excludeDirNames: string[] = [],
-        gitDiffMode: boolean = false
+        options: {
+            excludeDirNames?: string[];
+            excludeFilePatterns?: string[];
+            gitDiffMode?: boolean;
+        } = {}
     ): Promise<FileSearchResult[]> {
+        const { excludeDirNames = [], excludeFilePatterns = [], gitDiffMode = false } = options;
         const escapedPattern = searchPattern.replace(/"/g, '\\"');
-        let command = `grep -n -r -I -E "${escapedPattern}" .`;
-
+        const exclusionSegments: string[] = [];
         if (excludeDirNames.length > 0) {
-            command += ` ${excludeDirNames.map(dir => `--exclude-dir='${dir}'`).join(' ')}`;
+            exclusionSegments.push(...excludeDirNames.map(dir => `--exclude-dir='${dir}'`));
         }
+        if (excludeFilePatterns.length > 0) {
+            exclusionSegments.push(...excludeFilePatterns.map(pattern => `--exclude='${pattern}'`));
+        }
+        const commandParts = [
+            "grep",
+            "-n",
+            "-r",
+            "-I",
+            ...exclusionSegments,
+            "-E",
+            `"${escapedPattern}"`,
+            "."
+        ];
+        const command = commandParts.filter(Boolean).join(' ');
+
         if (gitDiffMode) {
             console.warn('gitDiffMode is not yet fully implemented.');
         }
@@ -107,14 +126,14 @@ export class SearchEngine {
     }
 
     public async scout(args: ScoutArgs): Promise<FileSearchResult[]> {
-        const { keywords, patterns, includeGlobs, excludeGlobs, gitDiffMode, basePath } = args;
+        const { keywords, patterns, includeGlobs, excludeGlobs, gitDiffMode, basePath, wordBoundary } = args;
 
         if ((!keywords || keywords.length === 0) && (!patterns || patterns.length === 0)) {
             throw new Error('At least one keyword or pattern is required.');
         }
 
         const searchConfigs = [
-            ...(keywords || []).map((k) => ({ pattern: this.escapeRegExp(k) })),
+            ...(keywords || []).map((k) => ({ pattern: this.escapeRegExp(k, { wordBoundary }) })),
             ...(patterns || []).map((p) => ({ pattern: p }))
         ];
 
@@ -126,9 +145,14 @@ export class SearchEngine {
             : undefined;
         const excludeRegexes = combinedExcludeGlobs.map(glob => this.globToRegExp(glob));
         const excludeDirNames = this.extractDirectoryNamesFromGlobs(combinedExcludeGlobs);
+        const excludeFilePatterns = this.extractFilePatternsFromGlobs(combinedExcludeGlobs);
 
         for (const config of searchConfigs) {
-            const matches = await this.runGrep(config.pattern, baseCwd, excludeDirNames, gitDiffMode);
+            const matches = await this.runGrep(config.pattern, baseCwd, {
+                excludeDirNames,
+                excludeFilePatterns,
+                gitDiffMode
+            });
             const filteredMatches = matches
                 .map(match => {
                     const relativePath = this.normalizeRelativePath(match.filePath, baseCwd);
@@ -142,22 +166,40 @@ export class SearchEngine {
             allMatches.push(...filteredMatches);
         }
 
-        const uniqueMatches = Array.from(new Map(allMatches.map(match => [`${match.filePath}:${match.lineNumber}`, match])).values());
+        const matchMap = new Map<string, FileSearchResult>();
+        for (const match of allMatches) {
+            matchMap.set(`${match.filePath}:${match.lineNumber}`, match);
+        }
+        const uniqueMatches = Array.from(matchMap.values());
 
         const scoredDocuments: Document[] = uniqueMatches.map(match => ({
             id: `${match.filePath}:${match.lineNumber}`,
             text: match.preview,
-            score: 0
+            score: 0,
+            filePath: match.filePath
         }));
 
         const searchQuery = [...(keywords || []), ...(patterns || [])].join(' ');
         const rankedDocuments = this.bm25Ranking.rank(scoredDocuments, searchQuery);
 
         const rankedFileMatches: FileSearchResult[] = rankedDocuments.map((rankedDoc: Document) => {
-            const originalMatch = uniqueMatches.find(um => `${um.filePath}:${um.lineNumber}` === rankedDoc.id)!;
+            const originalMatch = matchMap.get(rankedDoc.id);
+            if (!originalMatch) {
+                const separatorIndex = rankedDoc.id.lastIndexOf(':');
+                const fallbackFilePath = rankedDoc.filePath ?? (separatorIndex !== -1 ? rankedDoc.id.slice(0, separatorIndex) : rankedDoc.id);
+                const fallbackLineNumber = separatorIndex !== -1 ? parseInt(rankedDoc.id.slice(separatorIndex + 1), 10) || 0 : 0;
+                return {
+                    filePath: fallbackFilePath,
+                    lineNumber: fallbackLineNumber,
+                    preview: '',
+                    score: rankedDoc.score,
+                    scoreDetails: rankedDoc.scoreDetails
+                };
+            }
             return {
                 ...originalMatch,
-                score: rankedDoc.score
+                score: rankedDoc.score,
+                scoreDetails: rankedDoc.scoreDetails
             };
         });
 
@@ -230,5 +272,38 @@ export class SearchEngine {
             dirs.add(candidate);
         }
         return Array.from(dirs);
+    }
+
+    private extractFilePatternsFromGlobs(globs: string[]): string[] {
+        const patterns = new Set<string>();
+        for (const glob of globs) {
+            let normalized = glob.replace(/\\/g, '/').replace(/^\.\//, '');
+            if (!normalized) {
+                continue;
+            }
+            const explicitlyDirectory = normalized.endsWith('/') || normalized.endsWith('/**');
+            if (normalized.endsWith('/**')) {
+                normalized = normalized.slice(0, -3);
+            }
+            if (explicitlyDirectory) {
+                normalized = normalized.replace(/\/$/, '');
+            }
+            const segments = normalized.split('/').filter(Boolean);
+            if (segments.length === 0) {
+                continue;
+            }
+            if (explicitlyDirectory) {
+                continue;
+            }
+            const lastSegment = segments[segments.length - 1];
+            const hasWildcard = /[*?]/.test(lastSegment);
+            const looksLikeFile = lastSegment.includes('.') || hasWildcard;
+            const endsWithWildcardOnly = lastSegment === '**';
+            if (!looksLikeFile || endsWithWildcardOnly) {
+                continue;
+            }
+            patterns.add(lastSegment);
+        }
+        return Array.from(patterns);
     }
 }

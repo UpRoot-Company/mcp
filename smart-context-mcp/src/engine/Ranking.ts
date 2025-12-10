@@ -1,5 +1,6 @@
 
-import { Document } from "../types.js";
+import * as path from "path";
+import { Document, ScoreDetails } from "../types.js";
 
 export class BM25Ranking {
     private k1: number;
@@ -15,9 +16,7 @@ export class BM25Ranking {
 
         const tokenizedDocs = documents.map(doc => ({
             id: doc.id,
-            originalText: doc.text,
-            tokens: this.tokenize(doc.text),
-            score: 0
+            tokens: this.tokenize(doc.text)
         }));
 
         const avgdl = tokenizedDocs.reduce((sum, doc) => sum + doc.tokens.length, 0) / tokenizedDocs.length;
@@ -30,9 +29,10 @@ export class BM25Ranking {
             idfMap.set(term, idf);
         });
 
+        const contentScores = new Map<string, number>();
         tokenizedDocs.forEach(doc => {
             let docScore = 0;
-            const docLength = doc.tokens.length;
+            const docLength = doc.tokens.length || 1;
             queryTokens.forEach(term => {
                 const tf = doc.tokens.filter(t => t === term).length;
                 if (tf > 0) {
@@ -42,16 +42,84 @@ export class BM25Ranking {
                     docScore += idf * (numerator / denominator);
                 }
             });
-            const originalDoc = documents.find(originalDoc => originalDoc.id === doc.id);
-            if (originalDoc) {
-                originalDoc.score = docScore;
-            }
+            contentScores.set(doc.id, docScore);
         });
 
-        return documents.sort((a, b) => b.score - a.score);
+        const rankedDocuments = documents.map(doc => {
+            const contentScore = contentScores.get(doc.id) ?? 0;
+            const derivedFilePath = doc.filePath ?? this.extractFilePathFromId(doc.id);
+            const filenameImpact = this.calculateFilenameMultiplier(derivedFilePath, queryTokens);
+            const depthMultiplier = this.calculateDepthMultiplier(derivedFilePath);
+            const totalScore = contentScore * filenameImpact.multiplier * depthMultiplier;
+            const details: ScoreDetails = {
+                contentScore,
+                filenameMultiplier: filenameImpact.multiplier,
+                depthMultiplier,
+                totalScore,
+                filenameMatchType: filenameImpact.matchType
+            };
+            doc.score = totalScore;
+            doc.filePath = derivedFilePath ?? doc.filePath;
+            doc.scoreDetails = details;
+            return doc;
+        });
+
+        return rankedDocuments.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
     }
 
     private tokenize(text: string): string[] {
         return text.toLowerCase().split(/[^a-z0-9]+/).filter(t => t.length > 0);
+    }
+
+    private extractFilePathFromId(id: string): string | undefined {
+        if (!id.includes(':')) {
+            return id;
+        }
+        const lastColon = id.lastIndexOf(':');
+        if (lastColon === -1) {
+            return id;
+        }
+        return id.slice(0, lastColon);
+    }
+
+    private calculateFilenameMultiplier(filePath: string | undefined, queryTokens: string[]): { multiplier: number; matchType: "exact" | "partial" | "none" } {
+        if (!filePath || queryTokens.length === 0) {
+            return { multiplier: 1, matchType: "none" };
+        }
+        const baseName = path.basename(filePath).toLowerCase();
+        const trimmedBase = baseName.startsWith('.') ? baseName.slice(1) : baseName;
+        const ext = path.extname(trimmedBase);
+        const stem = ext ? trimmedBase.slice(0, -ext.length) : trimmedBase;
+        let multiplier = 1;
+        let matchType: "exact" | "partial" | "none" = "none";
+
+        for (const token of queryTokens) {
+            const normalizedToken = token.toLowerCase();
+            if (!normalizedToken) {
+                continue;
+            }
+            const isExactMatch = stem === normalizedToken || trimmedBase === normalizedToken || baseName === normalizedToken;
+            if (isExactMatch) {
+                multiplier = 10;
+                matchType = "exact";
+                break;
+            }
+            const isSubstring = stem.includes(normalizedToken) || trimmedBase.includes(normalizedToken) || baseName.includes(normalizedToken);
+            if (isSubstring) {
+                multiplier = Math.max(multiplier, 5);
+                matchType = "partial";
+            }
+        }
+
+        return { multiplier, matchType };
+    }
+
+    private calculateDepthMultiplier(filePath: string | undefined): number {
+        if (!filePath) {
+            return 1;
+        }
+        const normalizedSegments = filePath.split(/[\\/]/).filter(segment => segment.length > 0);
+        const depth = Math.max(normalizedSegments.length - 1, 0);
+        return 1 / (depth + 1);
     }
 }

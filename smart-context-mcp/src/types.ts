@@ -4,6 +4,20 @@ export interface FileSearchResult {
     lineNumber: number;
     preview: string;
     score?: number;
+    scoreDetails?: ScoreDetails;
+}
+
+export interface SearchOptions {
+    /** Forces whole-word matching when true. Defaults to substring search. */
+    wordBoundary?: boolean;
+}
+
+export interface ScoreDetails {
+    contentScore: number;
+    filenameMultiplier: number;
+    depthMultiplier: number;
+    totalScore: number;
+    filenameMatchType: "exact" | "partial" | "none";
 }
 
 export interface ReadFragmentResult {
@@ -124,6 +138,8 @@ export interface Document {
     id: string; // Document ID (e.g. filePath)
     text: string; // The text content of the document
     score: number; // BM25 score
+    filePath?: string;
+    scoreDetails?: ScoreDetails;
 }
 
 export interface FileMatch {
