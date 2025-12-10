@@ -20,6 +20,17 @@ export interface ScoreDetails {
     filenameMatchType: "exact" | "partial" | "none";
 }
 
+export type CallType = "direct" | "method" | "constructor" | "callback" | "optional" | "unknown";
+
+export interface CallSiteInfo {
+    calleeName: string;
+    calleeObject?: string;
+    callType: CallType;
+    line: number;
+    column: number;
+    text?: string;
+}
+
 export interface ReadFragmentResult {
     filePath: string;
     content: string;
@@ -181,6 +192,7 @@ export interface DefinitionSymbol extends BaseSymbolInfo {
     signature?: string;
     parameters?: string[];
     returnType?: string;
+    calls?: CallSiteInfo[];
 }
 
 export interface ImportSymbol extends BaseSymbolInfo {
@@ -202,6 +214,33 @@ export interface ExportSymbol extends BaseSymbolInfo {
 
 
 export type SymbolInfo = DefinitionSymbol | ImportSymbol | ExportSymbol;
+
+export type CallConfidence = "definite" | "possible" | "inferred";
+
+export interface CallGraphEdge {
+    fromSymbolId: string;
+    toSymbolId: string;
+    callType: CallType;
+    confidence: CallConfidence;
+    line: number;
+    column: number;
+}
+
+export interface CallGraphNode {
+    symbolId: string;
+    symbolName: string;
+    filePath: string;
+    symbolType: DefinitionSymbol['type'];
+    range: DefinitionSymbol['range'];
+    callers: CallGraphEdge[];
+    callees: CallGraphEdge[];
+}
+
+export interface CallGraphResult {
+    root: CallGraphNode;
+    visitedNodes: Record<string, CallGraphNode>;
+    truncated: boolean;
+}
 
 export interface SmartFileProfile {
     metadata: {

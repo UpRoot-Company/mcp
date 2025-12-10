@@ -20,6 +20,7 @@ import { SymbolIndex } from "./ast/SymbolIndex.js";
 import { ModuleResolver } from "./ast/ModuleResolver.js";
 import { DependencyGraph } from "./ast/DependencyGraph.js";
 import { ReferenceFinder } from "./ast/ReferenceFinder.js";
+import { CallGraphBuilder, CallGraphDirection } from "./ast/CallGraphBuilder.js";
 import { FileProfiler, FileMetadataAnalysis } from "./engine/FileProfiler.js";
 import { AgentWorkflowGuidance } from "./engine/AgentPlaybook.js";
 import { FileSearchResult, ReadFragmentResult, EditResult, DirectoryTree, Edit, EngineConfig, SmartFileProfile, SymbolInfo, ToolSuggestion } from "./types.js";
@@ -45,6 +46,7 @@ export class SmartContextServer {
     private moduleResolver: ModuleResolver;
     private dependencyGraph: DependencyGraph;
     private referenceFinder: ReferenceFinder;
+    private callGraphBuilder: CallGraphBuilder;
     private sigintListener?: () => Promise<void>;
 
         constructor(rootPath: string) {
@@ -75,6 +77,7 @@ export class SmartContextServer {
         this.moduleResolver = new ModuleResolver(this.rootPath);
         this.dependencyGraph = new DependencyGraph(this.rootPath, this.symbolIndex, this.moduleResolver);
         this.referenceFinder = new ReferenceFinder(this.rootPath, this.dependencyGraph, this.symbolIndex, this.skeletonGenerator, this.moduleResolver);
+        this.callGraphBuilder = new CallGraphBuilder(this.rootPath, this.symbolIndex, this.moduleResolver);
 
         const engineConfig: EngineConfig = {
             rootPath: this.rootPath,
@@ -368,6 +371,20 @@ export class SmartContextServer {
                         }
                     },
                     {
+                        name: "analyze_symbol_impact",
+                        description: "Builds a symbol-level call graph to understand upstream/downstream impact chains.",
+                        inputSchema: {
+                            type: "object",
+                            properties: {
+                                symbolName: { type: "string" },
+                                filePath: { type: "string" },
+                                direction: { type: "string", enum: ["upstream", "downstream", "both"], default: "both" },
+                                maxDepth: { type: "number", default: 3 }
+                            },
+                            required: ["symbolName", "filePath"]
+                        }
+                    },
+                    {
                         name: "find_symbol_references",
                         description: "Finds all references (usages) of a symbol using AST-based static analysis.",
                         inputSchema: {
@@ -630,6 +647,31 @@ export class SmartContextServer {
                     const result = await this.dependencyGraph.getTransitiveDependencies(absPath, direction, maxDepth);
                     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
                 }
+                case "analyze_symbol_impact": {
+                    if (!args?.symbolName) {
+                        return this._createErrorResponse("MissingParameter", "Provide 'symbolName' to analyze_symbol_impact.");
+                    }
+                    if (!args?.filePath) {
+                        return this._createErrorResponse("MissingParameter", "Provide 'filePath' to analyze_symbol_impact.");
+                    }
+
+                    const absPath = this._getAbsPathAndVerify(args.filePath);
+                    const requestedDirection = typeof args.direction === "string" ? args.direction : "both";
+                    const direction: CallGraphDirection = ["upstream", "downstream", "both"].includes(requestedDirection)
+                        ? requestedDirection as CallGraphDirection
+                        : "both";
+                    const maxDepth = typeof args.maxDepth === "number" ? args.maxDepth : 3;
+
+                    const result = await this.callGraphBuilder.analyzeSymbol(args.symbolName, absPath, direction, maxDepth);
+                    if (!result) {
+                        return this._createErrorResponse(
+                            "SymbolNotFound",
+                            `Could not locate symbol '${args.symbolName}' in ${args.filePath}. Ensure the definition exists and has been indexed.`
+                        );
+                    }
+
+                    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+                }
                 case "find_symbol_references": {
                     const absPath = this._getAbsPathAndVerify(args.contextFile);
                     const results = await this.referenceFinder.findReferences(args.symbolName, absPath);
@@ -665,12 +707,14 @@ export class SmartContextServer {
                 case "rebuild_index": {
                     this.moduleResolver.clearCache();
                     await this.dependencyGraph.build();
+                    this.callGraphBuilder.clearCaches();
                     const status = await this.dependencyGraph.getIndexStatus();
                     return { content: [{ type: "text", text: JSON.stringify({ message: "Index rebuilt successfully", status }, null, 2) }] };
                 }
                 case "invalidate_index_file": {
                     const absPath = this._getAbsPathAndVerify(args.filePath);
                     await this.dependencyGraph.invalidateFile(absPath);
+                    this.callGraphBuilder.invalidateFile(absPath);
                     const status = await this.dependencyGraph.getIndexStatus();
                     return { content: [{ type: "text", text: JSON.stringify({ message: `Invalidated ${args.filePath}`, status }, null, 2) }] };
                 }
@@ -681,6 +725,7 @@ export class SmartContextServer {
                     }
                     const absDir = this._getAbsPathAndVerify(dirArg);
                     await this.dependencyGraph.invalidateDirectory(absDir);
+                    this.callGraphBuilder.invalidateDirectory(absDir);
                     const status = await this.dependencyGraph.getIndexStatus();
                     return { content: [{ type: "text", text: JSON.stringify({ message: `Invalidated directory ${dirArg}`, status }, null, 2) }] };
                 }
@@ -710,6 +755,7 @@ export class SmartContextServer {
                 case "write_file": {
                     const absPath = this._getAbsPathAndVerify(args.filePath);
                     await writeFileAsync(absPath, args.content);
+                    this.callGraphBuilder.invalidateFile(absPath);
                     return { content: [{ type: "text", text: `Successfully wrote to ${args.filePath}` }] };
                 }
                 case "edit_file": {
@@ -729,6 +775,9 @@ export class SmartContextServer {
                         const errorCode = result.errorCode || "EditFailed";
                         const details = result.details;
                         return this._createErrorResponse(errorCode as string, result.message || "Unknown error", result.suggestion, details);
+                    }
+                    if (!args.dryRun) {
+                        this.callGraphBuilder.invalidateFile(absPath);
                     }
                     // History is now handled by EditCoordinator
                     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
@@ -752,6 +801,11 @@ export class SmartContextServer {
                         const errorCode = result.errorCode || "BatchEditFailed";
                         const details = result.details;
                         return this._createErrorResponse(errorCode as string, result.message || "Unknown error", result.suggestion, details);
+                    }
+                    if (!args.dryRun) {
+                        for (const fileEdit of fileEdits) {
+                            this.callGraphBuilder.invalidateFile(fileEdit.filePath);
+                        }
                     }
                     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
                 }
@@ -801,6 +855,8 @@ export class SmartContextServer {
                         return this._createErrorResponse(errorCode as string, result.message || "Unknown error during undo operation", result.suggestion, details);
                     }
 
+                    this.callGraphBuilder.clearCaches();
+
                     return {
                         content: [
                             {
@@ -818,6 +874,8 @@ export class SmartContextServer {
                         const details = result.details;
                         return this._createErrorResponse(errorCode as string, result.message || "Unknown error during redo operation", result.suggestion, details);
                     }
+
+                    this.callGraphBuilder.clearCaches();
 
                     return {
                         content: [
