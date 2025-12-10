@@ -11,6 +11,7 @@ import { SeedFinder } from '../engine/ClusterSearch/SeedFinder.js';
 import { ClusterBuilder } from '../engine/ClusterSearch/ClusterBuilder.js';
 import { ClusterSearchEngine } from '../engine/ClusterSearch/index.js';
 import { ExpansionState } from '../types/cluster.js';
+import { DependencyGraph } from '../ast/DependencyGraph.js';
 
 const testDir = path.join(process.cwd(), 'src', 'tests', 'cluster_search_env');
 
@@ -25,6 +26,7 @@ describe('ClusterSearch Phase 2 Components', () => {
     let moduleResolver: ModuleResolver;
     let callGraphBuilder: CallGraphBuilder;
     let typeDependencyTracker: TypeDependencyTracker;
+    let dependencyGraph: DependencyGraph;
 
     beforeAll(async () => {
         await AstManager.getInstance().init();
@@ -79,6 +81,7 @@ export function teardownUser(name: string) {
         moduleResolver = new ModuleResolver(testDir);
         callGraphBuilder = new CallGraphBuilder(testDir, symbolIndex, moduleResolver);
         typeDependencyTracker = new TypeDependencyTracker(testDir, symbolIndex);
+        dependencyGraph = new DependencyGraph(testDir, symbolIndex, moduleResolver);
     });
 
     it('parses filters and intent from query strings', () => {
@@ -147,7 +150,10 @@ export function teardownUser(name: string) {
             rootPath: testDir,
             symbolIndex,
             callGraphBuilder,
-            typeDependencyTracker
+            typeDependencyTracker,
+            dependencyGraph
+        }, {
+            precomputation: { enabled: false }
         });
         const response = await engine.search('createUser');
 
@@ -158,5 +164,27 @@ export function teardownUser(name: string) {
             expect.arrayContaining([`${cluster.clusterId}:callers`, `${cluster.clusterId}:callees`, `${cluster.clusterId}:typeFamily`])
         );
         expect(cluster.metadata.clusterType).toBe('module-boundary');
+    });
+
+    it('returns cached results for repeated queries and invalidates on file changes', async () => {
+        const engine = new ClusterSearchEngine({
+            rootPath: testDir,
+            symbolIndex,
+            callGraphBuilder,
+            typeDependencyTracker,
+            dependencyGraph
+        }, {
+            precomputation: { enabled: false }
+        });
+
+        const first = await engine.search('createUser');
+        expect(first.searchTime).toMatch(/ms$/);
+
+        const second = await engine.search('createUser');
+        expect(second.searchTime).toMatch(/\(cached\)$/);
+
+        engine.invalidateFile(path.join(testDir, 'services/user_service.ts'));
+        const third = await engine.search('createUser');
+        expect(third.searchTime).not.toMatch(/\(cached\)$/);
     });
 });
