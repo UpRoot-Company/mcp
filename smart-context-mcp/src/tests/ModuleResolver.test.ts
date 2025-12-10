@@ -25,6 +25,23 @@ describe('ModuleResolver', () => {
         fs.writeFileSync(path.join(testDir, 'baz.ts'), '');
         fs.writeFileSync(path.join(testDir, 'baz.js'), '');
 
+        // Bundler fallback target
+        fs.mkdirSync(path.join(testDir, 'shared'));
+        fs.writeFileSync(path.join(testDir, 'shared', 'Button.ts'), '');
+
+        // Monorepo-style tsconfig
+        const widgetDir = path.join(testDir, 'packages', 'widgets');
+        fs.mkdirSync(widgetDir, { recursive: true });
+        fs.writeFileSync(path.join(widgetDir, 'widget.ts'), '');
+        fs.writeFileSync(path.join(widgetDir, 'tsconfig.json'), JSON.stringify({
+            compilerOptions: {
+                baseUrl: '.',
+                paths: {
+                    '@widgets/*': ['*']
+                }
+            }
+        }, null, 2));
+
         fs.writeFileSync(path.join(testDir, 'tsconfig.json'), JSON.stringify({
             compilerOptions: {
                 baseUrl: '.',
@@ -90,5 +107,18 @@ describe('ModuleResolver', () => {
         const context = path.join(testDir, 'main.ts');
         const resolved = resolver.resolve(context, '@component');
         expect(resolved).toBe(path.join(testDir, 'component.tsx'));
+    });
+
+    it('should discover nested tsconfig aliases automatically', () => {
+        const context = path.join(testDir, 'main.ts');
+        const resolved = resolver.resolve(context, '@widgets/widget');
+        expect(resolved).toBe(path.join(testDir, 'packages', 'widgets', 'widget.ts'));
+    });
+
+    it('should use bundler-style fallback when configured', () => {
+        const bundlerResolver = new ModuleResolver({ rootPath: testDir, fallbackResolution: 'bundler' });
+        const context = path.join(testDir, 'main.ts');
+        const resolved = bundlerResolver.resolve(context, 'shared/Button');
+        expect(resolved).toBe(path.join(testDir, 'shared', 'Button.ts'));
     });
 });

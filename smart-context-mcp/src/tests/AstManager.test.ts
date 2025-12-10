@@ -3,9 +3,10 @@ import { AstManager } from '../ast/AstManager.js';
 describe('AstManager', () => {
     let astManager: AstManager;
 
-    beforeAll(async () => {
+    beforeEach(async () => {
+        AstManager.resetForTesting();
         astManager = AstManager.getInstance();
-        await astManager.init();
+        await astManager.init({ parserBackend: 'wasm' });
     });
 
     it('should be a singleton', () => {
@@ -51,5 +52,14 @@ describe('AstManager', () => {
         // Simple JSX check
         const tree = parser.parse('const el = <div>Hello</div>;');
         expect(tree.rootNode.text).toBe('const el = <div>Hello</div>;');
+    });
+
+    it('should allow switching to js backend via config', async () => {
+        AstManager.resetForTesting();
+        const manager = AstManager.getInstance();
+        await manager.init({ parserBackend: 'js' });
+        expect(manager.getActiveBackend()).toBe('js');
+        const parser = await manager.getParserForFile('fallback.ts');
+        expect(parser).not.toBeNull();
     });
 });

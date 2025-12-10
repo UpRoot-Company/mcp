@@ -4,6 +4,7 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import { AstManager } from "../ast/AstManager.js"; // Import AstManager
+import { SmartFileProfile } from "../types.js";
 
 describe('SmartContextServer - read_file', () => {
     let server: SmartContextServer;
@@ -87,69 +88,66 @@ function doSomethingIsolated() {
     it('should return a Smart File Profile by default (full: false)', async () => {
         const args = { filePath: path.relative(testRootDir, fileA_Path) };
         const response = await (server as any).handleCallTool('read_file', args);
-        const profile = response.content[0].text;
+        const profile: SmartFileProfile = JSON.parse(response.content[0].text);
 
-        expect(profile).toContain('Metadata');
-        expect(profile).toContain('- Path: src/fileA.ts'); // Check for a specific part of the path to avoid issues with full path in temp dir
-        expect(profile).toContain('Relationships');
-        expect(profile).toContain('- Imports: src/fileB.ts');
-        expect(profile).toContain('- Used By: None');
-        expect(profile).toContain('Skeleton');
-        expect(profile).toContain('Hint');
+        expect(profile.metadata.relativePath).toBe('src/fileA.ts');
+        expect(profile.metadata.newlineStyle).toBeDefined();
+        expect(profile.metadata.indentSize).toBeGreaterThan(0);
+        expect(profile.usage.outgoingFiles).toContain('src/fileB.ts');
+        expect(profile.usage.incomingFiles).toEqual([]);
+        expect(profile.structure.skeleton).toContain('class TestClassA');
+        expect(profile.guidance.readFullHint.length).toBeGreaterThan(0);
     });
 
     it('should correctly display metadata in Smart File Profile', async () => {
         const args = { filePath: path.relative(testRootDir, fileA_Path) };
         const response = await (server as any).handleCallTool('read_file', args);
-        const profile = response.content[0].text;
+        const profile: SmartFileProfile = JSON.parse(response.content[0].text);
 
         const stats = fs.statSync(fileA_Path);
-        const sizeKb = (stats.size / 1024).toFixed(2);
-        const lineCount = fileA_Content.split('\n').filter(line => line.trim() !== '').length; // Adjusted for new lineCount logic
+        const lineCount = fileA_Content.split('\n').length;
 
-        expect(profile).toContain(`- Path: src/fileA.ts`);
-        expect(profile).toContain(`- Size: ${sizeKb} KB`);
-        expect(profile).toContain(`- Lines: ${lineCount}`); // Expecting the adjusted line count (15)
-        expect(profile).toContain(`- Language: ts`);
+        expect(profile.metadata.relativePath).toBe('src/fileA.ts');
+        expect(profile.metadata.sizeBytes).toBe(stats.size);
+        expect(profile.metadata.lineCount).toBe(lineCount);
+        expect(profile.metadata.language).toBe('ts');
+        expect(profile.metadata.newlineStyle).toBe('lf');
     });
 
     it('should correctly display outgoing dependencies in Smart File Profile', async () => {
         const args = { filePath: path.relative(testRootDir, fileA_Path) };
         const response = await (server as any).handleCallTool('read_file', args);
-        const profile = response.content[0].text;
+        const profile: SmartFileProfile = JSON.parse(response.content[0].text);
 
-        expect(profile).toContain(`- Imports: src/fileB.ts`);
+        expect(profile.usage.outgoingFiles).toContain('src/fileB.ts');
     });
 
     it('should correctly display incoming references in Smart File Profile', async () => {
         const args = { filePath: path.relative(testRootDir, fileB_Path) }; // fileB is imported by fileA
         const response = await (server as any).handleCallTool('read_file', args);
-        const profile = response.content[0].text;
+        const profile: SmartFileProfile = JSON.parse(response.content[0].text);
 
-        expect(profile).toContain(`- Used By: src/fileA.ts`);
+        expect(profile.usage.incomingFiles).toContain('src/fileA.ts');
     });
 
     it('should display "None" for relationships if no dependencies/references', async () => {
         const args = { filePath: path.relative(testRootDir, fileC_Path) };
         const response = await (server as any).handleCallTool('read_file', args);
-        const profile = response.content[0].text;
+        const profile: SmartFileProfile = JSON.parse(response.content[0].text);
 
-        expect(profile).toContain(`- Imports: None`);
-        expect(profile).toContain(`- Used By: None`);
+        expect(profile.usage.outgoingFiles).toEqual([]);
+        expect(profile.usage.incomingFiles).toEqual([]);
     });
 
     it('should correctly display the skeleton with hidden implementation', async () => {
         const args = { filePath: path.relative(testRootDir, fileA_Path) };
         const response = await (server as any).handleCallTool('read_file', args);
-        const profile = response.content[0].text;
+        const profile: SmartFileProfile = JSON.parse(response.content[0].text);
 
-        // Verify class and function signatures are present, and bodies are hidden
-        expect(profile).toContain('class TestClassA {');
-        expect(profile).toContain('constructor(name: string) { /* ... implementation hidden ... */ }');
-        expect(profile).toContain('public greet(message: string): string { /* ... implementation hidden ... */ }');
-        expect(profile).toContain('export function helperFunctionA(): void { /* ... implementation hidden ... */ }');
-        // Ensure original content is not fully present
-        expect(profile).not.toContain('// Complex logic here');
+        expect(profile.structure.skeleton).toContain('class TestClassA {');
+        expect(profile.structure.skeleton).toContain('constructor(name: string) { /* ... implementation hidden ... */ }');
+        expect(profile.structure.skeleton).toContain('public greet(message: string): string { /* ... implementation hidden ... */ }');
+        expect(profile.structure.skeleton).toContain('export function helperFunctionA(): void { /* ... implementation hidden ... */ }');
     });
 
     it('should handle non-existent file gracefully', async () => {
@@ -168,17 +166,13 @@ function doSomethingIsolated() {
         
         const args = { filePath: path.relative(testRootDir, emptyFilePath) };
         const response = await (server as any).handleCallTool('read_file', args);
-        const profile = response.content[0].text;
+        const profile: SmartFileProfile = JSON.parse(response.content[0].text);
 
-        expect(profile).toContain('Metadata');
-        expect(profile).toContain('- Path: src/empty.ts');
-        expect(profile).toContain('- Size: 0.00 KB');
-        expect(profile).toContain('- Lines: 0');
-        expect(profile).toContain('Relationships');
-        expect(profile).toContain('- Imports: None');
-        expect(profile).toContain('- Used By: None');
-        expect(profile).toContain('Skeleton');
-        expect(profile).not.toContain('{ /* ... implementation hidden ... */ }'); // No bodies to hide
+        expect(profile.metadata.relativePath).toBe('src/empty.ts');
+        expect(profile.metadata.lineCount).toBe(0);
+        expect(profile.usage.outgoingFiles).toEqual([]);
+        expect(typeof profile.structure.skeleton).toBe('string');
+        expect(profile.structure.symbols).toHaveLength(0);
     });
 
     it('should handle skeleton generation failure gracefully for small files', async () => {
@@ -197,11 +191,10 @@ function doSomethingIsolated() {
         // but for now, rely on actual AST parsing failure
         const args = { filePath: path.relative(testRootDir, brokenFilePath) };
         const response = await (server as any).handleCallTool('read_file', args);
-        const profile = response.content[0].text;
+        const profile: SmartFileProfile = JSON.parse(response.content[0].text);
 
-        expect(profile).toContain('// Skeleton generation failed. Displaying full content due to small file size.');
-        expect(profile).toContain(brokenContent.trim()); // Should contain the full content
-        expect(profile).not.toContain('class MyClass { /* ... implementation hidden ... */ }'); // Should not be a skeleton
+        expect(profile.structure.skeleton).toContain('Skeleton generation failed');
+        expect(profile.structure.skeleton).toContain('class MyClass');
     });
 
     it('should handle skeleton generation failure gracefully for large files', async () => {
@@ -218,9 +211,9 @@ function doSomethingIsolated() {
 
         const args = { filePath: path.relative(testRootDir, largeBrokenFilePath) };
         const response = await (server as any).handleCallTool('read_file', args);
-        const profile = response.content[0].text;
+        const profile: SmartFileProfile = JSON.parse(response.content[0].text);
 
-        expect(profile).toContain('// Skeleton generation failed. File too large to display full content as fallback.');
-        expect(profile).not.toContain(largeBrokenContent); // Should NOT contain the full content
+        expect(profile.structure.skeleton).toContain('Skeleton generation failed');
+        expect(profile.structure.skeleton).not.toContain(largeBrokenContent); // Should NOT contain the full content
     });
 });

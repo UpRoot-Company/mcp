@@ -9,6 +9,7 @@ import * as path from 'path';
 describe('DependencyGraph', () => {
     const testDir = path.join(process.cwd(), 'src', 'tests', 'dep_graph_test_env');
     let graph: DependencyGraph;
+    let symbolIndex: SymbolIndex;
 
     beforeAll(async () => {
         await AstManager.getInstance().init();
@@ -33,17 +34,23 @@ describe('DependencyGraph', () => {
         // cycle: X -> Y -> X
         fs.writeFileSync(path.join(testDir, 'X.ts'), 'import { y } from "./Y"; export const x = 1;');
         fs.writeFileSync(path.join(testDir, 'Y.ts'), 'import { x } from "./X"; export const y = 2;');
+
+        // unresolved import test file
+        fs.writeFileSync(
+            path.join(testDir, 'broken.ts'),
+            'import { missing } from "./does-not-exist"; export const broken = missing;'
+        );
     });
 
     afterAll(() => {
         if (fs.existsSync(testDir)) fs.rmSync(testDir, { recursive: true, force: true });
     });
 
-        beforeEach(async () => {
+    beforeEach(async () => {
         const generator = new SkeletonGenerator();
-        const index = new SymbolIndex(testDir, generator, []);
+        symbolIndex = new SymbolIndex(testDir, generator, []);
         const resolver = new ModuleResolver(testDir);
-        graph = new DependencyGraph(testDir, index, resolver);
+        graph = new DependencyGraph(testDir, symbolIndex, resolver);
         // Build graph explicitly
         await graph.build();
     });
@@ -89,5 +96,58 @@ describe('DependencyGraph', () => {
         // X -> Y -> X. Should contain Y. X is start node, visited set handles it.
         // It should NOT loop infinitely.
         expect(normalizedDeps.length).toBe(1); 
+    });
+
+    describe('getIndexStatus', () => {
+        it('should return correct file counts and unresolved imports', async () => {
+            await graph.build();
+            const status = await graph.getIndexStatus();
+            
+            // Total files: utils, main, shared/index, component, A, B, C, X, Y, broken = 10
+            // The exact number depends on file system scan, but at least these should be present
+            expect(status.global.totalFiles).toBeGreaterThanOrEqual(10); 
+            expect(status.global.unresolvedImports).toBeGreaterThan(0);
+            expect(status.global.indexedFiles).toBeGreaterThanOrEqual(status.global.totalFiles);
+            
+            // broken.ts imports ./does-not-exist
+            // Normalize path separators for windows compatibility in check
+            const error = status.global.resolutionErrors.find(e => 
+                e.filePath.replace(/\\/g, '/').includes('broken.ts')
+            );
+            expect(error).toBeDefined();
+            expect(error?.importSpecifier).toBe('./does-not-exist');
+            expect(status.perFile?.['broken.ts']?.unresolvedImports).toContain('./does-not-exist');
+        });
+
+        it('should update timestamp on rebuild', async () => {
+            await graph.build();
+            const firstStatus = await graph.getIndexStatus();
+            const firstTime = new Date(firstStatus.global.lastRebuiltAt).getTime();
+            
+            // Wait a bit to ensure time difference
+            await new Promise(r => setTimeout(r, 100));
+            
+            await graph.build();
+            const secondStatus = await graph.getIndexStatus();
+            const secondTime = new Date(secondStatus.global.lastRebuiltAt).getTime();
+            
+            expect(secondTime).toBeGreaterThan(firstTime);
+        });
+    });
+
+    describe('index invalidation', () => {
+        it('should rebuild automatically after file invalidation', async () => {
+            await graph.invalidateFile(path.join(testDir, 'main.ts'));
+            const deps = await graph.getDependencies('main.ts', 'outgoing');
+            const normalizedDeps = deps.map((d: string) => d.replace(/\\/g, '/'));
+            expect(normalizedDeps).toContain('utils.ts');
+        });
+
+        it('should rebuild automatically after directory invalidation', async () => {
+            await graph.invalidateDirectory(path.join(testDir, 'shared'));
+            const deps = await graph.getDependencies('component.ts', 'outgoing');
+            const normalizedDeps = deps.map((d: string) => d.replace(/\\/g, '/'));
+            expect(normalizedDeps).toContain('shared/index.ts');
+        });
     });
 });
