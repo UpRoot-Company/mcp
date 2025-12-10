@@ -1,5 +1,2 @@
 .vscode/
 .github/
-
-# Node artifact files
-node_modules/
