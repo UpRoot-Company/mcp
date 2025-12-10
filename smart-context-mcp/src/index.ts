@@ -25,6 +25,8 @@ import { TypeDependencyTracker, TypeDependencyDirection } from "./ast/TypeDepend
 import { DataFlowTracer } from "./ast/DataFlowTracer.js";
 import { FileProfiler, FileMetadataAnalysis } from "./engine/FileProfiler.js";
 import { AgentWorkflowGuidance } from "./engine/AgentPlaybook.js";
+import { ClusterSearchEngine, ClusterSearchOptions, ClusterExpansionOptions } from "./engine/ClusterSearch/index.js";
+import { BuildClusterOptions, ExpandableRelationship } from "./engine/ClusterSearch/ClusterBuilder.js";
 import { FileSearchResult, ReadFragmentResult, EditResult, DirectoryTree, Edit, EngineConfig, SmartFileProfile, SymbolInfo, ToolSuggestion, ImpactPreview, BatchEditGuidance } from "./types.js";
 
 const readFileAsync = promisify(fs.readFile);
@@ -51,6 +53,7 @@ export class SmartContextServer {
     private callGraphBuilder: CallGraphBuilder;
     private typeDependencyTracker: TypeDependencyTracker;
     private dataFlowTracer: DataFlowTracer;
+    private clusterSearchEngine: ClusterSearchEngine;
     private sigintListener?: () => Promise<void>;
 
         constructor(rootPath: string) {
@@ -84,6 +87,12 @@ export class SmartContextServer {
         this.callGraphBuilder = new CallGraphBuilder(this.rootPath, this.symbolIndex, this.moduleResolver);
         this.typeDependencyTracker = new TypeDependencyTracker(this.rootPath, this.symbolIndex);
         this.dataFlowTracer = new DataFlowTracer(this.rootPath, this.symbolIndex);
+        this.clusterSearchEngine = new ClusterSearchEngine({
+            rootPath: this.rootPath,
+            symbolIndex: this.symbolIndex,
+            callGraphBuilder: this.callGraphBuilder,
+            typeDependencyTracker: this.typeDependencyTracker
+        });
 
         const engineConfig: EngineConfig = {
             rootPath: this.rootPath,
@@ -431,6 +440,64 @@ export class SmartContextServer {
         };
     }
 
+    private buildClusterSearchOptions(args: any): ClusterSearchOptions {
+        const options: ClusterSearchOptions = {};
+        if (typeof args?.maxClusters === "number" && Number.isFinite(args.maxClusters) && args.maxClusters > 0) {
+            options.maxClusters = Math.max(1, Math.floor(args.maxClusters));
+        }
+        if (typeof args?.tokenBudget === "number" && Number.isFinite(args.tokenBudget) && args.tokenBudget > 0) {
+            options.tokenBudget = Math.floor(args.tokenBudget);
+        }
+        if (typeof args?.expansionDepth === "number" && Number.isFinite(args.expansionDepth) && args.expansionDepth > 0) {
+            options.expansionDepth = Math.floor(args.expansionDepth);
+        }
+        if (typeof args?.includePreview === "boolean") {
+            options.includePreview = args.includePreview;
+        }
+        const expandRelationships = this.parseExpandRelationshipsInput(args?.expandRelationships);
+        if (expandRelationships) {
+            options.expandRelationships = expandRelationships;
+        }
+        return options;
+    }
+
+    private buildClusterExpansionOptions(args: any): ClusterExpansionOptions {
+        const options: ClusterExpansionOptions = {};
+        if (typeof args?.expansionDepth === "number" && Number.isFinite(args.expansionDepth) && args.expansionDepth > 0) {
+            options.depth = Math.floor(args.expansionDepth);
+        }
+        if (typeof args?.limit === "number" && Number.isFinite(args.limit) && args.limit > 0) {
+            options.limit = Math.floor(args.limit);
+        }
+        if (typeof args?.includePreview === "boolean") {
+            options.includePreview = args.includePreview;
+        }
+        return options;
+    }
+
+    private parseExpandRelationshipsInput(input: any): BuildClusterOptions["expandRelationships"] | undefined {
+        if (!input || typeof input !== "object") {
+            return undefined;
+        }
+        const keys: Array<keyof NonNullable<BuildClusterOptions["expandRelationships"]>> = [
+            "callers",
+            "callees",
+            "typeFamily",
+            "colocated",
+            "siblings",
+            "all"
+        ];
+        const result: BuildClusterOptions["expandRelationships"] = {};
+        let hasValue = false;
+        for (const key of keys) {
+            if (typeof input[key] === "boolean") {
+                result[key] = input[key];
+                hasValue = true;
+            }
+        }
+        return hasValue ? result : undefined;
+    }
+
     private setupHandlers(): void {
         this.server.setRequestHandler(ListToolsRequestSchema, async () => {
             return {
@@ -723,6 +790,47 @@ export class SmartContextServer {
                         },
                     },
                     {
+                        name: "search_with_context",
+                        description: "Searches for symbols and returns context-aware clusters (callers, callees, type families, co-located symbols).",
+                        inputSchema: {
+                            type: "object",
+                            properties: {
+                                query: { type: "string", description: "Search query supporting filters like function:, class:, in:path" },
+                                maxClusters: { type: "number", default: 5 },
+                                expansionDepth: { type: "number", default: 2 },
+                                includePreview: { type: "boolean", default: true },
+                                tokenBudget: { type: "number", default: 5000 },
+                                expandRelationships: {
+                                    type: "object",
+                                    properties: {
+                                        callers: { type: "boolean", default: false },
+                                        callees: { type: "boolean", default: false },
+                                        typeFamily: { type: "boolean", default: false },
+                                        colocated: { type: "boolean", default: true },
+                                        siblings: { type: "boolean", default: true },
+                                        all: { type: "boolean", default: false }
+                                    }
+                                }
+                            },
+                            required: ["query"]
+                        }
+                    },
+                    {
+                        name: "expand_cluster_relationship",
+                        description: "Expands a specific relationship (callers/callees/typeFamily) for a previously returned cluster.",
+                        inputSchema: {
+                            type: "object",
+                            properties: {
+                                clusterId: { type: "string" },
+                                relationshipType: { type: "string", enum: ["callers", "callees", "typeFamily"] },
+                                expansionDepth: { type: "number", default: 1 },
+                                limit: { type: "number", default: 20 },
+                                includePreview: { type: "boolean", default: true }
+                            },
+                            required: ["clusterId", "relationshipType"]
+                        }
+                    },
+                    {
                         name: "search_files",
                         description: "Searches for keywords or patterns across the project.",
                         inputSchema: {
@@ -925,6 +1033,7 @@ export class SmartContextServer {
                     this.callGraphBuilder.clearCaches();
                     this.typeDependencyTracker.clearCaches();
                     this.typeDependencyTracker.clearCaches();
+                    this.clusterSearchEngine.clearCache();
                     const status = await this.dependencyGraph.getIndexStatus();
                     return { content: [{ type: "text", text: JSON.stringify({ message: "Index rebuilt successfully", status }, null, 2) }] };
                 }
@@ -933,6 +1042,7 @@ export class SmartContextServer {
                     await this.dependencyGraph.invalidateFile(absPath);
                     this.callGraphBuilder.invalidateFile(absPath);
                     this.typeDependencyTracker.invalidateFile(absPath);
+                    this.clusterSearchEngine.invalidateFile(absPath);
                     const status = await this.dependencyGraph.getIndexStatus();
                     return { content: [{ type: "text", text: JSON.stringify({ message: `Invalidated ${args.filePath}`, status }, null, 2) }] };
                 }
@@ -945,6 +1055,7 @@ export class SmartContextServer {
                     await this.dependencyGraph.invalidateDirectory(absDir);
                     this.callGraphBuilder.invalidateDirectory(absDir);
                     this.typeDependencyTracker.invalidateDirectory(absDir);
+                     this.clusterSearchEngine.invalidateDirectory(absDir);
                     const status = await this.dependencyGraph.getIndexStatus();
                     return { content: [{ type: "text", text: JSON.stringify({ message: `Invalidated directory ${dirArg}`, status }, null, 2) }] };
                 }
@@ -976,6 +1087,7 @@ export class SmartContextServer {
                     await writeFileAsync(absPath, args.content);
                     this.callGraphBuilder.invalidateFile(absPath);
                     this.typeDependencyTracker.invalidateFile(absPath);
+                    this.clusterSearchEngine.invalidateFile(absPath);
                     return { content: [{ type: "text", text: `Successfully wrote to ${args.filePath}` }] };
                 }
                 case "edit_file": {
@@ -1004,6 +1116,7 @@ export class SmartContextServer {
                     if (!args.dryRun) {
                         this.callGraphBuilder.invalidateFile(absPath);
                         this.typeDependencyTracker.invalidateFile(absPath);
+                        this.clusterSearchEngine.invalidateFile(absPath);
                     }
 
                     if (impactPreview) {
@@ -1064,6 +1177,7 @@ export class SmartContextServer {
                         for (const fileEdit of fileEdits) {
                             this.callGraphBuilder.invalidateFile(fileEdit.filePath);
                             this.typeDependencyTracker.invalidateFile(fileEdit.filePath);
+                            this.clusterSearchEngine.invalidateFile(fileEdit.filePath);
                         }
                     }
 
@@ -1106,6 +1220,32 @@ export class SmartContextServer {
                         result.batchGuidance = batchGuidance;
                     }
                     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+                }
+                case "search_with_context": {
+                    if (!args?.query || typeof args.query !== "string" || !args.query.trim()) {
+                        return this._createErrorResponse("MissingParameter", "Provide 'query' to search_with_context.");
+                    }
+                    const options = this.buildClusterSearchOptions(args);
+                    const result = await this.clusterSearchEngine.search(args.query, options);
+                    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+                }
+                case "expand_cluster_relationship": {
+                    if (!args?.clusterId || typeof args.clusterId !== "string") {
+                        return this._createErrorResponse("MissingParameter", "Provide 'clusterId' to expand_cluster_relationship.");
+                    }
+                    if (typeof args.relationshipType !== "string") {
+                        return this._createErrorResponse("MissingParameter", "Provide 'relationshipType' to expand_cluster_relationship.");
+                    }
+                    const relationship = args.relationshipType;
+                    if (!["callers", "callees", "typeFamily"].includes(relationship)) {
+                        return this._createErrorResponse("InvalidRelationship", "relationshipType must be one of callers, callees, typeFamily.");
+                    }
+                    const expansionOptions = this.buildClusterExpansionOptions(args);
+                    const cluster = await this.clusterSearchEngine.expandClusterRelationship(args.clusterId, relationship as ExpandableRelationship, expansionOptions);
+                    if (!cluster) {
+                        return this._createErrorResponse("ClusterNotFound", `Cluster '${args.clusterId}' not found or expired. Run search_with_context again.`);
+                    }
+                    return { content: [{ type: "text", text: JSON.stringify(cluster, null, 2) }] };
                 }
                 case "search_files": {
                     const searchArgs = args || {};
