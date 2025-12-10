@@ -27,6 +27,7 @@ import { FileSearchResult, ReadFragmentResult, EditResult, DirectoryTree, Edit, 
 const readFileAsync = promisify(fs.readFile);
 const writeFileAsync = promisify(fs.writeFile);
 const statAsync = promisify(fs.stat);
+const ENABLE_DEBUG_LOGS = process.env.SMART_CONTEXT_DEBUG === 'true';
 
 export class SmartContextServer {
     private server: Server;
@@ -44,9 +45,12 @@ export class SmartContextServer {
     private moduleResolver: ModuleResolver;
     private dependencyGraph: DependencyGraph;
     private referenceFinder: ReferenceFinder;
+    private sigintListener?: () => Promise<void>;
 
         constructor(rootPath: string) {
-        console.error("DEBUG: SmartContextServer constructor started");
+        if (ENABLE_DEBUG_LOGS) {
+            console.error("DEBUG: SmartContextServer constructor started");
+        }
         this.server = new Server({
             name: "smart-context-mcp",
             version: "2.2.0", // Version updated for ADR-008 (v2)
@@ -81,20 +85,29 @@ export class SmartContextServer {
 
         this.astManager.init(engineConfig)
             .then(() => {
-                console.error(`[AST] Active backend: ${this.astManager.getActiveBackend() ?? 'unknown'}`);
+                if (ENABLE_DEBUG_LOGS) {
+                    console.error(`[AST] Active backend: ${this.astManager.getActiveBackend() ?? 'unknown'}`);
+                }
                 return this.astManager.warmup();
             })
-            .catch(error => console.error("AstManager initialization failed:", error));
+            .catch(error => {
+                if (ENABLE_DEBUG_LOGS) {
+                    console.error("AstManager initialization failed:", error);
+                }
+            });
 
         this.setupHandlers();
         this.server.onerror = (error) => console.error("[MCP Error]", error);
 
-        process.on("SIGINT", async () => {
+        this.sigintListener = async () => {
             await this.server.close();
             process.exit(0);
-        });
+        };
+        process.on("SIGINT", this.sigintListener);
 
-        console.error("DEBUG: SmartContextServer constructor finished");
+        if (ENABLE_DEBUG_LOGS) {
+            console.error("DEBUG: SmartContextServer constructor finished");
+        }
     }
 
     private _loadIgnoreFiles(): string[] {
@@ -837,12 +850,24 @@ export class SmartContextServer {
         }
     }
 
+    public async shutdown(): Promise<void> {
+        if (this.sigintListener) {
+            process.removeListener("SIGINT", this.sigintListener);
+            this.sigintListener = undefined;
+        }
+        await this.server.close();
+    }
+
     public async run() {
-        console.error("DEBUG: SmartContextServer run method started");
+        if (ENABLE_DEBUG_LOGS) {
+            console.error("DEBUG: SmartContextServer run method started");
+        }
         const transport = new StdioServerTransport();
         await this.server.connect(transport);
-        console.error("DEBUG: MCP Server connected to transport");
-        console.error("Smart Context MCP Server running on stdio");
+        if (ENABLE_DEBUG_LOGS) {
+            console.error("DEBUG: MCP Server connected to transport");
+            console.error("Smart Context MCP Server running on stdio");
+        }
     }
 }
 

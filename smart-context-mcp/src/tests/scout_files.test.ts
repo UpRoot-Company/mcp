@@ -27,10 +27,11 @@ describe('SmartContextServer - scout_files', () => {
         fs.writeFileSync(path.join(testFilesDir, 'UserManager.ts'), 'export class UserManager {\n    constructor() {\n        console.log("UserManager ready");\n    }\n}\n');
     });
 
-    afterAll(() => {
+    afterAll(async () => {
         if (fs.existsSync(testFilesDir)) {
             fs.rmSync(testFilesDir, { recursive: true, force: true });
         }
+        await server.shutdown();
     });
 
     it('should find files with a single keyword', async () => {
