@@ -34,7 +34,9 @@ Smart Context MCP solves these problems with intelligent AST-based analysis, sur
 ### 3. 🧠 Project Intelligence
 - **Symbol Search**: AST-based search for classes, functions, methods across the project
 - **Dependency Analysis**: Track imports/exports and file relationships
-- **Impact Analysis**: Understand transitive dependencies before making changes
+- **Impact Analysis**: Understand transitive dependencies and "blast radius" before making changes
+- **Call Graph Visualization**: Visualize function call hierarchies (upstream/downstream)
+- **Data Flow Analysis**: Trace variable definitions and usages (Def-Use chains)
 - **Module Resolution**: Resolve relative imports to actual file paths
 - **Reference Finding**: Find all usages of a symbol across the codebase
 - **Documentation Extraction**: Extract JSDoc/TSDoc comments for symbol explanations
@@ -255,14 +257,36 @@ await use_mcp_tool({
 ### File Reading Tools
 
 #### `read_file`
-Reads the entire content of a file.
+Reads the file and returns a "Smart File Profile" by default, which includes metadata, structure, dependencies, and usage information. Use `full: true` to get the raw content.
 
 **Parameters:**
 - `filePath` (string, required): Path to the file (relative to project root)
+- `full` (boolean, optional): If true, returns the raw file content (default: false)
 
-**Returns:** Full file content as text
+**Returns:** 
+- Default: JSON object containing `metadata`, `structure` (skeleton), `dependencies`, and `usage`.
+- If `full: true`: Full file content as text.
 
-**Use Case:** When you need complete file content (rare in large files)
+**Use Case:** Quickly understanding a file's purpose, structure, and relationships without loading the entire content.
+
+**Example Output (Smart Profile):**
+```json
+{
+  "metadata": {
+    "filePath": "/path/to/file.ts",
+    "lineCount": 150,
+    "language": "typescript",
+    "newlineStyle": "lf",
+    "indentSize": 2
+  },
+  "structure": {
+    "skeleton": "class MyClass { ... }",
+    "symbols": [...]
+  },
+  "dependencies": { ... },
+  "usage": { "incomingCount": 5, ... }
+}
+```
 
 ---
 
@@ -380,6 +404,50 @@ Analyzes transitive dependencies to assess the impact of changes.
 
 ---
 
+#### `analyze_symbol_impact`
+Analyzes the call graph for a specific symbol to understand upstream callers and downstream callees.
+
+**Parameters:**
+- `symbolName` (string, required): The name of the function or method
+- `filePath` (string, required): Path to the file containing the symbol
+- `direction` (string, optional): `"upstream"`, `"downstream"`, or `"both"` (default: `"both"`)
+- `maxDepth` (number, optional): Maximum traversal depth (default: 3)
+
+**Returns:** Call graph showing callers and callees
+
+**Use Case:** detailed impact analysis at the function/method level
+
+---
+
+#### `analyze_type_dependencies`
+Analyzes type definitions to understand how types are used and extended.
+
+**Parameters:**
+- `symbolName` (string, required): The name of the type or interface
+- `filePath` (string, required): Path to the file containing the type
+- `direction` (string, optional): `"upstream"` (usages) or `"downstream"` (dependencies) (default: `"both"`)
+
+**Returns:** Type dependency graph
+
+**Use Case:** Refactoring complex type hierarchies
+
+---
+
+#### `trace_data_flow`
+Traces the flow of data for a specific variable (Def-Use chains).
+
+**Parameters:**
+- `variableName` (string, required): The name of the variable
+- `fromFile` (string, required): Path to the file where the trace starts
+- `fromLine` (number, optional): Line number to start tracing from (disambiguates multiple variables with same name)
+- `maxSteps` (number, optional): Maximum number of steps to trace (default: 10)
+
+**Returns:** List of steps showing where the variable is defined, modified, and used
+
+**Use Case:** Debugging complex logic and understanding variable lifecycle
+
+---
+
 #### `find_referencing_symbols`
 Finds all occurrences where a given symbol is referenced in the codebase.
 
@@ -402,6 +470,40 @@ Finds all occurrences where a given symbol is referenced in the codebase.
   }
 ]
 ```
+
+---
+
+#### `get_index_status`
+Retrieves the status of the project index, including file counts and unresolved dependencies.
+
+**Parameters:** None
+
+**Returns:** Index statistics (files indexed, symbols found, pending tasks)
+
+**Use Case:** Checking if the project analysis is complete and up-to-date
+
+---
+
+#### `rebuild_index`
+Forces a complete rebuild of the dependency graph and clears resolution caches.
+
+**Parameters:** None
+
+**Returns:** Success message with new index status
+
+**Use Case:** Recovering from inconsistent state or after massive external changes
+
+---
+
+#### `invalidate_index_file`
+Invalidates cached symbol and dependency information for a single file.
+
+**Parameters:**
+- `filePath` (string, required): Path to the file to invalidate
+
+**Returns:** Success message
+
+**Use Case:** Manually refreshing a file's analysis if it seems stale
 
 ---
 
@@ -438,7 +540,7 @@ Safely applies multiple edits to a file with atomic transaction and conflict det
 - `dryRun` (boolean, optional): Preview changes without applying (default: false)
 
 **Returns:** 
-- Success: Applied edits with diff preview
+- Success: Applied edits with diff preview and **Impact Preview** (risk level, affected files)
 - Failure: Error details with conflicting line numbers
 
 **Use Case:** Surgical code modifications with safety guarantees
@@ -449,6 +551,7 @@ Safely applies multiple edits to a file with atomic transaction and conflict det
 - ✅ Context anchors prevent ambiguous matches
 - ✅ Atomic transaction (all edits succeed or none apply)
 - ✅ Conflict detection with detailed error reporting
+- ✅ **Impact Analysis**: Automatically warns about high-risk edits based on dependency graph
 
 **Example:**
 ```javascript
@@ -475,7 +578,7 @@ Applies edits to multiple files atomically (all-or-nothing transaction).
   - `edits` (array, required): Same format as `edit_file` edits
 - `dryRun` (boolean, optional): Preview changes without applying
 
-**Returns:** Success with all applied changes or rollback on any failure
+**Returns:** Success with all applied changes, **Batch Guidance** (suggested execution order), or rollback on any failure
 
 **Use Case:** Multi-file refactoring with transaction guarantees
 
@@ -494,6 +597,21 @@ Applies edits to multiple files atomically (all-or-nothing transaction).
   ]
 }
 ```
+
+---
+
+#### `debug_edit_match`
+Diagnoses why an `edit_file` match failed by analyzing the target string against the file content.
+
+**Parameters:**
+- `filePath` (string, required): Path to the file
+- `targetString` (string, required): The string that failed to match
+- `lineRange` (object, optional): Expected line range `{ start, end }`
+- `normalization` (string, optional): Normalization mode to test (`"exact"`, `"whitespace"`, `"structural"`)
+
+**Returns:** Diagnostic report showing closest matches, Levenshtein distances, and whitespace differences
+
+**Use Case:** Debugging "Search string not found" errors
 
 ---
 
@@ -576,6 +694,17 @@ Lists directory contents in a tree-like structure.
 **Returns:** Tree structure respecting `.gitignore` and `.mcpignore`
 
 **Use Case:** Exploring project structure
+
+---
+
+#### `get_workflow_guidance`
+Retrieves the canonical agent playbook for interacting with the codebase.
+
+**Parameters:** None
+
+**Returns:** Structured JSON guidance + Markdown playbook content
+
+**Use Case:** Learning the recommended "Scout → Read → Replace" workflow and recovery strategies
 
 ---
 
@@ -666,7 +795,10 @@ smart-context-mcp/
 │   │   ├── SkeletonGenerator.ts # Code outline generation
 │   │   ├── SymbolIndex.ts    # Symbol definition indexing
 │   │   ├── ModuleResolver.ts # Import path resolution
-│   │   └── DependencyGraph.ts # Dependency tracking
+│   │   ├── DependencyGraph.ts # Dependency tracking
+│   │   ├── CallGraphBuilder.ts # Function call graph analysis
+│   │   ├── DataFlowTracer.ts # Variable data flow tracing
+│   │   └── TypeDependencyTracker.ts # Type hierarchy analysis
 │   └── tests/                # Test suites
 ├── dist/                     # Compiled JavaScript output
 ├── docs/                     # Architecture decision records
@@ -698,6 +830,9 @@ Detailed architecture documentation available in the `docs/` directory:
 - **ADR-011**: Robustness and Advanced Analysis
 - **ADR-012**: Project Intelligence
 - **ADR-013**: Serena Feature Analysis
+- **ADR-014**: Smart File Profile
+- **ADR-015**: Agent Experience and Resilience
+- **ADR-016**: Impact Flow Analysis & Call Graph Visualization
 
 
 ---
