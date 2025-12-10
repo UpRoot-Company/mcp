@@ -3,6 +3,9 @@ import * as path from 'path';
 import { AstManager } from '../ast/AstManager.js';
 import { SkeletonGenerator } from '../ast/SkeletonGenerator.js';
 import { SymbolIndex } from '../ast/SymbolIndex.js';
+import { ModuleResolver } from '../ast/ModuleResolver.js';
+import { CallGraphBuilder } from '../ast/CallGraphBuilder.js';
+import { TypeDependencyTracker } from '../ast/TypeDependencyTracker.js';
 import { QueryParser } from '../engine/ClusterSearch/QueryParser.js';
 import { SeedFinder } from '../engine/ClusterSearch/SeedFinder.js';
 import { ClusterBuilder } from '../engine/ClusterSearch/ClusterBuilder.js';
@@ -17,8 +20,11 @@ const writeFile = (relativePath: string, content: string) => {
     fs.writeFileSync(absPath, content);
 };
 
-describe('ClusterSearch Phase 1 Components', () => {
+describe('ClusterSearch Phase 2 Components', () => {
     let symbolIndex: SymbolIndex;
+    let moduleResolver: ModuleResolver;
+    let callGraphBuilder: CallGraphBuilder;
+    let typeDependencyTracker: TypeDependencyTracker;
 
     beforeAll(async () => {
         await AstManager.getInstance().init();
@@ -70,6 +76,9 @@ export function teardownUser(name: string) {
     beforeEach(() => {
         const generator = new SkeletonGenerator();
         symbolIndex = new SymbolIndex(testDir, generator, []);
+        moduleResolver = new ModuleResolver(testDir);
+        callGraphBuilder = new CallGraphBuilder(testDir, symbolIndex, moduleResolver);
+        typeDependencyTracker = new TypeDependencyTracker(testDir, symbolIndex);
     });
 
     it('parses filters and intent from query strings', () => {
@@ -100,7 +109,7 @@ export function teardownUser(name: string) {
         const createUserSymbol = userFileSymbols!.find(symbol => symbol.name === 'createUser');
         expect(createUserSymbol).toBeDefined();
 
-        const builder = new ClusterBuilder(testDir, symbolIndex);
+        const builder = new ClusterBuilder(testDir, symbolIndex, callGraphBuilder, typeDependencyTracker);
         const cluster = await builder.buildCluster({
             filePath: 'services/user_service.ts',
             symbol: createUserSymbol!,
@@ -116,8 +125,30 @@ export function teardownUser(name: string) {
         expect(cluster.related.siblings.data.map(entry => entry.symbolName)).toContain('deleteUser');
     });
 
+    it('supports eager callers expansion when requested', async () => {
+        const allSymbols = await symbolIndex.getAllSymbols();
+        const userFileSymbols = allSymbols.get('services/user_service.ts');
+        const createUserSymbol = userFileSymbols!.find(symbol => symbol.name === 'createUser');
+        const builder = new ClusterBuilder(testDir, symbolIndex, callGraphBuilder, typeDependencyTracker);
+        const cluster = await builder.buildCluster({
+            filePath: 'services/user_service.ts',
+            symbol: createUserSymbol!,
+            matchType: 'exact',
+            matchScore: 1
+        }, {
+            expandRelationships: { callers: true }
+        });
+
+        expect(cluster.related.callers.state).not.toBe(ExpansionState.NOT_LOADED);
+    });
+
     it('returns ranked clusters with recommended expansions', async () => {
-        const engine = new ClusterSearchEngine({ rootPath: testDir, symbolIndex });
+        const engine = new ClusterSearchEngine({
+            rootPath: testDir,
+            symbolIndex,
+            callGraphBuilder,
+            typeDependencyTracker
+        });
         const response = await engine.search('createUser');
 
         expect(response.clusters.length).toBeGreaterThan(0);
