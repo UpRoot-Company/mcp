@@ -87,11 +87,15 @@ export class SmartContextServer {
         this.callGraphBuilder = new CallGraphBuilder(this.rootPath, this.symbolIndex, this.moduleResolver);
         this.typeDependencyTracker = new TypeDependencyTracker(this.rootPath, this.symbolIndex);
         this.dataFlowTracer = new DataFlowTracer(this.rootPath, this.symbolIndex);
+        const precomputeEnabled = process.env.SMART_CONTEXT_DISABLE_PRECOMPUTE === 'true' ? false : true;
         this.clusterSearchEngine = new ClusterSearchEngine({
             rootPath: this.rootPath,
             symbolIndex: this.symbolIndex,
             callGraphBuilder: this.callGraphBuilder,
-            typeDependencyTracker: this.typeDependencyTracker
+            typeDependencyTracker: this.typeDependencyTracker,
+            dependencyGraph: this.dependencyGraph
+        }, {
+            precomputation: { enabled: precomputeEnabled }
         });
 
         const engineConfig: EngineConfig = {
@@ -115,9 +119,11 @@ export class SmartContextServer {
             });
 
         this.setupHandlers();
+        this.clusterSearchEngine.startBackgroundTasks();
         this.server.onerror = (error) => console.error("[MCP Error]", error);
 
         this.sigintListener = async () => {
+            this.clusterSearchEngine.stopBackgroundTasks();
             await this.server.close();
             process.exit(0);
         };

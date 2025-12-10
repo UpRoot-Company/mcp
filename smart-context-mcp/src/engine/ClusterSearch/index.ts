@@ -1,12 +1,16 @@
 import { SymbolIndex } from "../../ast/SymbolIndex.js";
 import { CallGraphBuilder } from "../../ast/CallGraphBuilder.js";
 import { TypeDependencyTracker } from "../../ast/TypeDependencyTracker.js";
+import { DependencyGraph } from "../../ast/DependencyGraph.js";
 import { ClusterSearchResponse, ExpansionState, SearchCluster } from "../../types/cluster.js";
 import { QueryParser } from "./QueryParser.js";
 import { SeedFinder } from "./SeedFinder.js";
 import { ClusterBuilder, BuildClusterOptions, ExpandableRelationship, ExpandRelationshipOptions as BuilderExpandRelationshipOptions } from "./ClusterBuilder.js";
 import { ClusterRanker } from "./ClusterRanker.js";
 import { PreviewGenerator } from "./PreviewGenerator.js";
+import { CacheableSearchOptions, ClusterCache, ClusterCacheConfig } from "./ClusterCache.js";
+import { HotSpotDetector } from "./HotSpotDetector.js";
+import { ClusterPrecomputationEngine, ClusterPrecomputationConfig } from "./ClusterPrecomputationEngine.js";
 
 const DEFAULT_MAX_CLUSTERS = 5;
 const DEFAULT_TOKEN_BUDGET = 5000;
@@ -16,6 +20,7 @@ export interface ClusterSearchEngineDeps {
     symbolIndex: SymbolIndex;
     callGraphBuilder: CallGraphBuilder;
     typeDependencyTracker: TypeDependencyTracker;
+    dependencyGraph: DependencyGraph;
 }
 
 export interface ClusterSearchOptions {
@@ -30,15 +35,23 @@ export interface ClusterExpansionOptions extends BuilderExpandRelationshipOption
     includePreview?: boolean;
 }
 
+export interface ClusterSearchEngineConfig {
+    cache?: ClusterCacheConfig;
+    precomputation?: ClusterPrecomputationConfig & { enabled?: boolean };
+}
+
 export class ClusterSearchEngine {
     private readonly queryParser = new QueryParser();
     private readonly seedFinder: SeedFinder;
     private readonly clusterBuilder: ClusterBuilder;
     private readonly clusterRanker = new ClusterRanker();
     private readonly previewGenerator: PreviewGenerator;
-    private readonly clusterCache = new Map<string, SearchCluster>();
+    private readonly clusterCache: ClusterCache;
+    private readonly hotSpotDetector?: HotSpotDetector;
+    private readonly precomputationEngine?: ClusterPrecomputationEngine;
+    private readonly precomputationEnabled: boolean;
 
-    constructor(deps: ClusterSearchEngineDeps) {
+    constructor(deps: ClusterSearchEngineDeps, config: ClusterSearchEngineConfig = {}) {
         this.seedFinder = new SeedFinder(deps.symbolIndex);
         this.clusterBuilder = new ClusterBuilder(
             deps.rootPath,
@@ -47,6 +60,21 @@ export class ClusterSearchEngine {
             deps.typeDependencyTracker
         );
         this.previewGenerator = new PreviewGenerator(deps.rootPath);
+        this.clusterCache = new ClusterCache(deps.rootPath, config.cache);
+        this.precomputationEnabled = config.precomputation?.enabled !== false;
+        if (this.precomputationEnabled) {
+            this.hotSpotDetector = new HotSpotDetector(deps.symbolIndex, deps.dependencyGraph);
+            this.precomputationEngine = new ClusterPrecomputationEngine(
+                this.hotSpotDetector,
+                (query, options) => this.search(query, options),
+                config.precomputation,
+                (message, ...args) => {
+                    if (process.env.SMART_CONTEXT_DEBUG === "true") {
+                        console.error(message, ...args);
+                    }
+                }
+            );
+        }
     }
 
     async search(query: string, options: ClusterSearchOptions = {}): Promise<ClusterSearchResponse> {
@@ -55,6 +83,16 @@ export class ClusterSearchEngine {
         const maxClusters = options.maxClusters ?? DEFAULT_MAX_CLUSTERS;
         if (parsed.terms.length === 0 && !parsed.filters.file) {
             return this.emptyResponse(start, options.tokenBudget);
+        }
+
+        const cacheOptions = this.buildCacheableOptions(options);
+        const cached = this.clusterCache.getCachedResponse(query, cacheOptions);
+        if (cached) {
+            const elapsed = Date.now() - start;
+            return {
+                ...cached.response,
+                searchTime: `${elapsed}ms (cached)`
+            };
         }
 
         const seedLimit = Math.max(maxClusters * 2, maxClusters);
@@ -76,14 +114,13 @@ export class ClusterSearchEngine {
         if (includePreview) {
             await this.previewGenerator.applyPreviews(ranked);
         }
-        ranked.forEach(cluster => this.clusterCache.set(cluster.clusterId, cluster));
         const perCluster = ranked.map(cluster => cluster.metadata.tokenEstimate);
         const estimatedTokens = perCluster.reduce((sum, value) => sum + value, 0);
         const tokenBudget = options.tokenBudget ?? DEFAULT_TOKEN_BUDGET;
         const searchTime = `${Date.now() - start}ms`;
         const truncatedRelationships = this.collectTruncatedRelationships(ranked);
 
-        return {
+        const response: ClusterSearchResponse = {
             clusters: ranked,
             totalMatches: seeds.length,
             searchTime,
@@ -97,6 +134,9 @@ export class ClusterSearchEngine {
                 recommendedExpansions: this.collectRecommendedExpansions(ranked)
             }
         };
+
+        this.clusterCache.storeResponse(query, cacheOptions, response);
+        return response;
     }
 
     async expandClusterRelationship(
@@ -104,7 +144,7 @@ export class ClusterSearchEngine {
         relationship: ExpandableRelationship,
         options: ClusterExpansionOptions = {}
     ): Promise<SearchCluster | null> {
-        const cluster = this.clusterCache.get(clusterId);
+        const cluster = this.clusterCache.getCluster(clusterId);
         if (!cluster || cluster.seeds.length === 0) {
             return null;
         }
@@ -118,20 +158,33 @@ export class ClusterSearchEngine {
         if (options.includePreview !== false) {
             await this.previewGenerator.applyPreviews([cluster]);
         }
-        this.clusterCache.set(cluster.clusterId, cluster);
+        this.clusterCache.updateCluster(cluster);
         return cluster;
     }
 
-    invalidateFile(_filePath?: string): void {
-        this.clusterCache.clear();
+    invalidateFile(filePath?: string): void {
+        this.clusterCache.invalidateByFile(filePath);
+        this.precomputationEngine?.requestImmediateRun();
     }
 
-    invalidateDirectory(_directoryPath?: string): void {
-        this.clusterCache.clear();
+    invalidateDirectory(directoryPath?: string): void {
+        this.clusterCache.invalidateByDirectory(directoryPath);
+        this.precomputationEngine?.requestImmediateRun();
     }
 
     clearCache(): void {
         this.clusterCache.clear();
+    }
+
+    startBackgroundTasks(): void {
+        if (!this.precomputationEnabled) {
+            return;
+        }
+        this.precomputationEngine?.start();
+    }
+
+    stopBackgroundTasks(): void {
+        this.precomputationEngine?.stop();
     }
 
     private collectRecommendedExpansions(clusters: SearchCluster[]): string[] {
@@ -181,6 +234,15 @@ export class ClusterSearchEngine {
                 truncatedRelationships: [],
                 recommendedExpansions: []
             }
+        };
+    }
+
+    private buildCacheableOptions(options: ClusterSearchOptions): CacheableSearchOptions {
+        return {
+            maxClusters: options.maxClusters ?? DEFAULT_MAX_CLUSTERS,
+            expansionDepth: options.expansionDepth ?? 2,
+            includePreview: options.includePreview !== false,
+            expandRelationships: options.expandRelationships
         };
     }
 }
