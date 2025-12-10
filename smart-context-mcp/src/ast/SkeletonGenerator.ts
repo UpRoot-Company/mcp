@@ -161,7 +161,7 @@ export class SkeletonGenerator {
 
         let rootNode: any | null = null;
         const symbols: SymbolInfo[] = [];
-        const definitionNodeMap = new Map<any, DefinitionSymbol>();
+        const definitionNodeMap = new Map<string, DefinitionSymbol>();
 
         try {
             rootNode = doc.rootNode;
@@ -202,7 +202,7 @@ export class SkeletonGenerator {
                             const symbol = this.processDefinition(capture.node, nameCapture.node, langId);
                             if (symbol) {
                                 symbols.push(symbol);
-                                definitionNodeMap.set(capture.node, symbol);
+                                definitionNodeMap.set(this.makeNodeKey(capture.node), symbol);
                             }
                         }
                     } else if (capture.name === 'import') {
@@ -283,7 +283,7 @@ export class SkeletonGenerator {
         return results;
     }
 
-    private attachCallSiteMetadata(rootNode: any, lang: any, langId: string, definitionNodeMap: Map<any, DefinitionSymbol>) {
+    private attachCallSiteMetadata(rootNode: any, lang: any, langId: string, definitionNodeMap: Map<string, DefinitionSymbol>) {
         const query = this.getCallQuery(langId, lang);
         if (!query) return;
 
@@ -394,16 +394,25 @@ export class SkeletonGenerator {
         return null;
     }
 
-    private findOwningDefinition(node: any, definitionNodeMap: Map<any, DefinitionSymbol>): DefinitionSymbol | undefined {
+    private findOwningDefinition(node: any, definitionNodeMap: Map<string, DefinitionSymbol>): DefinitionSymbol | undefined {
         let current = node;
         while (current) {
-            const symbol = definitionNodeMap.get(current);
+            const symbol = definitionNodeMap.get(this.makeNodeKey(current));
             if (symbol) {
                 return symbol;
             }
             current = current.parent;
         }
         return undefined;
+    }
+
+    private makeNodeKey(node: any): string {
+        const start = typeof node.startIndex === 'number' ? node.startIndex : 0;
+        const end = typeof node.endIndex === 'number' ? node.endIndex : start;
+        const idPart = typeof node.id === 'number' || typeof node.id === 'string'
+            ? String(node.id)
+            : '';
+        return `${idPart}:${start}:${end}`;
     }
 
     private processDefinition(definitionNode: any, nameNode: any, langName: string): DefinitionSymbol | null {
