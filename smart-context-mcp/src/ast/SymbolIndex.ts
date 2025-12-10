@@ -23,6 +23,30 @@ export class SymbolIndex {
         this.ignoreFilter.add(['.git', 'node_modules', '.mcp', 'dist', 'coverage', '.DS_Store']);
     }
 
+    public invalidateFile(filePath: string) {
+        const absPath = path.isAbsolute(filePath) ? filePath : path.join(this.rootPath, filePath);
+        const relativePath = path.relative(this.rootPath, absPath);
+        this.cache.delete(relativePath);
+    }
+
+    public invalidateDirectory(dirPath: string) {
+        const absPath = path.isAbsolute(dirPath) ? dirPath : path.join(this.rootPath, dirPath);
+        const relativePath = path.relative(this.rootPath, absPath);
+        if (!relativePath) {
+            this.cache.clear();
+            return;
+        }
+        for (const key of Array.from(this.cache.keys())) {
+            if (key === relativePath || key.startsWith(`${relativePath}${path.sep}`) || key.startsWith(`${relativePath}/`)) {
+                this.cache.delete(key);
+            }
+        }
+    }
+
+    public clearCache() {
+        this.cache.clear();
+    }
+
     public async search(query: string): Promise<SymbolSearchResult[]> {
         const files = this.scanFiles(this.rootPath);
         const results: SymbolSearchResult[] = [];
@@ -64,7 +88,7 @@ export class SymbolIndex {
         return result;
     }
 
-    private async getSymbolsForFile(filePath: string): Promise<SymbolInfo[]> {
+    public async getSymbolsForFile(filePath: string): Promise<SymbolInfo[]> {
         const stats = fs.statSync(filePath);
         const currentMtime = stats.mtimeMs;
         const relativePath = path.relative(this.rootPath, filePath);
@@ -75,10 +99,27 @@ export class SymbolIndex {
         }
 
         const content = fs.readFileSync(filePath, 'utf-8');
-        const symbols = await this.skeletonGenerator.generateStructureJson(filePath, content);
-        this.cache.set(relativePath, { mtime: currentMtime, symbols });
-        return symbols;
+        try {
+            const structure = await this.skeletonGenerator.generateStructureJson(filePath, content);
+            const enriched = structure.map(symbol => {
+                if (!symbol.content && symbol.range && typeof symbol.range.startByte === 'number' && typeof symbol.range.endByte === 'number') {
+                    return {
+                        ...symbol,
+                        content: content.substring(symbol.range.startByte, symbol.range.endByte)
+                    } as SymbolInfo;
+                }
+                return symbol;
+            });
+
+            this.cache.set(relativePath, { mtime: currentMtime, symbols: enriched });
+            return enriched;
+        } catch (error) {
+            console.warn(`Symbol extraction failed for ${filePath}:`, error);
+            this.cache.set(relativePath, { mtime: currentMtime, symbols: [] });
+            return [];
+        }
     }
+
 
     private scanFiles(dir: string): string[] {
         let results: string[] = [];

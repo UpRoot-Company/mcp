@@ -40,6 +40,27 @@ export interface Edit {
     afterContext?: string;
     fuzzyMode?: "whitespace" | "levenshtein";
     anchorSearchRange?: { lines: number, chars: number };
+    /** Highest normalization tier the editor should consider. Defaults to "exact". */
+    normalization?: "exact" | "whitespace" | "structural";
+    /** Optional hash guard for the original content to catch drift before editing. */
+    expectedHash?: {
+        algorithm: 'sha256' | 'xxhash';
+        value: string;
+    };
+}
+
+export interface ToolSuggestion {
+    toolName: string;
+    rationale: string;
+    exampleArgs?: Record<string, unknown>;
+}
+
+export interface MatchDiagnostics {
+    attempts: {
+        mode: string;
+        candidates: { line: number; snippet: string; score?: number }[];
+        failureReason: string;
+    }[];
 }
 
 export interface EditResult {
@@ -50,7 +71,7 @@ export interface EditResult {
     originalContent?: string;
     newContent?: string;
     details?: ErrorDetails;
-    suggestion?: string;
+    suggestion?: ToolSuggestion;
     errorCode?: string;
     /**
      * Metadata about the edit operation, including inverse edits for undo.
@@ -123,16 +144,24 @@ export interface ScoutResult {
     errors: string[];
 }
 
+export interface Point {
+    row: number;
+    column: number;
+}
+
 export interface BaseSymbolInfo {
     name: string;
+    start?: Point;
+    end?: Point;
     range: { startLine: number; endLine: number; startByte: number; endByte: number };
     container?: string;
     modifiers?: string[];
     doc?: string;
+    content?: string;
 }
 
 export interface DefinitionSymbol extends BaseSymbolInfo {
-    type: 'class' | 'function' | 'method' | 'interface' | 'variable';
+    type: 'class' | 'function' | 'method' | 'interface' | 'variable' | 'export_specifier';
     signature?: string;
     parameters?: string[];
     returnType?: string;
@@ -155,4 +184,70 @@ export interface ExportSymbol extends BaseSymbolInfo {
     isTypeOnly?: boolean;
 }
 
+
 export type SymbolInfo = DefinitionSymbol | ImportSymbol | ExportSymbol;
+
+export interface SmartFileProfile {
+    metadata: {
+        filePath: string;
+        relativePath: string;
+        sizeBytes: number;
+        lineCount: number;
+        language: string | null;
+        lastModified?: string; // ISO date string
+        newlineStyle?: "lf" | "crlf" | "mixed";
+        encoding?: string; // e.g., "utf-8"
+        hasBOM?: boolean;
+        usesTabs?: boolean;
+        indentSize?: number | null;
+        isConfigFile?: boolean;
+        configType?: 'tsconfig' | 'package.json' | 'lintrc' | 'editorconfig' | 'other';
+        configScope?: 'project' | 'directory' | 'file';
+    };
+    structure: {
+        skeleton: string;
+        symbols: SymbolInfo[];
+        complexity?: {
+            functionCount: number;
+            linesOfCode: number;
+            maxNestingDepth?: number;
+        };
+    };
+    usage: {
+        incomingCount: number;
+        incomingFiles: string[];
+        outgoingCount?: number;
+        outgoingFiles?: string[];
+        testFiles?: string[];
+    };
+    guidance: {
+        bodyHidden: boolean;
+        readFullHint: string;
+        readFragmentHint: string;
+    };
+}
+
+export interface IndexStatus {
+    global: {
+        totalFiles: number;
+        indexedFiles: number;
+        unresolvedImports: number;
+        resolutionErrors: Array<{ filePath: string; importSpecifier: string; error: string; }>;
+        lastRebuiltAt: string; // ISO date string
+        confidence: 'high' | 'medium' | 'low';
+        isMonorepo: boolean;
+    };
+    perFile?: Record<string, {
+        resolved: boolean;
+        unresolvedImports: string[];
+        incomingDependenciesCount: number;
+        outgoingDependenciesCount: number;
+    }>;
+}
+
+export interface EngineConfig {
+    mode?: "prod" | "ci" | "test";
+    parserBackend?: "wasm" | "js" | "snapshot" | "auto";
+    snapshotDir?: string;
+    rootPath?: string;
+}

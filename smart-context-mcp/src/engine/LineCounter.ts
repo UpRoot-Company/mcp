@@ -35,6 +35,18 @@ export class LineCounter {
         return high + 1;
     }
 
+    public lineAt(index: number): number {
+        return this.getLineNumber(index);
+    }
+
+    public getCharIndexForLine(lineNumber: number): number {
+        if (lineNumber <= 1) return 0;
+        if (lineNumber > this.lineStarts.length) {
+            return this.lineStarts[this.lineStarts.length - 1] ?? 0;
+        }
+        return this.lineStarts[lineNumber - 1];
+    }
+
     /**
      * Returns the total number of lines.
      */

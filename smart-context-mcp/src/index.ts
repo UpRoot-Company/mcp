@@ -20,7 +20,9 @@ import { SymbolIndex } from "./ast/SymbolIndex.js";
 import { ModuleResolver } from "./ast/ModuleResolver.js";
 import { DependencyGraph } from "./ast/DependencyGraph.js";
 import { ReferenceFinder } from "./ast/ReferenceFinder.js";
-import { FileSearchResult, ReadFragmentResult, EditResult, DirectoryTree, Edit } from "./types.js";
+import { FileProfiler, FileMetadataAnalysis } from "./engine/FileProfiler.js";
+import { AgentWorkflowGuidance } from "./engine/AgentPlaybook.js";
+import { FileSearchResult, ReadFragmentResult, EditResult, DirectoryTree, Edit, EngineConfig, SmartFileProfile, SymbolInfo, ToolSuggestion } from "./types.js";
 
 const readFileAsync = promisify(fs.readFile);
 const writeFileAsync = promisify(fs.writeFile);
@@ -70,10 +72,19 @@ export class SmartContextServer {
         this.dependencyGraph = new DependencyGraph(this.rootPath, this.symbolIndex, this.moduleResolver);
         this.referenceFinder = new ReferenceFinder(this.rootPath, this.dependencyGraph, this.symbolIndex, this.skeletonGenerator, this.moduleResolver);
 
-        // Warm up AstManager with common languages (non-blocking)
-        this.astManager.warmup().catch(error => {
-            console.error("AstManager warmup failed:", error);
-        });
+        const engineConfig: EngineConfig = {
+            rootPath: this.rootPath,
+            mode: (process.env.SMART_CONTEXT_ENGINE_MODE as EngineConfig['mode']) || 'prod',
+            parserBackend: (process.env.SMART_CONTEXT_PARSER_BACKEND as EngineConfig['parserBackend']) || 'auto',
+            snapshotDir: process.env.SMART_CONTEXT_SNAPSHOT_DIR
+        };
+
+        this.astManager.init(engineConfig)
+            .then(() => {
+                console.error(`[AST] Active backend: ${this.astManager.getActiveBackend() ?? 'unknown'}`);
+                return this.astManager.warmup();
+            })
+            .catch(error => console.error("AstManager initialization failed:", error));
 
         this.setupHandlers();
         this.server.onerror = (error) => console.error("[MCP Error]", error);
@@ -119,7 +130,145 @@ export class SmartContextServer {
         return absPath;
     }
 
-    private _createErrorResponse(code: string, message: string, suggestion?: string, details?: any): { isError: true; content: { type: "text"; text: string; }[] } {
+    private async buildSmartFileProfile(absPath: string, content: string, stats: fs.Stats): Promise<SmartFileProfile> {
+        const relativePath = path.relative(this.rootPath, absPath) || path.basename(absPath);
+        const [outgoingDeps, incomingRefs] = await Promise.all([
+            this.dependencyGraph.getDependencies(absPath, 'outgoing'),
+            this.dependencyGraph.getDependencies(absPath, 'incoming')
+        ]);
+
+        let skeleton = '// Skeleton generation failed or not applicable for this file type.';
+        try {
+            skeleton = await this.skeletonGenerator.generateSkeleton(absPath, content);
+        } catch (error: any) {
+            if (content.length < 5000) {
+                skeleton = `// Skeleton generation failed: ${error?.message || 'unknown error'}.\n${content}`;
+            } else {
+                skeleton = `// Skeleton generation failed: ${error?.message || 'unknown error'}.`;
+            }
+        }
+
+        let symbols: SymbolInfo[] = [];
+        try {
+            symbols = await this.skeletonGenerator.generateStructureJson(absPath, content);
+        } catch (error) {
+            console.error(`Structure extraction failed for ${absPath}:`, error);
+        }
+
+        const metaAnalysis = FileProfiler.analyzeMetadata(content, absPath);
+        const lineCount = content.length === 0 ? 0 : content.split(/\r?\n/).length;
+        const metadata: SmartFileProfile['metadata'] = {
+            filePath: absPath,
+            relativePath,
+            sizeBytes: stats.size,
+            lineCount,
+            language: path.extname(absPath).replace('.', '') || null,
+            lastModified: stats.mtime.toISOString(),
+            newlineStyle: metaAnalysis.newlineStyle,
+            encoding: 'utf-8',
+            hasBOM: metaAnalysis.hasBOM,
+            usesTabs: metaAnalysis.usesTabs,
+            indentSize: metaAnalysis.indentSize,
+            isConfigFile: metaAnalysis.isConfigFile,
+            configType: metaAnalysis.configType,
+            configScope: metaAnalysis.configScope
+        };
+
+        const complexity = this.computeComplexity(content, symbols, metaAnalysis.indentSize, metaAnalysis.usesTabs);
+        const usage: SmartFileProfile['usage'] = {
+            incomingCount: incomingRefs.length,
+            incomingFiles: incomingRefs.slice(0, 10),
+            outgoingCount: outgoingDeps.length,
+            outgoingFiles: outgoingDeps.slice(0, 10)
+        };
+        const testFiles = this.detectTestFiles(incomingRefs);
+        if (testFiles.length > 0) {
+            usage.testFiles = testFiles;
+        }
+
+        const guidance = this.buildGuidance(metadata, usage, metaAnalysis);
+
+        return {
+            metadata,
+            structure: {
+                skeleton,
+                symbols,
+                complexity
+            },
+            usage,
+            guidance
+        };
+    }
+
+    private computeComplexity(content: string, symbols: SymbolInfo[], indentSize?: number | null, usesTabs?: boolean): SmartFileProfile['structure']['complexity'] {
+        const linesOfCode = content.split(/\r?\n/).filter(line => line.trim().length > 0).length;
+        const functionCount = symbols.filter(symbol => symbol.type === 'function' || symbol.type === 'method').length;
+        const maxNestingDepth = this.estimateNestingDepth(content, indentSize, usesTabs);
+        return {
+            functionCount,
+            linesOfCode,
+            maxNestingDepth
+        };
+    }
+
+    private estimateNestingDepth(content: string, indentSize?: number | null, usesTabs?: boolean): number {
+        let braceDepth = 0;
+        let braceMax = 0;
+        for (const char of content) {
+            if (char === '{' || char === '(' || char === '[') {
+                braceDepth++;
+                if (braceDepth > braceMax) braceMax = braceDepth;
+            } else if (char === '}' || char === ')' || char === ']') {
+                braceDepth = Math.max(0, braceDepth - 1);
+            }
+        }
+
+        const lines = content.split(/\r?\n/);
+        const effectiveIndent = usesTabs ? 1 : (indentSize && indentSize > 0 ? indentSize : 2);
+        let indentMax = 0;
+        for (const line of lines) {
+            if (!line.trim()) continue;
+            const leading = line.length - line.trimStart().length;
+            if (leading <= 0) continue;
+            const depth = Math.floor(leading / effectiveIndent);
+            if (depth > indentMax) indentMax = depth;
+        }
+
+        return Math.max(braceMax, indentMax);
+    }
+
+    private detectTestFiles(files: string[]): string[] {
+        const patterns = [/\.test\./i, /\.spec\./i, /__tests?__/i, /^tests?\//i];
+        const seen = new Set<string>();
+        const matches: string[] = [];
+        for (const file of files) {
+            if (seen.has(file)) continue;
+            if (patterns.some(pattern => pattern.test(file))) {
+                seen.add(file);
+                matches.push(file);
+            }
+            if (matches.length >= 5) break;
+        }
+        return matches;
+    }
+
+    private buildGuidance(metadata: SmartFileProfile['metadata'], usage: SmartFileProfile['usage'], meta: FileMetadataAnalysis): SmartFileProfile['guidance'] {
+        const isLarge = metadata.lineCount > 400 || metadata.sizeBytes > 64 * 1024;
+        const readFullHint = metadata.isConfigFile
+            ? '이 파일은 구성 역할을 하므로 전체 맥락을 확인한 뒤 필요한 부분만 수정하세요. full=true는 검증 용도로만 사용하세요.'
+            : isLarge
+                ? '파일이 커서 기본 프로필과 read_fragment(lineRange)를 조합해 필요한 구간만 읽는 것이 안전합니다.'
+                : '기본 프로필에 주요 정보가 담겨 있으니 정말 필요할 때만 full=true를 사용하세요.';
+        const styleHint = `${(meta.newlineStyle || 'lf').toUpperCase()} newline / ${meta.usesTabs ? 'TAB' : `${meta.indentSize || 2}-space`} indent`;
+        const readFragmentHint = `스켈레톤 라인 번호를 기준으로 read_fragment와 edit_file(lineRange + expectedHash)을 함께 사용하세요. (Style: ${styleHint})`;
+        return {
+            bodyHidden: true,
+            readFullHint,
+            readFragmentHint
+        };
+    }
+
+    private _createErrorResponse(code: string, message: string, suggestion?: string | ToolSuggestion | ToolSuggestion[], details?: any): { isError: true; content: { type: "text"; text: string; }[] } {
         return {
             isError: true,
             content: [{ type: "text", text: JSON.stringify({ errorCode: code, message, suggestion, details }) }]
@@ -132,7 +281,7 @@ export class SmartContextServer {
                 tools: [
                     {
                         name: "read_file",
-                        description: "Reads file content. By default, it returns a 'Smart Profile' (metadata, skeleton, dependencies) to save context. Set 'full: true' strictly only when you need the entire raw content.",
+                        description: "Reads file content. By default, it returns a JSON Smart File Profile (metadata, skeleton, complexity metrics, impacted tests, guidance). Set 'full: true' strictly only when you need the entire raw content.",
                         inputSchema: {
                             type: "object",
                             properties: {
@@ -228,6 +377,44 @@ export class SmartContextServer {
                                 definitionFilePath: { type: "string" }
                             },
                             required: ["symbolName", "newName", "definitionFilePath"]
+                                                }
+                    },
+                    {
+                        name: "get_index_status",
+                        description: "Retrieves the status of the project index, including file counts and unresolved dependencies.",
+                        inputSchema: {
+                            type: "object",
+                            properties: {},
+                        }
+                    },
+                    {
+                        name: "rebuild_index",
+                        description: "Forces a rebuild of the dependency graph and clears resolution caches.",
+                        inputSchema: {
+                            type: "object",
+                            properties: {},
+                        }
+                    },
+                    {
+                        name: "invalidate_index_file",
+                        description: "Invalidates cached symbol and dependency information for a single file.",
+                        inputSchema: {
+                            type: "object",
+                            properties: {
+                                filePath: { type: "string" }
+                            },
+                            required: ["filePath"]
+                        }
+                    },
+                    {
+                        name: "invalidate_index_directory",
+                        description: "Invalidates cached index data for an entire directory (recursive).",
+                        inputSchema: {
+                            type: "object",
+                            properties: {
+                                directoryPath: { type: "string" }
+                            },
+                            required: ["directoryPath"]
                         }
                     },
                     {
@@ -308,6 +495,20 @@ export class SmartContextServer {
                         }
                     },
                     {
+                        name: "debug_edit_match",
+                        description: "Diagnose why an edit_file match failed.",
+                        inputSchema: {
+                            type: "object",
+                            properties: {
+                                filePath: { type: "string" },
+                                targetString: { type: "string" },
+                                lineRange: { type: "object", properties: { start: { type: "number" }, end: { type: "number" } } },
+                                normalization: { type: "string", enum: ["exact", "whitespace", "structural"] }
+                            },
+                            required: ["filePath", "targetString"]
+                        }
+                    },
+                    {
                         name: "undo_last_edit",
                         description: "Undoes the last successful edit_file operation using stored inverse edits.",
                         inputSchema: {
@@ -334,6 +535,14 @@ export class SmartContextServer {
                                 includeGlobs: { type: "array", items: { type: "string" } },
                                 excludeGlobs: { type: "array", items: { type: "string" } }
                             }
+                        }
+                    },
+                    {
+                        name: "get_workflow_guidance",
+                        description: "Retrieves the canonical agent playbook for interacting with the codebase.",
+                        inputSchema: {
+                            type: "object",
+                            properties: {},
                         }
                     },
                     {
@@ -368,61 +577,14 @@ export class SmartContextServer {
                         return { content: [{ type: "text", text: content }] };
                     }
 
-                    const [stats, outgoingDeps, incomingRefs] = await Promise.all([
-                        statAsync(absPath),
-                        this.dependencyGraph.getDependencies(absPath, 'outgoing'),
-                        this.dependencyGraph.getDependencies(absPath, 'incoming')
-                    ]);
-
-                    let skeleton = `// Skeleton generation failed or not applicable for this file type.`;
                     try {
-                        skeleton = await this.skeletonGenerator.generateSkeleton(absPath, content);
-                    } catch (error) {
-                        console.error(`Skeleton generation failed for ${absPath}:`, error);
-                        // Fallback to full content only if the file is small, otherwise show error message
-                        if (content.length < 5000) { // arbitrary limit, can be tuned
-                            skeleton = `// Skeleton generation failed. Displaying full content due to small file size.\n${content}`;
-                        } else {
-                            skeleton = `// Skeleton generation failed. File too large to display full content as fallback.`;
-                        }
+                        const stats = await statAsync(absPath);
+                        const profile = await this.buildSmartFileProfile(absPath, content, stats);
+                        return { content: [{ type: "text", text: JSON.stringify(profile, null, 2) }] };
+                    } catch (error: any) {
+                        console.error(`Failed to build Smart File Profile for ${absPath}:`, error);
+                        return this._createErrorResponse("ProfileBuildFailed", `Failed to build Smart File Profile: ${error.message}`);
                     }
-
-                    const relativePath = path.relative(this.rootPath, absPath) || path.basename(absPath);
-                    const sizeKb = stats.size / 1024;
-                    const lineCount = content.length === 0 ? 0 : (content.split(/\r?\n/).filter(line => line.trim() !== '')).length;
-                    const extension = path.extname(absPath).replace(/^\./, '') || 'unknown';
-
-                    const formatList = (items: string[]) => {
-                        if (!items || items.length === 0) return 'None';
-                        return items.join(', ');
-                    };
-                    const incomingFormatted = (() => {
-                        if (!incomingRefs || incomingRefs.length === 0) return 'None';
-                        const top = incomingRefs.slice(0, 5);
-                        const remainder = incomingRefs.length - top.length;
-                        const base = top.join(', ');
-                        return remainder > 0 ? `${base}, and ${remainder} others` : base;
-                    })();
-
-                    const profile = [
-                        'Metadata',
-                        `- Path: ${relativePath}`,
-                        `- Size: ${sizeKb.toFixed(2)} KB`,
-                        `- Lines: ${lineCount}`,
-                        `- Language: ${extension}`,
-                        '',
-                        'Relationships',
-                        `- Imports: ${formatList(outgoingDeps || [])}`,
-                        `- Used By: ${incomingFormatted}`,
-                        '',
-                        'Skeleton',
-                        skeleton,
-                        '',
-                        'Hint',
-                        'Use read_fragment for focused slices or call read_file with full=true for the raw document.'
-                    ].join('\n');
-
-                    return { content: [{ type: "text", text: profile }] };
                 }
                 case "read_file_skeleton": {
                     const absPath = this._getAbsPathAndVerify(args.filePath);
@@ -480,8 +642,34 @@ export class SmartContextServer {
                     // handleCallTool calls EditCoordinator.applyBatchEdits.
                     // We can call it directly.
                     
-                    const result = await this.editCoordinator.applyBatchEdits(fileEdits, true);
+                                        const result = await this.editCoordinator.applyBatchEdits(fileEdits, true);
                     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+                }
+                case "get_index_status": {
+                    const status = await this.dependencyGraph.getIndexStatus();
+                    return { content: [{ type: "text", text: JSON.stringify(status, null, 2) }] };
+                }
+                case "rebuild_index": {
+                    this.moduleResolver.clearCache();
+                    await this.dependencyGraph.build();
+                    const status = await this.dependencyGraph.getIndexStatus();
+                    return { content: [{ type: "text", text: JSON.stringify({ message: "Index rebuilt successfully", status }, null, 2) }] };
+                }
+                case "invalidate_index_file": {
+                    const absPath = this._getAbsPathAndVerify(args.filePath);
+                    await this.dependencyGraph.invalidateFile(absPath);
+                    const status = await this.dependencyGraph.getIndexStatus();
+                    return { content: [{ type: "text", text: JSON.stringify({ message: `Invalidated ${args.filePath}`, status }, null, 2) }] };
+                }
+                case "invalidate_index_directory": {
+                    const dirArg = args.directoryPath || args.path;
+                    if (!dirArg) {
+                        return this._createErrorResponse("MissingParameter", "Provide 'directoryPath' to invalidate_index_directory.");
+                    }
+                    const absDir = this._getAbsPathAndVerify(dirArg);
+                    await this.dependencyGraph.invalidateDirectory(absDir);
+                    const status = await this.dependencyGraph.getIndexStatus();
+                    return { content: [{ type: "text", text: JSON.stringify({ message: `Invalidated directory ${dirArg}`, status }, null, 2) }] };
                 }
                 case "read_fragment": {
                     const absPath = this._getAbsPathAndVerify(args.filePath);
@@ -561,10 +749,35 @@ export class SmartContextServer {
                     const results: FileSearchResult[] = await this.searchEngine.scout(scoutArgs);
                     return { content: [{ type: "text", text: JSON.stringify(results, null, 2) }] };
                 }
+                case "get_workflow_guidance": {
+                    const playbookPath = path.join(this.rootPath, 'docs', 'agent-playbook.md');
+                    let markdown: string | undefined;
+                    try {
+                        markdown = await readFileAsync(playbookPath, 'utf-8');
+                    } catch (error) {
+                        console.warn(`Agent playbook markdown missing:`, error);
+                    }
+                    const structured = JSON.stringify(AgentWorkflowGuidance, null, 2);
+                    const content = [{ type: "text", text: structured }];
+                    content.push({ type: "text", text: markdown ?? 'docs/agent-playbook.md not found. Structured workflow payload returned above.' });
+                    return { content };
+                }
                 case "list_directory": {
                     const absPath = this._getAbsPathAndVerify(args.path);
                     const tree: string = await this.contextEngine.listDirectoryTree(absPath, args.depth, this.rootPath);
                     return { content: [{ type: "text", text: tree }] };
+                }
+                case "debug_edit_match": {
+                    const absPath = this._getAbsPathAndVerify(args.filePath);
+                    const content = await readFileAsync(absPath, 'utf-8');
+                    const edit: Edit = {
+                        targetString: args.targetString,
+                        replacementString: "", // Not used for diagnostics
+                        lineRange: args.lineRange,
+                        normalization: args.normalization
+                    };
+                    const diagnostics = this.editorEngine.getDiagnostics(content, edit);
+                    return { content: [{ type: "text", text: JSON.stringify(diagnostics, null, 2) }] };
                 }
                 case "undo_last_edit": {
                     const result: EditResult = await this.editCoordinator.undo();

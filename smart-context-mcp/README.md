@@ -18,6 +18,7 @@ Smart Context MCP solves these problems with intelligent AST-based analysis, sur
 
 ### 1. 🎯 Smart Context Retrieval
 - **AST-based Skeleton Generation**: Get file outlines showing only signatures, not implementation details
+- **Rich Smart File Profiles**: `read_file` now returns JSON metadata (newline style, indentation, complexity metrics, impacted tests, workflow guidance) so agents can match formatting and understand blast radius before editing.
 - **Focused Reading**: Extract specific code regions using keywords, patterns, or line ranges
 - **Interval Merging**: Automatically merge overlapping code regions to reduce token usage
 
@@ -94,6 +95,19 @@ npm run build
 # Run the server (stdio transport)
 node dist/index.js /path/to/your/project
 ```
+
+### Engine Profiles & Environment Variables
+
+Configure the parsing backend and AST snapshotting without code changes via the following environment variables:
+
+| Variable | Values | Purpose |
+| --- | --- | --- |
+| `SMART_CONTEXT_ENGINE_MODE` | `prod` (default) \| `ci` \| `test` | Selects default parser priority/order and logging behavior. |
+| `SMART_CONTEXT_PARSER_BACKEND` | `auto` (default) \| `wasm` \| `js` \| `snapshot` | Forces a specific AST backend. `auto` picks the best available backend for the current mode. |
+| `SMART_CONTEXT_SNAPSHOT_DIR` | filesystem path | Directory containing serialized AST fixtures used by the snapshot backend in `test` mode. |
+| `SMART_CONTEXT_ROOT_PATH` | filesystem path | Explicit project root used for snapshot replay and sandbox validation (defaults to the working directory passed to the server). |
+
+These values can be exported in your shell before launching the server or configured inside your MCP client definition.
 
 ### MCP Client Configuration
 
@@ -197,6 +211,17 @@ await use_mcp_tool({
   arguments: {
     query: "EditorEngine"  // Find classes, functions, methods
   }
+});
+```
+
+### Example 6: Structured Workflow Guidance
+
+```javascript
+// Fetch the canonical workflow + recovery steps as machine-readable JSON
+await use_mcp_tool({
+  server_name: "smart-context",
+  tool_name: "get_workflow_guidance",
+  arguments: {}
 });
 ```
 

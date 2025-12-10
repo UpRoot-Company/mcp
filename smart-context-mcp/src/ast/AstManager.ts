@@ -1,17 +1,19 @@
 import * as path from 'path';
-import * as fs from 'fs';
-import { Parser, Language } from 'web-tree-sitter';
+import { AstBackend, AstDocument } from './AstBackend.js';
+import { WebTreeSitterBackend } from './WebTreeSitterBackend.js';
+import { JsAstBackend } from './JsAstBackend.js';
+import { SnapshotBackend } from './SnapshotBackend.js';
+import { EngineConfig } from '../types.js';
 
-// Mapping file extensions to tree-sitter language identifiers
 const EXT_TO_LANG: Record<string, string> = {
     '.ts': 'typescript',
     '.mts': 'typescript',
     '.cts': 'typescript',
     '.tsx': 'tsx',
-    '.js': 'tsx', // Use tsx parser for JS files for better JSX support
-    '.mjs': 'tsx', // Use tsx parser for MJS files
-    '.cjs': 'tsx', // Use tsx parser for CJS files
-    '.jsx': 'tsx', // Use tsx parser for JSX files
+    '.js': 'tsx',
+    '.mjs': 'tsx',
+    '.cjs': 'tsx',
+    '.jsx': 'tsx',
     '.py': 'python',
     '.go': 'go',
     '.rs': 'rust',
@@ -26,10 +28,14 @@ const EXT_TO_LANG: Record<string, string> = {
 export class AstManager {
     private static instance: AstManager;
     private initialized = false;
-    private languages = new Map<string, any>(); // langName -> Language instance
-    private parsers = new Map<string, any>();   // langName -> Parser instance
+    private backend: AstBackend;
+    private engineConfig: EngineConfig;
+    private activeBackend?: string;
 
-    private constructor() {}
+    private constructor() {
+        this.backend = new WebTreeSitterBackend();
+        this.engineConfig = { mode: 'prod', parserBackend: 'auto' };
+    }
 
     public static getInstance(): AstManager {
         if (!AstManager.instance) {
@@ -38,114 +44,170 @@ export class AstManager {
         return AstManager.instance;
     }
 
-    public async init(): Promise<void> {
-        if (this.initialized) return;
-        
-        try {
-            await Parser.init();
-            this.initialized = true;
-        } catch (error) {
-            console.error('Failed to initialize web-tree-sitter:', error);
-            throw error;
+    public static resetForTesting(): void {
+        if (AstManager.instance) {
+            AstManager.instance.initialized = false;
+            AstManager.instance.backend = new WebTreeSitterBackend();
+            AstManager.instance.engineConfig = { mode: 'prod', parserBackend: 'auto' };
+            AstManager.instance.activeBackend = undefined;
         }
     }
 
-    /**
-     * Pre-loads common language WASM files asynchronously.
-     * This helps reduce latency on the first parse request.
-     * Errors during warmup are logged but do not prevent other languages from loading.
-     */
+    public async init(config?: EngineConfig): Promise<void> {
+        const resolved = this.resolveConfig(config);
+        this.engineConfig = resolved;
+
+        if (this.initialized) {
+            return;
+        }
+
+        await this.initializeBackend();
+    }
+
     public async warmup(languages: string[] = ['tsx', 'python', 'json']): Promise<void> {
-        if (!this.initialized) await this.init(); // Ensure Parser is initialized
-        
-        const loadPromises = languages.map(async (langName) => {
-            try {
-                // Use getLanguageForName to leverage existing caching logic
-                await this.getLanguageForName(langName);
-            } catch (error) {
-                console.warn(`Warmup: Failed to load grammar for ${langName}:`, error);
-            }
-        });
-
-        await Promise.all(loadPromises);
-    }
-
-    /**
-     * Returns a cached Language instance for a given language name.
-     * Loads the WASM file if not already cached.
-     */
-    private async getLanguageForName(langName: string): Promise<any> {
+        // Backend specific warmup could be added to interface, for now assume initialized
         if (!this.initialized) await this.init();
-
-        let lang = this.languages.get(langName);
-        if (!lang) {
-            try {
-                const wasmPath = this.getWasmPath(langName);
-                lang = await Language.load(wasmPath);
-
-                // Ensure the language object reports its name without breaking the native instance
-                try {
-                    Object.defineProperty(lang, 'name', {
-                        configurable: true,
-                        enumerable: true,
-                        value: langName
-                    });
-                } catch (defineError) {
-                    // Fallback assignment for environments that allow direct mutation
-                    (lang as any).name = langName;
-                }
-
-                this.languages.set(langName, lang);
-            } catch (error) {
-                console.warn(`Failed to load grammar for language ${langName}:`, error);
-                throw error; // Re-throw to indicate specific language load failure
-            }
-        }
-        return lang;
     }
 
-    /**
-     * Returns a cached Language instance for a given file path's language.
-     * Delegates to getLanguageForName internally.
-     */
-    public async getLanguageForFile(filePath: string): Promise<any> {
-        const ext = path.extname(filePath).toLowerCase();
-        const langName = EXT_TO_LANG[ext];
-        
-        if (!langName) {
+    public async parseFile(filePath: string, content: string): Promise<AstDocument> {
+        if (!this.initialized) await this.init();
+        return this.backend.parseFile(filePath, content);
+    }
+
+    public async getParserForFile(filePath: string): Promise<any> {
+        if (!this.initialized) await this.init();
+        let langName: string;
+        try {
+            langName = this.resolveLanguageId(filePath);
+        } catch {
             return null;
         }
-        return this.getLanguageForName(langName);
+        if (typeof (this.backend as any).getParser === 'function') {
+            try {
+                return await (this.backend as any).getParser(langName);
+            } catch (error) {
+                console.warn(`Failed to retrieve parser for ${filePath}:`, error);
+                return null;
+            }
+        }
+        return null;
     }
 
-    /**
-     * Returns a cached parser instance configured for the given file's language.
-     * Do NOT delete this parser.
-     */
-    public async getParserForFile(filePath: string): Promise<any> {
-        const lang = await this.getLanguageForFile(filePath);
-        if (!lang) return null;
+    public async getLanguageForFile(filePath: string): Promise<any> {
+        if (!this.initialized) await this.init();
+        
+        // This assumes backend can return a language object compatible with what caller needs (Query)
+        // WebTreeSitterBackend returns a tree-sitter Language.
+        // We need to map filePath to languageId.
+        // WebTreeSitterBackend has this logic inside parseFile.
+        // We need to expose it or duplicate it. 
+        // Ideally AstBackend has 'identifyLanguage(filePath)'?
+        // Or we just pass the extension/hint to getLanguage.
+        
+        const ext = path.extname(filePath).toLowerCase();
+        // Duplicate map for now or move to shared? 
+        // It's in WebTreeSitterBackend. 
+        // Let's rely on standard extension mapping or ask backend.
+        // For now, let's hardcode common ones or use a shared constant.
+        // I'll stick to the one in WebTreeSitterBackend but I can't access it easily.
+        // I'll just copy the map here for getLanguage resolution if needed, OR 
+        // better: AstBackend should have getLanguageId(filePath).
+        
+        // For minimal changes:
+        const langName = this.resolveLanguageId(filePath);
+        return this.backend.getLanguage(langName);
+    }
 
+    public getLanguageId(filePath: string): string {
+        return this.resolveLanguageId(filePath);
+    }
+
+    public getActiveBackend(): string | undefined {
+        return this.activeBackend;
+    }
+
+    public supportsQueries(): boolean {
+        return this.backend.capabilities.supportsQueries;
+    }
+
+    private resolveConfig(overrides?: EngineConfig): EngineConfig {
+        const envMode = process.env.SMART_CONTEXT_ENGINE_MODE as EngineConfig['mode'] | undefined;
+        const envBackend = process.env.SMART_CONTEXT_PARSER_BACKEND as EngineConfig['parserBackend'] | undefined;
+        const envSnapshot = process.env.SMART_CONTEXT_SNAPSHOT_DIR;
+        const envRoot = process.env.SMART_CONTEXT_ROOT_PATH || process.env.SMART_CONTEXT_ROOT;
+
+        return {
+            mode: overrides?.mode ?? envMode ?? this.engineConfig.mode ?? 'prod',
+            parserBackend: overrides?.parserBackend ?? envBackend ?? this.engineConfig.parserBackend ?? 'auto',
+            snapshotDir: overrides?.snapshotDir ?? envSnapshot ?? this.engineConfig.snapshotDir,
+            rootPath: overrides?.rootPath ?? this.engineConfig.rootPath ?? envRoot ?? process.cwd()
+        };
+    }
+
+    private getBackendPriority(): Array<NonNullable<EngineConfig['parserBackend']>> {
+        const mode = this.engineConfig.mode ?? 'prod';
+        const requested = this.engineConfig.parserBackend ?? 'auto';
+
+        if (requested !== 'auto') {
+            return [requested];
+        }
+
+        switch (mode) {
+            case 'test':
+                return ['snapshot', 'wasm', 'js'];
+            case 'ci':
+                return ['wasm', 'js'];
+            case 'prod':
+            default:
+                return ['wasm', 'js'];
+        }
+    }
+
+    private instantiateBackend(kind: string): AstBackend {
+        switch (kind) {
+            case 'wasm':
+                return new WebTreeSitterBackend();
+            case 'js':
+                return new JsAstBackend();
+            case 'snapshot':
+                if (!this.engineConfig.snapshotDir || !this.engineConfig.rootPath) {
+                    throw new Error('Snapshot backend requires snapshotDir and rootPath');
+                }
+                return new SnapshotBackend({
+                    snapshotDir: this.engineConfig.snapshotDir,
+                    rootPath: this.engineConfig.rootPath
+                });
+            default:
+                throw new Error(`Unknown parser backend: ${kind}`);
+        }
+    }
+
+    private async initializeBackend(): Promise<void> {
+        const candidates = this.getBackendPriority();
+        const errors: string[] = [];
+
+        for (const candidate of candidates) {
+            try {
+                const backend = this.instantiateBackend(candidate);
+                await backend.initialize();
+                this.backend = backend;
+                this.initialized = true;
+                this.activeBackend = candidate;
+                return;
+            } catch (error: any) {
+                errors.push(`${candidate}: ${error.message}`);
+            }
+        }
+
+        throw new Error(`Failed to initialize AST backend. Attempts: ${errors.join('; ')}`);
+    }
+
+    private resolveLanguageId(filePath: string): string {
         const ext = path.extname(filePath).toLowerCase();
         const langName = EXT_TO_LANG[ext];
-
-        let parser = this.parsers.get(langName);
-        if (!parser) {
-            parser = new Parser();
-            parser.setLanguage(lang);
-            this.parsers.set(langName, parser);
+        if (!langName) {
+            throw new Error(`Unsupported language for ${filePath}`);
         }
-        return parser;
-    }
-
-    private getWasmPath(langName: string): string {
-        try {
-            const currentDir = path.dirname(new URL(import.meta.url).pathname);
-            const projectRoot = path.resolve(currentDir, '../../');
-            const wasmPath = path.join(projectRoot, 'node_modules', 'tree-sitter-wasms', 'out', `tree-sitter-${langName}.wasm`);
-            return wasmPath;
-        } catch (error) {
-            return path.join(process.cwd(), 'node_modules', 'tree-sitter-wasms', 'out', `tree-sitter-${langName}.wasm`);
-        }
+        return langName;
     }
 }

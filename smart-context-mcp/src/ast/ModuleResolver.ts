@@ -3,9 +3,36 @@ import * as path from 'path';
 import * as resolve from 'resolve';
 import { createMatchPath, loadConfig, MatchPath } from 'tsconfig-paths';
 
+export type ModuleResolverFallback = 'node' | 'bundler';
+
+export interface ModuleResolverConfig {
+    rootPath: string;
+    tsconfigPaths?: string[];
+    fallbackResolution?: ModuleResolverFallback;
+}
+
+interface TsconfigMatcher {
+    matchPath: MatchPath;
+    configPath: string;
+    absoluteBaseUrl: string;
+}
+
+export interface ResolutionAttempt {
+    strategy: 'relative' | 'absolute' | 'alias' | 'node' | 'bundler';
+    detail?: string;
+}
+
+export interface ResolutionResult {
+    resolvedPath: string | null;
+    strategy: ResolutionAttempt['strategy'] | 'unresolved';
+    attempts: ResolutionAttempt[];
+    error?: string;
+    metadata?: Record<string, string>;
+}
+
 export class ModuleResolver {
-    // Cache: key = "contextPath|importPath", value = resolvedPath (or null)
-    private resolutionCache = new Map<string, string | null>();
+    // Cache: key = "contextPath|importPath", value = detailed resolution result
+    private resolutionCache = new Map<string, ResolutionResult>();
     // Stat Cache: key = path, value = boolean (exists and is file)
     private fileExistsCache = new Map<string, boolean>();
     // Dir Cache: key = path, value = boolean (exists and is directory)
@@ -13,39 +40,95 @@ export class ModuleResolver {
 
     private extensions = ['.ts', '.tsx', '.d.ts', '.js', '.jsx', '.json'];
     private rootPath: string;
-    private matchPath: MatchPath | null = null;
+    private tsconfigMatchers: TsconfigMatcher[] = [];
+    private fallback: ModuleResolverFallback;
 
-    constructor(rootPath: string) {
-        this.rootPath = rootPath;
-        this.initializeTsconfigMatcher();
+    constructor(config: string | ModuleResolverConfig) {
+        if (typeof config === 'string') {
+            this.rootPath = config;
+            this.fallback = 'node';
+        } else {
+            this.rootPath = config.rootPath;
+            this.fallback = config.fallbackResolution || 'node';
+            if (config.tsconfigPaths && config.tsconfigPaths.length > 0) {
+                this.initializeTsconfigMatchers(config.tsconfigPaths);
+            }
+        }
+
+        if (this.tsconfigMatchers.length === 0) {
+            this.initializeTsconfigMatchers();
+        }
     }
 
     public resolve(contextPath: string, importPath: string): string | null {
-        // 1. Check cache
+        return this.resolveDetailed(contextPath, importPath).resolvedPath;
+    }
+
+    public resolveDetailed(contextPath: string, importPath: string): ResolutionResult {
         const cacheKey = JSON.stringify([contextPath, importPath]);
         if (this.resolutionCache.has(cacheKey)) {
             return this.resolutionCache.get(cacheKey)!;
         }
 
+        const attempts: ResolutionAttempt[] = [];
         let resolved: string | null = null;
+        let strategy: ResolutionResult['strategy'] = 'unresolved';
+        let metadata: Record<string, string> | undefined;
 
-        // 2. Handle Relative Paths
+        const recordAttempt = (attempt: ResolutionAttempt) => attempts.push(attempt);
+
         if (importPath.startsWith('./') || importPath.startsWith('../')) {
+            recordAttempt({ strategy: 'relative' });
             resolved = this.resolveRelative(contextPath, importPath);
+            if (resolved) strategy = 'relative';
         } else if (path.isAbsolute(importPath)) {
-             resolved = this.resolveFile(importPath);
+            recordAttempt({ strategy: 'absolute' });
+            resolved = this.resolveFile(importPath);
+            strategy = resolved ? 'absolute' : 'unresolved';
         } else {
-            // 3. Try TSConfig Paths Alias
-            resolved = this.resolvePathsAlias(importPath);
+            const aliasResult = this.resolvePathsAlias(importPath);
+            if (aliasResult) {
+                recordAttempt({ strategy: 'alias', detail: aliasResult.configPath });
+                resolved = aliasResult.resolvedPath;
+                strategy = resolved ? 'alias' : 'unresolved';
+                metadata = { configPath: aliasResult.configPath };
+            } else {
+                recordAttempt({ strategy: 'alias' });
+            }
+
             if (!resolved) {
-                // 4. Handle Node Modules & Ambiguous Imports
+                recordAttempt({ strategy: 'node' });
                 resolved = this.resolveNodeModule(contextPath, importPath);
+                if (resolved) {
+                    strategy = 'node';
+                }
+            }
+
+            if (!resolved && this.fallback === 'bundler') {
+                recordAttempt({ strategy: 'bundler' });
+                resolved = this.resolveBundlerLike(importPath);
+                if (resolved) {
+                    strategy = 'bundler';
+                }
             }
         }
 
-        // 5. Update cache
-        this.resolutionCache.set(cacheKey, resolved);
-        return resolved;
+        if (strategy === 'unresolved') {
+            metadata = metadata || {};
+            metadata.reason = `Unresolved after attempts: ${attempts.map(a => a.strategy).join(', ')}`;
+        }
+
+        const result: ResolutionResult = {
+            resolvedPath: resolved,
+            strategy,
+            attempts,
+            error: resolved ? undefined : 'Module resolution failed',
+            metadata
+        };
+
+        this.resolutionCache.set(cacheKey, result);
+
+        return result;
     }
 
     private resolveRelative(contextPath: string, importPath: string): string | null {
@@ -75,6 +158,25 @@ export class ModuleResolver {
                 return null;
             }
         }
+    }
+
+    private resolveBundlerLike(importPath: string): string | null {
+        if (importPath.startsWith('.') || importPath.startsWith('/')) return null;
+
+        const baseCandidates = new Set<string>([this.rootPath]);
+        for (const matcher of this.tsconfigMatchers) {
+            baseCandidates.add(matcher.absoluteBaseUrl);
+        }
+
+        for (const base of baseCandidates) {
+            const candidate = path.join(base, importPath);
+            const resolved = this.resolveFile(candidate);
+            if (resolved) {
+                return resolved;
+            }
+        }
+
+        return null;
     }
 
     private resolveFile(absolutePath: string): string | null {
@@ -130,40 +232,92 @@ export class ModuleResolver {
         }
     }
 
-    private initializeTsconfigMatcher() {
-        try {
-            const configResult = loadConfig(this.rootPath);
-            if (
-                configResult.resultType === 'success' &&
-                configResult.absoluteBaseUrl &&
-                configResult.paths &&
-                Object.keys(configResult.paths).length > 0
-            ) {
-                this.matchPath = createMatchPath(
-                    configResult.absoluteBaseUrl,
-                    configResult.paths,
-                    configResult.mainFields,
-                    configResult.addMatchAll
-                );
-            } else {
-                this.matchPath = null;
+    private initializeTsconfigMatchers(explicitPaths?: string[]) {
+        this.tsconfigMatchers = [];
+        const candidates = explicitPaths && explicitPaths.length > 0
+            ? explicitPaths
+            : this.discoverTsconfigPaths();
+        const seen = new Set<string>();
+
+        for (const candidate of candidates) {
+            const configPath = path.isAbsolute(candidate) ? candidate : path.join(this.rootPath, candidate);
+            if (!fs.existsSync(configPath)) continue;
+            const normalized = configPath;
+            if (seen.has(normalized)) continue;
+            seen.add(normalized);
+
+            try {
+                const configResult = loadConfig(normalized);
+                if (
+                    configResult.resultType === 'success' &&
+                    configResult.absoluteBaseUrl &&
+                    configResult.paths &&
+                    Object.keys(configResult.paths).length > 0
+                ) {
+                    const matchPath = createMatchPath(
+                        configResult.absoluteBaseUrl,
+                        configResult.paths,
+                        configResult.mainFields,
+                        configResult.addMatchAll
+                    );
+                    this.tsconfigMatchers.push({
+                        matchPath,
+                        configPath: configResult.configFileAbsolutePath || normalized,
+                        absoluteBaseUrl: configResult.absoluteBaseUrl
+                    });
+                }
+            } catch (error) {
+                // Ignore malformed configs while keeping resolver functional
             }
-        } catch {
-            this.matchPath = null;
         }
     }
 
-    private resolvePathsAlias(importPath: string): string | null {
-        if (!this.matchPath) return null;
-        try {
-            const matched = this.matchPath(importPath, undefined, undefined, this.extensions);
-            if (!matched) {
-                return null;
+    private discoverTsconfigPaths(): string[] {
+        const defaults = new Set<string>();
+        const rootFiles = fs.existsSync(this.rootPath) ? fs.readdirSync(this.rootPath) : [];
+        for (const file of rootFiles) {
+            if (file.startsWith('tsconfig') && file.endsWith('.json')) {
+                defaults.add(path.join(this.rootPath, file));
             }
-            return this.resolveFile(matched);
-        } catch {
-            return null;
         }
+
+        const candidateDirs = ['packages', 'apps', 'libs', 'services'];
+        for (const dir of candidateDirs) {
+            const full = path.join(this.rootPath, dir);
+            if (!fs.existsSync(full) || !fs.statSync(full).isDirectory()) continue;
+            for (const sub of fs.readdirSync(full)) {
+                const tsconfigPath = path.join(full, sub, 'tsconfig.json');
+                if (fs.existsSync(tsconfigPath)) {
+                    defaults.add(tsconfigPath);
+                }
+            }
+        }
+
+        const direct = path.join(this.rootPath, 'tsconfig.json');
+        if (fs.existsSync(direct)) {
+            defaults.add(direct);
+        }
+
+        return Array.from(defaults);
+    }
+
+    private resolvePathsAlias(importPath: string): { resolvedPath: string | null; configPath: string } | null {
+        if (this.tsconfigMatchers.length === 0) return null;
+        for (const matcher of this.tsconfigMatchers) {
+            try {
+                const matched = matcher.matchPath(importPath, undefined, undefined, this.extensions);
+                if (!matched) {
+                    continue;
+                }
+                const resolved = this.resolveFile(matched);
+                if (resolved) {
+                    return { resolvedPath: resolved, configPath: matcher.configPath };
+                }
+            } catch {
+                continue;
+            }
+        }
+        return null;
     }
 
     public clearCache() {

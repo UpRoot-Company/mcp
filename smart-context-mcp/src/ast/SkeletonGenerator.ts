@@ -45,42 +45,59 @@ const LANGUAGE_CONFIG: Record<string, FoldQuery> = {
 export class SkeletonGenerator {
     private astManager: AstManager;
     private queryCache = new Map<string, any>(); 
-    private extractionQueryCache = new Map<string, any>(); 
+    private extractionQueryCache = new Map<string, Query>(); 
 
     constructor() {
         this.astManager = AstManager.getInstance();
     }
 
+    public async getParserForFile(filePath: string) {
+        return this.astManager.getParserForFile(filePath);
+    }
+
+    public async getLanguageForFile(filePath: string) {
+        return this.astManager.getLanguageForFile(filePath);
+    }
+
     public async generateSkeleton(filePath: string, content: string): Promise<string> {
         if (typeof content !== 'string') return '';
 
-        const parser = await this.astManager.getParserForFile(filePath);
-        if (!parser) return content;
+        if (!this.astManager.supportsQueries()) {
+            return content;
+        }
+
+        let doc;
+        try {
+            doc = await this.astManager.parseFile(filePath, content);
+        } catch (e) {
+            return content;
+        }
 
         const lang = await this.astManager.getLanguageForFile(filePath);
+        const langId = this.astManager.getLanguageId(filePath);
         const config = this.getLanguageConfig(filePath);
         if (!config) return content;
 
-        let tree: any | null = null;
+        let rootNode: any | null = null;
         try {
-            tree = parser.parse(content);
+            rootNode = doc.rootNode;
 
-            const maybeHasError = tree?.rootNode?.hasError;
+            const maybeHasError = rootNode?.hasError;
             const rootHasError = typeof maybeHasError === 'function'
-                ? maybeHasError.call(tree.rootNode)
+                ? maybeHasError.call(rootNode)
                 : Boolean(maybeHasError);
 
             if (rootHasError) {
                 throw new Error('Tree-sitter parse error detected while building skeleton');
             }
-            const queryKey = `${lang.name}:${config.query}`; 
+            const queryKey = `${langId}:${config.query}`; 
             let query = this.queryCache.get(queryKey);
             if (!query) {
                 query = new Query(lang, config.query);
                 this.queryCache.set(queryKey, query);
             }
 
-            const matches = query.matches(tree.rootNode);
+            const matches = query.matches(rootNode);
             const rangesToFold: { start: number; end: number; }[] = [];
 
             for (const match of matches) {
@@ -123,31 +140,35 @@ export class SkeletonGenerator {
         } catch (error) {
             throw error; 
         } finally {
-            if (tree) tree.delete();
+            doc?.dispose?.();
         }
     }
 
     public async generateStructureJson(filePath: string, content: string): Promise<SymbolInfo[]> {
         if (typeof content !== 'string') return [];
 
-        const parser = await this.astManager.getParserForFile(filePath);
-        if (!parser) return [];
+        let doc;
+        try {
+            doc = await this.astManager.parseFile(filePath, content);
+        } catch (e) {
+            return [];
+        }
 
         const lang = await this.astManager.getLanguageForFile(filePath);
-        if (!lang) return [];
+        if (!lang || !this.astManager.supportsQueries()) return [];
+        const langId = this.astManager.getLanguageId(filePath);
 
-        let tree: any | null = null;
+        let rootNode: any | null = null;
         const symbols: SymbolInfo[] = [];
 
         try {
-            tree = parser.parse(content);
-            const rootNode = tree.rootNode;
-            const queryKey = lang.name + '_EXTRACT';
+            rootNode = doc.rootNode;
+            const queryKey = langId + '_EXTRACT';
             let query = this.extractionQueryCache.get(queryKey);
 
             if (!query) {
                 let extractionQuerySource = '';
-                if (lang.name === 'typescript' || lang.name === 'tsx' || lang.name === 'javascript') {
+                if (langId === 'typescript' || langId === 'tsx' || langId === 'javascript') {
                     extractionQuerySource = `
                         (class_declaration name: (type_identifier) @name) @definition
                         (function_declaration name: (identifier) @name) @definition
@@ -157,7 +178,7 @@ export class SkeletonGenerator {
                         (import_statement) @import
                         (export_statement) @export
                     `;
-                } else if (lang.name === 'python') {
+                } else if (langId === 'python') {
                     extractionQuerySource = `
                         (class_definition name: (identifier) @name) @definition
                         (function_definition name: (identifier) @name) @definition
@@ -176,14 +197,14 @@ export class SkeletonGenerator {
                     if (capture.name === 'definition') {
                         const nameCapture = match.captures.find((c: any) => c.name === 'name');
                         if (nameCapture) {
-                            const symbol = this.processDefinition(capture.node, nameCapture.node, lang.name);
+                            const symbol = this.processDefinition(capture.node, nameCapture.node, langId);
                             if (symbol) symbols.push(symbol);
                         }
                     } else if (capture.name === 'import') {
-                        const importSymbols = this.processImport(capture.node, lang.name);
+                        const importSymbols = this.processImport(capture.node, langId);
                         symbols.push(...importSymbols);
                     } else if (capture.name === 'export') {
-                        const exportSymbols = this.processExport(capture.node, lang.name);
+                        const exportSymbols = this.processExport(capture.node, langId);
                         symbols.push(...exportSymbols);
                     }
                 }
@@ -193,7 +214,7 @@ export class SkeletonGenerator {
             console.error(`Error generating JSON skeleton for ${filePath}:`, error);
             throw error; 
         } finally {
-            if (tree) tree.delete();
+            doc?.dispose?.();
         }
 
         return symbols;
@@ -201,23 +222,33 @@ export class SkeletonGenerator {
 
     public async findIdentifiers(filePath: string, content: string, targetNames: string[]): Promise<{ name: string, range: any }[]> {
         if (typeof content !== 'string') return [];
-        const parser = await this.astManager.getParserForFile(filePath);
-        if (!parser) return [];
+        
+        if (!this.astManager.supportsQueries()) {
+            return [];
+        }
+
+        let doc;
+        try {
+            doc = await this.astManager.parseFile(filePath, content);
+        } catch (e) {
+            return [];
+        }
+
         const lang = await this.astManager.getLanguageForFile(filePath);
         if (!lang) return [];
 
-        let tree: any | null = null;
+        let rootNode: any | null = null;
         const results: { name: string, range: any }[] = [];
 
         try {
-            tree = parser.parse(content);
+            rootNode = doc.rootNode;
             const query = new Query(lang, `
                 (identifier) @id
                 (property_identifier) @id
                 (type_identifier) @id
                 (shorthand_property_identifier_pattern) @id
             `);
-            const matches = query.matches(tree.rootNode);
+            const matches = query.matches(rootNode);
             
             const targetSet = new Set(targetNames);
 
@@ -238,7 +269,7 @@ export class SkeletonGenerator {
         } catch (error) {
             console.error(`Error finding identifiers in ${filePath}:`, error);
         } finally {
-            if (tree) tree.delete();
+            doc?.dispose?.();
         }
         return results;
     }

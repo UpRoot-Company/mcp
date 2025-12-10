@@ -2,10 +2,19 @@ import * as fs from "fs";
 import { promisify } from "util";
 import * as path from "path";
 import * as crypto from "crypto";
+import { createRequire } from "module";
 import { MyersDiff } from "./Diff.js";
 import levenshtein from "fast-levenshtein";
-import { Edit, EditOperation, EditResult, LineRange } from "../types.js";
+import { Edit, EditOperation, EditResult, LineRange, MatchDiagnostics, ToolSuggestion } from "../types.js";
 import { LineCounter } from "./LineCounter.js";
+const require = createRequire(import.meta.url);
+let importedXxhash: any = null;
+try {
+    importedXxhash = require('xxhashjs');
+} catch {
+    importedXxhash = null;
+}
+const XXH: any = importedXxhash ? ((importedXxhash as any).default ?? importedXxhash) : null;
 
 const readFileAsync = promisify(fs.readFile);
 const writeFileAsync = promisify(fs.writeFile);
@@ -19,8 +28,10 @@ interface Match {
     original: string;
     lineNumber: number;
     confidence?: number;
-    matchType?: 'exact' | 'whitespace-fuzzy' | 'levenshtein';
+    matchType?: 'exact' | 'whitespace-fuzzy' | 'levenshtein' | 'normalization';
 }
+
+type NormalizationLevel = "exact" | "whitespace" | "structural";
 
 export class AmbiguousMatchError extends Error {
     public conflictingLines: number[];
@@ -29,6 +40,20 @@ export class AmbiguousMatchError extends Error {
         super(message);
         this.name = "AmbiguousMatchError";
         this.conflictingLines = details.conflictingLines;
+    }
+}
+
+export class HashMismatchError extends Error {
+    constructor(message: string) {
+        super(message);
+        this.name = "HashMismatchError";
+    }
+}
+
+export class MatchNotFoundError extends Error {
+    constructor(message: string) {
+        super(message);
+        this.name = "MatchNotFoundError";
     }
 }
 
@@ -107,9 +132,56 @@ export class EditorEngine {
         return pattern;
     }
 
-    private createExactRegex(target: string): RegExp {
-        const pattern = this.createBoundaryPattern(target);
-        return new RegExp(pattern, "g");
+    private normalizeString(str: string, level: NormalizationLevel): string {
+        if (level === "exact") return str;
+        
+        let normalized = str;
+        
+        // Whitespace level: CRLF -> LF, trim trailing lines
+        if (level === "whitespace" || level === "structural") {
+            normalized = normalized.replace(/\r\n/g, '\n');
+            normalized = normalized.split('\n').map(line => line.trimEnd()).join('\n');
+        }
+
+        // Structural level: Normalize indentation to single spaces, collapse internal spacing
+        if (level === "structural") {
+            normalized = normalized.split('\n')
+                .map(line => line.trim()) // Ignore indentation completely
+                .filter(line => line.length > 0) // Ignore empty lines
+                .join('\n');
+            // Collapse internal whitespace sequences to single space
+            normalized = normalized.replace(/\s+/g, ' ');
+        }
+
+        return normalized;
+    }
+
+    private getNormalizationAttempts(level?: NormalizationLevel): NormalizationLevel[] {
+        if (!level || level === "exact") {
+            return ["exact"];
+        }
+        if (level === "whitespace") {
+            return ["exact", "whitespace"];
+        }
+        return ["exact", "whitespace", "structural"];
+    }
+
+    private createExactRegex(target: string, normalization: NormalizationLevel = "exact"): RegExp {
+        const normalizedTarget = this.normalizeString(target, normalization);
+        const escaped = this.escapeRegExp(normalizedTarget);
+        
+        if (normalization === "exact") {
+            return new RegExp(escaped, 'g');
+        } else if (normalization === "whitespace") {
+            // Flexible whitespace regex logic
+            // Replace \n with pattern that matches \r?\n and optional surrounding whitespace
+            const parts = escaped.split('\\n');
+            // Allow for varying indentation and line endings between lines
+            return new RegExp(parts.join('\\s*\\r?\\n\\s*'), 'g');
+        } else {
+            // Structural fallback
+            return new RegExp(escaped.replace(/\s+/g, '\\s+'), 'g');
+        }
     }
 
     private createFuzzyRegex(target: string): RegExp {
@@ -323,7 +395,8 @@ export class EditorEngine {
         content: string,
         edit: Edit,
         matches: Match[],
-        filteredMatches: Match[]
+        filteredMatches: Match[],
+        options?: { normalizationAttempts?: { level: NormalizationLevel; matchCount: number; }[] }
     ): string {
         const diagnostics: string[] = [];
         
@@ -333,6 +406,13 @@ export class EditorEngine {
         const mode = edit.fuzzyMode || 'exact';
         diagnostics.push(`- Matching mode: ${mode}`);
         
+        if (options?.normalizationAttempts && options.normalizationAttempts.length > 0) {
+            const attemptSummary = options.normalizationAttempts
+                .map((attempt) => `${attempt.level}(${attempt.matchCount})`)
+                .join(', ');
+            diagnostics.push(`- Normalization attempts: ${attemptSummary}`);
+        }
+
         if (matches.length === 0) {
             diagnostics.push(`- Initial search found 0 matches`);
             diagnostics.push(`- Tip: Try fuzzyMode: "whitespace" or "levenshtein"`);
@@ -462,39 +542,54 @@ export class EditorEngine {
 
     private findMatch(content: string, edit: Edit, lineCounter: LineCounter): Match {
         let matches: Match[] = [];
+        const normalizationDiagnostics: { level: NormalizationLevel; matchCount: number }[] = [];
 
         if (edit.fuzzyMode === "levenshtein") {
-             // Try exact match first
-             const exactRegex = this.createExactRegex(edit.targetString);
-             const exactMatches = [...content.matchAll(exactRegex)].map(m => ({
-                 start: m.index!,
-                 end: m.index! + m[0].length,
-                 replacement: edit.replacementString,
-                 original: m[0],
-                 lineNumber: lineCounter.getLineNumber(m.index!),
-                 matchType: 'exact' as const
-             }));
+            // Try exact match first
+            const exactRegex = this.createExactRegex(edit.targetString);
+            const exactMatches = [...content.matchAll(exactRegex)].map(m => ({
+                start: m.index!,
+                end: m.index! + m[0].length,
+                replacement: edit.replacementString,
+                original: m[0],
+                lineNumber: lineCounter.getLineNumber(m.index!),
+                matchType: 'exact' as const
+            }));
 
-             if (exactMatches.length > 0) {
-                 matches = exactMatches;
-             } else {
-                 matches = this.findLevenshteinCandidates(content, edit.targetString, edit.replacementString, lineCounter, edit.lineRange);
-             }
-        } else {
-            let regex: RegExp;
-            if (edit.fuzzyMode === "whitespace") {
-                regex = this.createFuzzyRegex(edit.targetString);
+            if (exactMatches.length > 0) {
+                matches = exactMatches;
             } else {
-                regex = this.createExactRegex(edit.targetString);
+                matches = this.findLevenshteinCandidates(content, edit.targetString, edit.replacementString, lineCounter, edit.lineRange);
             }
+        } else if (edit.fuzzyMode === "whitespace") {
+            const regex = this.createFuzzyRegex(edit.targetString);
             matches = [...content.matchAll(regex)].map(m => ({
                 start: m.index!,
                 end: m.index! + m[0].length,
                 replacement: edit.replacementString,
                 original: m[0],
                 lineNumber: lineCounter.getLineNumber(m.index!),
-                matchType: (edit.fuzzyMode === 'whitespace' ? 'whitespace-fuzzy' : 'exact')
+                matchType: 'whitespace-fuzzy' as const
             }));
+        } else {
+            const attempts = this.getNormalizationAttempts(edit.normalization);
+            for (const level of attempts) {
+                const regex = this.createExactRegex(edit.targetString, level);
+                const matchType: Match['matchType'] = level === 'exact' ? 'exact' : 'normalization';
+                const attemptMatches = [...content.matchAll(regex)].map(m => ({
+                    start: m.index!,
+                    end: m.index! + m[0].length,
+                    replacement: edit.replacementString,
+                    original: m[0],
+                    lineNumber: lineCounter.getLineNumber(m.index!),
+                    matchType
+                }));
+                normalizationDiagnostics.push({ level, matchCount: attemptMatches.length });
+                if (attemptMatches.length > 0) {
+                    matches = attemptMatches;
+                    break;
+                }
+            }
         }
 
         const filteredMatches = matches.filter(match => {
@@ -533,13 +628,97 @@ export class EditorEngine {
         });
 
         if (filteredMatches.length === 0) {
-            throw new Error(this.generateMatchFailureDiagnostics(content, edit, matches, filteredMatches));
+            throw new MatchNotFoundError(
+                this.generateMatchFailureDiagnostics(content, edit, matches, filteredMatches, {
+                    normalizationAttempts: normalizationDiagnostics
+                })
+            );
         }
         if (filteredMatches.length > 1) {
             throw this.generateAmbiguousMatchError(content, edit, filteredMatches);
         }
 
         return filteredMatches[0];
+    }
+
+    private getCharRangeForLineRange(lineRange: LineRange, lineCounter: LineCounter, contentLength: number): { start: number; end: number } {
+        const startIndex = lineCounter.getCharIndexForLine(lineRange.start);
+        const endIndex = lineRange.end >= lineCounter.lineCount
+            ? contentLength
+            : lineCounter.getCharIndexForLine(lineRange.end + 1);
+        return { start: startIndex, end: endIndex };
+    }
+
+    private computeHash(value: string, algorithm: 'sha256' | 'xxhash'): string {
+        if (algorithm === 'xxhash' && XXH) {
+            return XXH.h64(0xABCD).update(value).digest().toString(16);
+        }
+        return crypto.createHash('sha256').update(value).digest('hex');
+    }
+
+    private buildSuggestion(code: string, filePath: string, edit?: Edit): ToolSuggestion | undefined {
+        const relativePath = path.relative(this.rootPath, filePath);
+        const buildArgs = (extras: Record<string, unknown>): Record<string, unknown> => {
+            const args: Record<string, unknown> = { filePath: relativePath, ...extras };
+            Object.keys(args).forEach(key => args[key] === undefined && delete args[key]);
+            return args;
+        };
+
+        switch (code) {
+            case "NO_MATCH":
+                return {
+                    toolName: "debug_edit_match",
+                    rationale: "Check normalization and anchors before retrying the edit.",
+                    exampleArgs: buildArgs({
+                        targetString: edit?.targetString,
+                        lineRange: edit?.lineRange,
+                        normalization: edit?.normalization ?? "whitespace"
+                    })
+                };
+            case "AMBIGUOUS_MATCH":
+                return {
+                    toolName: "debug_edit_match",
+                    rationale: "Identify conflicting regions and tighten lineRange or context before retrying.",
+                    exampleArgs: buildArgs({
+                        targetString: edit?.targetString,
+                        lineRange: edit?.lineRange
+                    })
+                };
+            case "HASH_MISMATCH":
+                return {
+                    toolName: "read_file",
+                    rationale: "Re-read the Smart File Profile to refresh hashes before editing again.",
+                    exampleArgs: buildArgs({})
+                };
+            default:
+                return undefined;
+        }
+    }
+
+    private validateExpectedHash(
+        edit: Edit,
+        content: string,
+        match: Match,
+        lineCounter: LineCounter
+    ): void {
+        if (!edit.expectedHash) return;
+
+        const { algorithm, value } = edit.expectedHash;
+        const range = edit.lineRange
+            ? this.getCharRangeForLineRange(edit.lineRange, lineCounter, content.length)
+            : { start: match.start, end: match.end };
+
+        const slice = content.substring(range.start, range.end);
+        const computed = this.computeHash(slice, algorithm);
+
+        if (computed !== value) {
+            const err = new HashMismatchError(
+                `Hash mismatch detected for ${edit.lineRange ? `lines ${edit.lineRange.start}-${edit.lineRange.end}` : `target "${edit.targetString}"`}. ` +
+                `Expected ${value}, computed ${computed}.`
+            );
+            (err as any).edit = edit;
+            throw err;
+        }
     }
 
     private applyEditsInternal(originalContent: string, edits: Edit[]): Match[] {
@@ -563,6 +742,17 @@ export class EditorEngine {
                     );
                 }
 
+                if (edit.expectedHash) {
+                    const computed = this.computeHash(existing, edit.expectedHash.algorithm);
+                    if (computed !== edit.expectedHash.value) {
+                        const err = new HashMismatchError(
+                            `Hash mismatch detected for index range [${start}, ${end}). Expected ${edit.expectedHash.value}, computed ${computed}.`
+                        );
+                        (err as any).edit = edit;
+                        throw err;
+                    }
+                }
+
                 plannedMatches.push({
                     start,
                     end,
@@ -572,8 +762,14 @@ export class EditorEngine {
                     matchType: 'exact'
                 });
             } else {
-                const match = this.findMatch(originalContent, edit, lineCounter);
-                plannedMatches.push(match);
+                try {
+                    const match = this.findMatch(originalContent, edit, lineCounter);
+                    this.validateExpectedHash(edit, originalContent, match, lineCounter);
+                    plannedMatches.push(match);
+                } catch (error) {
+                    (error as any).edit = edit;
+                    throw error;
+                }
             }
         }
 
@@ -588,6 +784,51 @@ export class EditorEngine {
         }
 
         return plannedMatches;
+    }
+
+    public getDiagnostics(content: string, edit: Edit): MatchDiagnostics {
+        const lineCounter = new LineCounter(content);
+        const diagnostics: MatchDiagnostics = { attempts: [] };
+
+        // Attempt 1: Exact
+        diagnostics.attempts.push({
+            mode: "exact",
+            candidates: [],
+            failureReason: "Exact match failed"
+        });
+
+        // Attempt 2: Whitespace
+        const wsRegex = this.createExactRegex(edit.targetString, "whitespace");
+        const wsCandidates: { line: number; snippet: string }[] = [];
+        let match;
+        while ((match = wsRegex.exec(content)) !== null) {
+            wsCandidates.push({
+                line: lineCounter.lineAt(match.index),
+                snippet: match[0].substring(0, 50) + "..."
+            });
+        }
+        diagnostics.attempts.push({
+            mode: "whitespace",
+            candidates: wsCandidates,
+            failureReason: wsCandidates.length === 0 ? "No whitespace-tolerant matches found" : "Matches found but not selected (ambiguous?)"
+        });
+
+        const structuralRegex = this.createExactRegex(edit.targetString, "structural");
+        const structuralCandidates: { line: number; snippet: string }[] = [];
+        let structuralMatch;
+        while ((structuralMatch = structuralRegex.exec(content)) !== null) {
+            structuralCandidates.push({
+                line: lineCounter.lineAt(structuralMatch.index),
+                snippet: structuralMatch[0].substring(0, 50) + "..."
+            });
+        }
+        diagnostics.attempts.push({
+            mode: "structural",
+            candidates: structuralCandidates,
+            failureReason: structuralCandidates.length === 0 ? "No structural matches found" : "Matches found but likely need tighter anchors"
+        });
+
+        return diagnostics;
     }
 
     public async applyEdits(
@@ -605,14 +846,30 @@ export class EditorEngine {
         try {
             plannedMatches = this.applyEditsInternal(originalContent, edits);
         } catch (error: any) {
+            const failingEdit = (error as any).edit as Edit | undefined;
             if (error instanceof AmbiguousMatchError) {
                 return {
                     success: false,
                     message: error.message,
                     details: { conflictingLines: error.conflictingLines },
-                    suggestion:
-                        `Ambiguity detected. See error message for details and resolution strategies.`,
-                    errorCode: "AmbiguousMatch",
+                    suggestion: this.buildSuggestion("AMBIGUOUS_MATCH", filePath, failingEdit),
+                    errorCode: "AMBIGUOUS_MATCH",
+                };
+            }
+            if (error instanceof MatchNotFoundError) {
+                return {
+                    success: false,
+                    message: error.message,
+                    errorCode: "NO_MATCH",
+                    suggestion: this.buildSuggestion("NO_MATCH", filePath, failingEdit)
+                };
+            }
+            if (error instanceof HashMismatchError) {
+                return {
+                    success: false,
+                    message: error.message,
+                    errorCode: "HASH_MISMATCH",
+                    suggestion: this.buildSuggestion("HASH_MISMATCH", filePath, failingEdit)
                 };
             }
             return { success: false, message: error.message };
