@@ -1,4 +1,5 @@
 import * as path from "path";
+import { performance } from "perf_hooks";
 import { MemoryFileSystem } from "../platform/FileSystem.js";
 import { SearchEngine, SymbolMetadataProvider } from "../engine/Search.js";
 import { SymbolInfo } from "../types.js";
@@ -9,6 +10,7 @@ describe("SearchEngine trigram index integration", () => {
     const rootPath = path.join(process.cwd(), "__search_workspace__");
     const alphaPath = path.join(rootPath, "src", "utils", "alpha.ts");
     const betaPath = path.join(rootPath, "src", "utils", "beta.ts");
+    const camelPath = path.join(rootPath, "src", "models", "UserAccount.ts");
 
     let fileSystem: MemoryFileSystem;
     let searchEngine: SearchEngine;
@@ -16,6 +18,7 @@ describe("SearchEngine trigram index integration", () => {
     beforeEach(async () => {
         fileSystem = new MemoryFileSystem(rootPath);
         await fileSystem.createDir(path.dirname(alphaPath));
+        await fileSystem.createDir(path.dirname(camelPath));
         await fileSystem.writeFile(alphaPath, joinLines([
             "export function alphaFunction() {",
             "  const message = 'alpha matches here';",
@@ -26,6 +29,14 @@ describe("SearchEngine trigram index integration", () => {
             "export const betaValue = () => {",
             "  return 42;",
             "};",
+        ]));
+        await fileSystem.writeFile(camelPath, joinLines([
+            "export class UpdateUserPermission {",
+            "  private userToken: string;",
+            "  syncUserPermission() {",
+            "    return this.userToken;",
+            "  }",
+            "}",
         ]));
 
         searchEngine = new SearchEngine(rootPath, fileSystem, []);
@@ -59,6 +70,56 @@ describe("SearchEngine trigram index integration", () => {
     it("supports regex lookups via runFileGrep", async () => {
         const lineNumbers = await searchEngine.runFileGrep("message\\s=", alphaPath);
         expect(lineNumbers).toContain(2);
+    });
+
+    it("matches CamelCase identifiers with smart-case defaults", async () => {
+        const insensitive = await searchEngine.scout({ keywords: ["userpermission"], basePath: rootPath });
+        const camelMatch = insensitive.find(result => result.filePath === "src/models/UserAccount.ts");
+        expect(camelMatch).toBeDefined();
+
+        const strict = await searchEngine.scout({ keywords: ["userpermission"], basePath: rootPath, caseSensitive: true });
+        const strictMatch = strict.find(result => result.filePath === "src/models/UserAccount.ts");
+        expect(strictMatch).toBeUndefined();
+
+        const forced = await searchEngine.scout({ keywords: ["USERPERMISSION"], basePath: rootPath, smartCase: false });
+        const forcedMatch = forced.find(result => result.filePath === "src/models/UserAccount.ts");
+        expect(forcedMatch).toBeDefined();
+    });
+
+    it("locates needles inside large haystacks within budget", async () => {
+        const fillerDir = path.join(rootPath, "packages");
+        const fillerCount = 250;
+        for (let index = 0; index < fillerCount; index++) {
+            const fillerPath = path.join(fillerDir, `module-${index}.ts`);
+            await fileSystem.createDir(path.dirname(fillerPath));
+            await fileSystem.writeFile(fillerPath, joinLines([
+                `export function filler${index}() {`,
+                `  const token${index} = ${index};`,
+                "  return token${index};",
+                "}",
+            ]));
+        }
+
+        const targetPath = path.join(rootPath, "src", "core", "needle.ts");
+        await fileSystem.createDir(path.dirname(targetPath));
+        await fileSystem.writeFile(targetPath, joinLines([
+            "export function locateNeedle() {",
+            "  const UniqueNeedleToken = 'needlePayload';",
+            "  return UniqueNeedleToken;",
+            "}",
+        ]));
+
+        const denseEngine = new SearchEngine(rootPath, fileSystem, []);
+        await denseEngine.warmup();
+
+        const start = performance.now();
+        const results = await denseEngine.scout({ keywords: ["UniqueNeedleToken"], basePath: rootPath });
+        const duration = performance.now() - start;
+
+        expect(results.length).toBeGreaterThan(0);
+        expect(results[0]?.filePath).toBe("src/core/needle.ts");
+        expect(results[0]?.preview).toContain("UniqueNeedleToken");
+        expect(duration).toBeLessThan(750);
     });
 
     it("prioritizes exported definitions via field weights", async () => {
