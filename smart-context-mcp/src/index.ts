@@ -59,6 +59,7 @@ export class SmartContextServer {
     private dataFlowTracer: DataFlowTracer;
     private clusterSearchEngine: ClusterSearchEngine;
     private sigintListener?: () => Promise<void>;
+    private static hasSigintListener = false;
     private static readonly READ_CODE_MAX_BYTES = 1_000_000;
 
         constructor(rootPath: string) {
@@ -75,7 +76,8 @@ export class SmartContextServer {
         });
 
         this.rootPath = path.resolve(rootPath);
-                this.ig = (ignore.default as any)();
+        const isTestEnv = process.env.NODE_ENV === 'test' || process.env.JEST_WORKER_ID !== undefined;
+        this.ig = (ignore.default as any)();
         this.ignoreGlobs = this._loadIgnoreFiles();
 
         this.searchEngine = new SearchEngine(this.ignoreGlobs);
@@ -92,7 +94,7 @@ export class SmartContextServer {
         this.callGraphBuilder = new CallGraphBuilder(this.rootPath, this.symbolIndex, this.moduleResolver);
         this.typeDependencyTracker = new TypeDependencyTracker(this.rootPath, this.symbolIndex);
         this.dataFlowTracer = new DataFlowTracer(this.rootPath, this.symbolIndex);
-        const precomputeEnabled = process.env.SMART_CONTEXT_DISABLE_PRECOMPUTE === 'true' ? false : true;
+        const precomputeEnabled = process.env.SMART_CONTEXT_DISABLE_PRECOMPUTE === 'true' ? false : !isTestEnv;
         this.clusterSearchEngine = new ClusterSearchEngine({
             rootPath: this.rootPath,
             symbolIndex: this.symbolIndex,
@@ -103,10 +105,12 @@ export class SmartContextServer {
             precomputation: { enabled: precomputeEnabled }
         });
 
+        const requestedMode = process.env.SMART_CONTEXT_ENGINE_MODE as EngineConfig['mode'];
+        const requestedBackend = process.env.SMART_CONTEXT_PARSER_BACKEND as EngineConfig['parserBackend'];
         const engineConfig: EngineConfig = {
             rootPath: this.rootPath,
-            mode: (process.env.SMART_CONTEXT_ENGINE_MODE as EngineConfig['mode']) || 'prod',
-            parserBackend: (process.env.SMART_CONTEXT_PARSER_BACKEND as EngineConfig['parserBackend']) || 'auto',
+            mode: requestedMode || (isTestEnv ? 'test' : 'prod'),
+            parserBackend: requestedBackend || (isTestEnv ? 'js' : 'auto'),
             snapshotDir: process.env.SMART_CONTEXT_SNAPSHOT_DIR
         };
 
@@ -129,12 +133,15 @@ export class SmartContextServer {
         this.setupHandlers();
         this.server.onerror = (error) => console.error("[MCP Error]", error);
 
-        this.sigintListener = async () => {
-            this.clusterSearchEngine.stopBackgroundTasks();
-            await this.server.close();
-            process.exit(0);
-        };
-        process.on("SIGINT", this.sigintListener);
+        if (!isTestEnv && !SmartContextServer.hasSigintListener) {
+            this.sigintListener = async () => {
+                this.clusterSearchEngine.stopBackgroundTasks();
+                await this.server.close();
+                process.exit(0);
+            };
+            process.on("SIGINT", this.sigintListener);
+            SmartContextServer.hasSigintListener = true;
+        }
 
         if (ENABLE_DEBUG_LOGS) {
             console.error("DEBUG: SmartContextServer constructor finished");
