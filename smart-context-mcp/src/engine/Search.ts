@@ -122,7 +122,7 @@ export class SearchEngine {
     }
 
     public async scout(args: ScoutArgs): Promise<FileSearchResult[]> {
-        const { keywords, patterns, includeGlobs, excludeGlobs, gitDiffMode, basePath, wordBoundary } = args;
+        const { keywords, patterns, includeGlobs, excludeGlobs, gitDiffMode, basePath, wordBoundary, caseSensitive, smartCase } = args;
 
         if ((!keywords || keywords.length === 0) && (!patterns || patterns.length === 0)) {
             throw new Error("At least one keyword or pattern is required.");
@@ -132,7 +132,7 @@ export class SearchEngine {
             console.warn("gitDiffMode is not yet fully implemented.");
         }
 
-        const queries = this.buildSearchQueries({ keywords, patterns, wordBoundary });
+        const queries = this.buildSearchQueries({ keywords, patterns, wordBoundary, caseSensitive, smartCase });
         const baseCwd = basePath ? path.resolve(basePath) : this.rootPath;
         const normalizedBase = baseCwd.startsWith(this.rootPath) ? baseCwd : this.rootPath;
         const combinedExcludeGlobs = [...this.defaultExcludeGlobs, ...(excludeGlobs || [])];
@@ -216,20 +216,23 @@ export class SearchEngine {
         });
     }
 
-    private buildSearchQueries(args: { keywords?: string[]; patterns?: string[]; wordBoundary?: boolean }): SearchQuery[] {
+    private buildSearchQueries(args: { keywords?: string[]; patterns?: string[]; wordBoundary?: boolean; caseSensitive?: boolean; smartCase?: boolean }): SearchQuery[] {
         const queries: SearchQuery[] = [];
+        const useSmartCase = args.smartCase ?? true;
         for (const keyword of args.keywords ?? []) {
             const escaped = this.escapeRegExp(keyword, { wordBoundary: args.wordBoundary });
+            const flags = this.getKeywordRegexFlags(keyword, args.caseSensitive, useSmartCase);
             queries.push({
                 raw: keyword,
-                regex: new RegExp(escaped, "g"),
+                regex: new RegExp(escaped, flags),
                 literalHint: keyword.toLowerCase()
             });
         }
         for (const pattern of args.patterns ?? []) {
             let regex: RegExp;
             try {
-                regex = new RegExp(pattern, "g");
+                const flags = this.getPatternRegexFlags(args.caseSensitive, useSmartCase);
+                regex = new RegExp(pattern, flags);
             } catch (error) {
                 throw new Error(`Invalid search pattern '${pattern}': ${(error as Error).message}`);
             }
@@ -240,6 +243,31 @@ export class SearchEngine {
             });
         }
         return queries;
+    }
+
+    private getKeywordRegexFlags(keyword: string, caseSensitive?: boolean, smartCase: boolean = true): string {
+        const isCaseSensitive = this.shouldUseCaseSensitive(keyword, caseSensitive, smartCase);
+        return isCaseSensitive ? "g" : "gi";
+    }
+
+    private getPatternRegexFlags(caseSensitive?: boolean, smartCase: boolean = true): string {
+        if (typeof caseSensitive === "boolean") {
+            return caseSensitive ? "g" : "gi";
+        }
+        if (smartCase === false) {
+            return "gi";
+        }
+        return "g";
+    }
+
+    private shouldUseCaseSensitive(sample: string, caseSensitive?: boolean, smartCase: boolean = true): boolean {
+        if (typeof caseSensitive === "boolean") {
+            return caseSensitive;
+        }
+        if (!smartCase) {
+            return false;
+        }
+        return /[A-Z]/.test(sample);
     }
 
     private extractLiteralHint(pattern: string): string | undefined {

@@ -10,6 +10,10 @@ export interface FileSearchResult {
 export interface SearchOptions {
     /** Forces whole-word matching when true. Defaults to substring search. */
     wordBoundary?: boolean;
+    /** Forces explicit case handling. Defaults to smart-case literals (case-sensitive only when query has uppercase). */
+    caseSensitive?: boolean;
+    /** When true (default), lowercase-only queries match CamelCase targets (smart-case). */
+    smartCase?: boolean;
 }
 
 export type SearchFieldType = "symbol-definition" | "signature" | "exported-member" | "comment" | "code-body";
