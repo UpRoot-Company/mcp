@@ -82,6 +82,12 @@ export interface Edit {
     };
 }
 
+export type DiffMode = "myers" | "semantic";
+
+export interface EditExecutionOptions {
+    diffMode?: DiffMode;
+}
+
 export interface ToolSuggestion {
     toolName: string;
     rationale: string;
@@ -502,6 +508,7 @@ export interface EditCodeArgs {
     dryRun?: boolean;
     createMissingDirectories?: boolean;
     ignoreMistakes?: boolean;
+    diffMode?: DiffMode;
 }
 
 export interface EditCodeResultEntry {

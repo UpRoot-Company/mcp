@@ -5,7 +5,7 @@
 
 import { EditorEngine } from "./Editor.js";
 import { HistoryEngine } from "./History.js";
-import { Edit, EditResult, EditOperation, BatchOperation, HistoryItem } from "../types.js";
+import { Edit, EditResult, EditOperation, BatchOperation, HistoryItem, EditExecutionOptions } from "../types.js";
 import * as path from "path";
 import * as crypto from "crypto";
 
@@ -32,8 +32,15 @@ export class EditCoordinator {
      * - If successful and not dryRun, pushes the returned operation (if any) to HistoryEngine.
      * - Returns the EditResult from EditorEngine.
      */
-    public async applyEdits(filePath: string, edits: Edit[], dryRun: boolean = false): Promise<EditResult> {
-        const result = await this.editorEngine.applyEdits(filePath, edits, dryRun);
+    public async applyEdits(
+        filePath: string,
+        edits: Edit[],
+        dryRun: boolean = false,
+        options?: EditExecutionOptions
+    ): Promise<EditResult> {
+        const result = options?.diffMode
+            ? await this.editorEngine.applyEdits(filePath, edits, dryRun, options)
+            : await this.editorEngine.applyEdits(filePath, edits, dryRun);
 
         if (result.success && !dryRun && result.operation) {
             await this.historyEngine.pushOperation(result.operation as EditOperation);
@@ -51,8 +58,16 @@ export class EditCoordinator {
      */
     public async applyBatchEdits(
         fileEdits: { filePath: string; edits: Edit[] }[],
-        dryRun: boolean = false
+        dryRun: boolean = false,
+        options?: EditExecutionOptions
     ): Promise<EditResult> {
+        const invokeApply = (targetPath: string, targetEdits: Edit[], isDryRun: boolean) => {
+            if (options?.diffMode) {
+                return this.editorEngine.applyEdits(targetPath, targetEdits, isDryRun, options);
+            }
+            return this.editorEngine.applyEdits(targetPath, targetEdits, isDryRun);
+        };
+
         if (fileEdits.length === 0) {
             return {
                 success: true,
@@ -62,7 +77,7 @@ export class EditCoordinator {
 
         if (dryRun) {
             for (const { filePath, edits } of fileEdits) {
-                const result = await this.editorEngine.applyEdits(filePath, edits, true);
+                const result = await invokeApply(filePath, edits, true);
                 if (!result.success) {
                     return {
                         ...result,
@@ -82,18 +97,14 @@ export class EditCoordinator {
         const applied: { filePath: string; operation: EditOperation }[] = [];
 
         for (const { filePath, edits } of fileEdits) {
-            const result = await this.editorEngine.applyEdits(filePath, edits, false);
+            const result = await invokeApply(filePath, edits, false);
 
             if (!result.success || !result.operation) {
                 // Roll back all previously applied operations in reverse order.
                 for (let i = applied.length - 1; i >= 0; i--) {
                     const entry = applied[i];
                     try {
-                        await this.editorEngine.applyEdits(
-                            entry.filePath,
-                            entry.operation.inverseEdits,
-                            false
-                        );
+                        await invokeApply(entry.filePath, entry.operation.inverseEdits as Edit[], false);
                     } catch {
                         // Best-effort rollback; ignore individual rollback failures here.
                     }

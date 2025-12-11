@@ -28,7 +28,7 @@ import { FileProfiler, FileMetadataAnalysis } from "./engine/FileProfiler.js";
 import { AgentWorkflowGuidance } from "./engine/AgentPlaybook.js";
 import { ClusterSearchEngine, ClusterSearchOptions, ClusterExpansionOptions } from "./engine/ClusterSearch/index.js";
 import { BuildClusterOptions, ExpandableRelationship } from "./engine/ClusterSearch/ClusterBuilder.js";
-import { FileSearchResult, ReadFragmentResult, EditResult, DirectoryTree, Edit, EngineConfig, SmartFileProfile, SymbolInfo, ToolSuggestion, ImpactPreview, BatchEditGuidance, ReadCodeResult, ReadCodeArgs, SearchProjectResult, SearchProjectArgs, AnalyzeRelationshipResult, EditCodeArgs, EditCodeResult, EditCodeEdit, ManageProjectResult, ManageProjectArgs, AnalyzeRelationshipArgs, ReadCodeView, SearchProjectType, ResolvedRelationshipTarget, AnalyzeRelationshipDirection, AnalyzeRelationshipNode, AnalyzeRelationshipEdge, LineRange } from "./types.js";
+import { FileSearchResult, ReadFragmentResult, EditResult, DirectoryTree, Edit, EngineConfig, SmartFileProfile, SymbolInfo, ToolSuggestion, ImpactPreview, BatchEditGuidance, ReadCodeResult, ReadCodeArgs, SearchProjectResult, SearchProjectArgs, AnalyzeRelationshipResult, EditCodeArgs, EditCodeResult, EditCodeEdit, ManageProjectResult, ManageProjectArgs, AnalyzeRelationshipArgs, ReadCodeView, SearchProjectType, ResolvedRelationshipTarget, AnalyzeRelationshipDirection, AnalyzeRelationshipNode, AnalyzeRelationshipEdge, LineRange, DiffMode } from "./types.js";
 import { IFileSystem, NodeFileSystem } from "./platform/FileSystem.js";
 
 const readFileAsync = promisify(fs.readFile);
@@ -932,6 +932,7 @@ export class SmartContextServer {
         const dryRun = Boolean(args.dryRun);
         const createDirs = Boolean(args.createMissingDirectories);
         const ignoreMistakes = Boolean(args.ignoreMistakes);
+        const diffMode: DiffMode | undefined = args.diffMode === "semantic" ? "semantic" : undefined;
         const transactionId = dryRun
             ? undefined
             : (typeof crypto.randomUUID === "function" ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`);
@@ -942,7 +943,7 @@ export class SmartContextServer {
         try {
             await this.handleCreateOperations(args.edits, dryRun, createDirs, results, rollbackActions, touchedFiles);
             await this.handleDeleteOperations(args.edits, dryRun, results, rollbackActions, touchedFiles);
-            await this.handleReplaceOperations(args.edits, dryRun, ignoreMistakes, results, touchedFiles);
+            await this.handleReplaceOperations(args.edits, dryRun, ignoreMistakes, results, touchedFiles, diffMode);
         } catch (error: any) {
             await this.rollbackActions(rollbackActions);
             const message = error instanceof McpError ? error.message : (error?.message ?? "edit_code failed");
@@ -1035,7 +1036,8 @@ export class SmartContextServer {
         dryRun: boolean,
         ignoreMistakes: boolean,
         results: EditCodeResult["results"],
-        touchedFiles: Set<string>
+        touchedFiles: Set<string>,
+        diffMode?: DiffMode
     ): Promise<void> {
         const fileMap = new Map<string, Edit[]>();
         const fileOrder: string[] = [];
@@ -1069,7 +1071,11 @@ export class SmartContextServer {
         }
 
         const fileEdits = fileOrder.map(filePath => ({ filePath, edits: fileMap.get(filePath)! }));
-        const result = await this.editCoordinator.applyBatchEdits(fileEdits, dryRun);
+        const result = await this.editCoordinator.applyBatchEdits(
+            fileEdits,
+            dryRun,
+            diffMode ? { diffMode } : undefined
+        );
         if (!result.success) {
             throw new McpError(ErrorCode.InternalError, result.message ?? "Failed to apply edits.");
         }
@@ -1264,7 +1270,12 @@ export class SmartContextServer {
                         },
                         dryRun: { type: "boolean", default: false },
                         createMissingDirectories: { type: "boolean", default: false },
-                        ignoreMistakes: { type: "boolean", default: false }
+                        ignoreMistakes: { type: "boolean", default: false },
+                        diffMode: {
+                            type: "string",
+                            enum: ["myers", "semantic"],
+                            description: "Use 'semantic' for Patience diff preview during dry runs."
+                        }
                     },
                     required: ["edits"]
                 }

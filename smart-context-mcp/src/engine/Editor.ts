@@ -2,8 +2,9 @@ import * as path from "path";
 import * as crypto from "crypto";
 import { createRequire } from "module";
 import { MyersDiff } from "./Diff.js";
+import { PatienceDiff } from "./PatienceDiff.js";
 import levenshtein from "fast-levenshtein";
-import { Edit, EditOperation, EditResult, LineRange, MatchDiagnostics, ToolSuggestion } from "../types.js";
+import { DiffMode, Edit, EditOperation, EditResult, LineRange, MatchDiagnostics, ToolSuggestion } from "../types.js";
 import { LineCounter } from "./LineCounter.js";
 import { IFileSystem } from "../platform/FileSystem.js";
 const require = createRequire(import.meta.url);
@@ -49,6 +50,10 @@ export class MatchNotFoundError extends Error {
         super(message);
         this.name = "MatchNotFoundError";
     }
+}
+
+interface ApplyEditsOptions {
+    diffMode?: DiffMode;
 }
 
 export class EditorEngine {
@@ -831,7 +836,8 @@ export class EditorEngine {
     public async applyEdits(
         filePath: string,
         edits: Edit[],
-        dryRun: boolean = false
+        dryRun: boolean = false,
+        options?: ApplyEditsOptions
     ): Promise<EditResult> {
         if (!(await this.fileSystem.exists(filePath))) {
             return { success: false, message: `File not found: ${filePath}` };
@@ -906,18 +912,37 @@ export class EditorEngine {
         };
 
         if (dryRun) {
-            const diffSummary = MyersDiff.diffLinesStructured(originalContent, newContent);
+            const diffMode: DiffMode = options?.diffMode === "semantic" ? "semantic" : "myers";
+            let diffText: string;
+            let added = 0;
+            let removed = 0;
+
+            if (diffMode === "semantic") {
+                const hunks = PatienceDiff.diff(originalContent, newContent, {
+                    contextLines: 3,
+                    semantic: true
+                });
+                const summary = PatienceDiff.summarize(hunks);
+                diffText = PatienceDiff.formatUnified(hunks);
+                added = summary.added;
+                removed = summary.removed;
+            } else {
+                const summary = MyersDiff.diffLinesStructured(originalContent, newContent);
+                diffText = summary.diff;
+                added = summary.added;
+                removed = summary.removed;
+            }
             const relativePath = path.relative(this.rootPath, filePath);
             return {
                 success: true,
                 originalContent,
                 newContent,
-                diff: diffSummary.diff,
+                diff: diffText,
                 structuredDiff: [{
                     filePath: relativePath,
-                    diff: diffSummary.diff,
-                    added: diffSummary.added,
-                    removed: diffSummary.removed
+                    diff: diffText,
+                    added,
+                    removed
                 }],
                 operation
             };
