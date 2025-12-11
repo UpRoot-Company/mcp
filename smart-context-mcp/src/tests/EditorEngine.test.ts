@@ -2,6 +2,7 @@ import * as path from "path";
 import { EditorEngine } from "../engine/Editor.js";
 import { MemoryFileSystem } from "../platform/FileSystem.js";
 import { Edit } from "../types.js";
+import { PatienceDiff } from "../engine/PatienceDiff.js";
 
 const sanitizeBackupPrefix = (filePath: string): string => {
     return filePath
@@ -70,5 +71,20 @@ describe("EditorEngine with MemoryFileSystem", () => {
             name.startsWith(`${encodedPrefix}_`) && name.endsWith(".bak")
         );
         expect(remaining.length).toBe(10);
+    });
+
+    it("supports semantic diff previews on dry runs", async () => {
+        const edits: Edit[] = [{ targetString: "const result = 1;", replacementString: "const result = compute();" }];
+        const result = await editor.applyEdits(filePath, edits, true, { diffMode: "semantic" });
+        expect(result.success).toBe(true);
+        expect(result.diff).toBeDefined();
+        const expected = PatienceDiff.formatUnified(
+            PatienceDiff.diff(
+                baseContent,
+                baseContent.replace("const result = 1;", "const result = compute();"),
+                { semantic: true, contextLines: 3 }
+            )
+        );
+        expect(result.diff).toBe(expected);
     });
 });
