@@ -1,7 +1,8 @@
+import { jest, describe, it, beforeEach, expect } from "@jest/globals";
 import * as path from "path";
 import { EditorEngine } from "../engine/Editor.js";
 import { MemoryFileSystem } from "../platform/FileSystem.js";
-import { Edit } from "../types.js";
+import { Edit, SemanticDiffSummary, SemanticDiffProvider } from "../types.js";
 import { PatienceDiff } from "../engine/PatienceDiff.js";
 
 const sanitizeBackupPrefix = (filePath: string): string => {
@@ -86,5 +87,28 @@ describe("EditorEngine with MemoryFileSystem", () => {
             )
         );
         expect(result.diff).toBe(expected);
+    });
+
+    it("attaches semantic summaries when provider is available", async () => {
+        const summary: SemanticDiffSummary = {
+            changes: [{
+                type: "modify",
+                name: "value",
+                symbolType: "variable",
+                oldLocation: { start: 2, end: 2 },
+                newLocation: { start: 2, end: 2 }
+            }],
+            stats: { added: 0, removed: 0, modified: 1, renamed: 0, moved: 0 }
+        };
+        const diffMock = jest.fn(async () => summary) as SemanticDiffProvider['diff'];
+        const semanticProvider: SemanticDiffProvider = {
+            diff: diffMock
+        };
+        editor = new EditorEngine(rootPath, fileSystem, semanticProvider);
+        const edits: Edit[] = [{ targetString: "const result = 1;", replacementString: "const result = compute();" }];
+        const result = await editor.applyEdits(filePath, edits, true, { diffMode: "semantic" });
+        expect(result.semanticSummary).toEqual(summary);
+        expect(result.diffModeUsed).toBe("semantic");
+        expect(semanticProvider.diff).toHaveBeenCalled();
     });
 });
