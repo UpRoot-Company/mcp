@@ -306,10 +306,10 @@ export class SmartContextServer {
         const readFullHint = metadata.isConfigFile
             ? '이 파일은 구성 역할을 하므로 전체 맥락을 확인한 뒤 필요한 부분만 수정하세요. full=true는 검증 용도로만 사용하세요.'
             : isLarge
-                ? '파일이 커서 기본 프로필과 read_fragment(lineRange)를 조합해 필요한 구간만 읽는 것이 안전합니다.'
+                ? '파일이 커서 기본 프로필과 read_code(view="fragment", lineRange)를 조합해 필요한 구간만 읽는 것이 안전합니다.'
                 : '기본 프로필에 주요 정보가 담겨 있으니 정말 필요할 때만 full=true를 사용하세요.';
         const styleHint = `${(meta.newlineStyle || 'lf').toUpperCase()} newline / ${meta.usesTabs ? 'TAB' : `${meta.indentSize || 2}-space`} indent`;
-        const readFragmentHint = `스켈레톤 라인 번호를 기준으로 read_fragment와 edit_file(lineRange + expectedHash)을 함께 사용하세요. (Style: ${styleHint})`;
+        const readFragmentHint = `스켈레톤 라인 번호를 기준으로 read_code(view="fragment")와 edit_code(lineRange + expectedHash)을 함께 사용하세요. (Style: ${styleHint})`;
         return {
             bodyHidden: true,
             readFullHint,
