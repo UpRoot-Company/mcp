@@ -1,6 +1,6 @@
 {
   "name": "smart-context-mcp",
-  "version": "2.2.0",
+  "version": "3.0.0",
   "type": "module",
   "bin": {
     "smart-context-mcp": "dist/index.js"
@@ -33,7 +33,7 @@
   ],
   "author": "devkwan",
   "license": "MIT",
-  "description": "",
+  "description": "A Model Context Protocol (MCP) enabled tool for AI-assisted coding and intelligent file analysis.",
   "jest": {
     "collectCoverage": true,
     "coverageDirectory": "coverage",
