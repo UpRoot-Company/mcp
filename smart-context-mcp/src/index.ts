@@ -75,7 +75,7 @@ export class SmartContextServer {
         }
         this.server = new Server({
             name: "smart-context-mcp",
-            version: "2.2.0", // Version updated for ADR-008 (v2)
+            version: "3.2.0",
         }, {
             capabilities: {
                 tools: {},
