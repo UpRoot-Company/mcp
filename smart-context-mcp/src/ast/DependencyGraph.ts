@@ -1,148 +1,100 @@
-import { SymbolIndex } from './SymbolIndex.js';
-import { ModuleResolver, ResolutionResult } from './ModuleResolver.js';
-import { ImportSymbol, IndexStatus } from '../types.js';
 import * as path from 'path';
 import * as fs from 'fs';
+import { SymbolIndex } from './SymbolIndex.js';
+import { ModuleResolver, ResolutionResult } from './ModuleResolver.js';
+import { ImportSymbol, IndexStatus, SymbolInfo } from '../types.js';
+import { IndexDatabase } from '../indexing/IndexDatabase.js';
+
+interface EdgeMetadata {
+    targetPath?: string;
+    type: string;
+    weight?: number;
+    metadata?: Record<string, unknown>;
+}
+
+interface UnresolvedMetadata {
+    specifier: string;
+    error?: string;
+    metadata?: Record<string, unknown>;
+}
 
 export class DependencyGraph {
-    private symbolIndex: SymbolIndex;
-    private resolver: ModuleResolver;
-    private rootPath: string;
-    
-    // Key: Relative Path (from root) - Normalized to forward slashes
-    // Value: Set of Relative Paths - Normalized
-    private outgoingEdges = new Map<string, Set<string>>();
-    private incomingEdges = new Map<string, Set<string>>();
-    private unresolvedImports = new Map<string, Set<string>>();
-    private unresolvedDetails = new Map<string, Map<string, { error?: string; metadata?: Record<string, string> }>>();
-    private lastRebuiltAt: number = 0;
-    private needsRebuild = false;
+    private readonly rootPath: string;
+    private readonly symbolIndex: SymbolIndex;
+    private readonly resolver: ModuleResolver;
+    private readonly db: IndexDatabase;
+    private lastRebuiltAt = 0;
 
-    constructor(rootPath: string, symbolIndex: SymbolIndex, resolver: ModuleResolver) {
+    constructor(rootPath: string, symbolIndex: SymbolIndex, resolver: ModuleResolver, db?: IndexDatabase) {
         this.rootPath = rootPath;
         this.symbolIndex = symbolIndex;
         this.resolver = resolver;
-    }
-
-    private recordUnresolved(source: string, specifier: string, resolution: ResolutionResult) {
-        if (!this.unresolvedImports.has(source)) {
-            this.unresolvedImports.set(source, new Set());
-        }
-        this.unresolvedImports.get(source)!.add(specifier);
-
-        if (!this.unresolvedDetails.has(source)) {
-            this.unresolvedDetails.set(source, new Map());
-        }
-        this.unresolvedDetails.get(source)!.set(specifier, {
-            error: resolution.error,
-            metadata: resolution.metadata
-        });
+        this.db = db ?? this.symbolIndex.getDatabase();
     }
 
     public async build(): Promise<void> {
-        this.outgoingEdges.clear();
-        this.incomingEdges.clear();
-        this.unresolvedImports.clear();
-        this.unresolvedDetails.clear();
-        
         const symbolMap = await this.symbolIndex.getAllSymbols();
-        this.lastRebuiltAt = Date.now();
-        
         for (const [relativePath, symbols] of symbolMap) {
-            const contextPath = path.resolve(this.rootPath, relativePath);
-            
-            // Security check: Ensure context path is within root
-            if (!contextPath.startsWith(this.rootPath)) {
-                continue;
-            }
-
-            const normalizedSource = this.normalizePath(relativePath);
-            
-            for (const symbol of symbols) {
-                if (symbol.type === 'import') {
-                    const importSymbol = symbol as ImportSymbol;
-                    const resolution = this.resolver.resolveDetailed(contextPath, importSymbol.source);
-                    const resolved = resolution.resolvedPath;
-                    
-                    if (resolved) {
-                        // Ensure resolved path is also within root (optional but good practice)
-                        if (!resolved.startsWith(this.rootPath)) continue;
-
-                        const resolvedRelative = path.relative(this.rootPath, resolved);
-                        const normalizedTarget = this.normalizePath(resolvedRelative);
-                        this.addEdge(normalizedSource, normalizedTarget);
-                    } else {
-                        this.recordUnresolved(normalizedSource, importSymbol.source, resolution);
-                    }
-                }
-            }
+            await this.updateDependenciesForSymbols(relativePath, symbols);
         }
-        this.needsRebuild = false;
-    }
-    
-    private addEdge(from: string, to: string) {
-        // from/to should already be normalized
-        if (!this.outgoingEdges.has(from)) this.outgoingEdges.set(from, new Set());
-        this.outgoingEdges.get(from)!.add(to);
-        
-        if (!this.incomingEdges.has(to)) this.incomingEdges.set(to, new Set());
-        this.incomingEdges.get(to)!.add(from);
-    }
-    
-    private normalizePath(p: string): string {
-        return p.replace(/\\/g, '/');
+        this.lastRebuiltAt = Date.now();
     }
 
-    private getNormalizedRelativePath(filePath: string): string {
-        if (path.isAbsolute(filePath)) {
-            return this.normalizePath(path.relative(this.rootPath, filePath));
-        }
-        return this.normalizePath(filePath);
+    public async updateFileDependencies(filePath: string, symbols?: SymbolInfo[]): Promise<void> {
+        const relPath = this.getNormalizedRelativePath(filePath);
+        const data = symbols ?? await this.symbolIndex.getSymbolsForFile(filePath);
+        const stats = await fs.promises.stat(filePath).catch(() => undefined);
+        const lastModified = stats?.mtimeMs ?? Date.now();
+        await this.updateDependenciesForSymbols(relPath, data, lastModified);
     }
-    
+
     public async getDependencies(filePath: string, direction: 'incoming' | 'outgoing'): Promise<string[]> {
         const relPath = this.getNormalizedRelativePath(filePath);
-        
-        if (this.needsRebuild || (this.outgoingEdges.size === 0 && this.incomingEdges.size === 0)) {
-            await this.build();
+        const deps = this.db.getDependencies(relPath, direction);
+        return deps.map(dep => this.normalizePath(dep));
+    }
+
+    public async getTransitiveDependencies(filePath: string, direction: 'incoming' | 'outgoing', maxDepth: number = 20): Promise<string[]> {
+        const start = this.getNormalizedRelativePath(filePath);
+        const visited = new Set<string>([start]);
+        const queue: Array<{ path: string; depth: number }> = [{ path: start, depth: 0 }];
+        const results: string[] = [];
+
+        while (queue.length > 0) {
+            const current = queue.shift()!;
+            if (current.depth >= maxDepth) continue;
+            const neighbors = this.db.getDependencies(current.path, direction);
+            for (const neighbor of neighbors) {
+                const normalized = this.normalizePath(neighbor);
+                if (visited.has(normalized)) continue;
+                visited.add(normalized);
+                results.push(normalized);
+                queue.push({ path: normalized, depth: current.depth + 1 });
+            }
         }
-        
-        const map = direction === 'outgoing' ? this.outgoingEdges : this.incomingEdges;
-        return Array.from(map.get(relPath) || []);
+        return results;
     }
 
     public async getIndexStatus(): Promise<IndexStatus> {
-        if (this.needsRebuild) {
-            await this.build();
-        }
-        const symbolMap = await this.symbolIndex.getAllSymbols();
-        const totalFiles = symbolMap.size;
-        const observedFiles = new Set<string>();
-        for (const file of symbolMap.keys()) {
-            observedFiles.add(this.normalizePath(file));
-        }
-        for (const key of this.outgoingEdges.keys()) observedFiles.add(key);
-        for (const key of this.incomingEdges.keys()) observedFiles.add(key);
-        for (const key of this.unresolvedImports.keys()) observedFiles.add(key);
-        
-        let totalUnresolved = 0;
-        const resolutionErrors: Array<{ filePath: string; importSpecifier: string; error: string; }> = [];
-        
-        for (const [file, unresolved] of this.unresolvedImports) {
-            totalUnresolved += unresolved.size;
-            for (const specifier of unresolved) {
-                if (resolutionErrors.length < 50) { // Limit error details
-                    const detail = this.unresolvedDetails.get(file)?.get(specifier);
-                    const reasonParts = [];
-                    if (detail?.error) reasonParts.push(detail.error);
-                    if (detail?.metadata?.reason) reasonParts.push(detail.metadata.reason);
-                    resolutionErrors.push({
-                        filePath: file,
-                        importSpecifier: specifier,
-                        error: reasonParts.length > 0 ? reasonParts.join(' | ') : 'Module resolution failed'
-                    });
-                }
-            }
+        const files = this.db.listFiles();
+        const totalFiles = files.length;
+        const unresolvedEntries = this.db.listUnresolved();
+        const totalUnresolved = unresolvedEntries.length;
+        const resolutionErrors = unresolvedEntries.slice(0, 50).map(entry => ({
+            filePath: entry.filePath,
+            importSpecifier: entry.specifier,
+            error: entry.error ?? 'Module resolution failed'
+        }));
+
+        const perFile: IndexStatus['perFile'] = {};
+        for (const file of files) {
+            const unresolved = this.db.listUnresolvedForFile(file.path).map(u => u.specifier);
+            perFile[file.path] = {
+                resolved: unresolved.length === 0,
+                unresolvedImports: unresolved,
+                incomingDependenciesCount: this.db.countDependencies(file.path, 'incoming'),
+                outgoingDependenciesCount: this.db.countDependencies(file.path, 'outgoing')
+            };
         }
 
         const unresolvedRatio = totalFiles === 0 ? 0 : totalUnresolved / totalFiles;
@@ -160,21 +112,10 @@ export class DependencyGraph {
             confidence = confidence === 'high' ? 'medium' : 'low';
         }
 
-        const perFile: IndexStatus['perFile'] = {};
-        for (const file of observedFiles) {
-            const unresolved = Array.from(this.unresolvedImports.get(file) || []);
-            perFile[file] = {
-                resolved: unresolved.length === 0,
-                unresolvedImports: unresolved,
-                incomingDependenciesCount: this.incomingEdges.get(file)?.size || 0,
-                outgoingDependenciesCount: this.outgoingEdges.get(file)?.size || 0
-            };
-        }
-
         return {
             global: {
                 totalFiles,
-                indexedFiles: observedFiles.size,
+                indexedFiles: files.length,
                 unresolvedImports: totalUnresolved,
                 resolutionErrors,
                 lastRebuiltAt: new Date(this.lastRebuiltAt || Date.now()).toISOString(),
@@ -189,8 +130,7 @@ export class DependencyGraph {
         const absPath = path.isAbsolute(filePath) ? filePath : path.join(this.rootPath, filePath);
         this.symbolIndex.invalidateFile(absPath);
         const relPath = this.getNormalizedRelativePath(absPath);
-        this.removeFileFromGraph(relPath);
-        this.needsRebuild = true;
+        this.clearDependencies(relPath);
     }
 
     public async invalidateDirectory(dirPath: string): Promise<void> {
@@ -198,70 +138,85 @@ export class DependencyGraph {
         this.symbolIndex.invalidateDirectory(absPath);
         const relPath = this.getNormalizedRelativePath(absPath);
         if (!relPath) {
-            this.outgoingEdges.clear();
-            this.incomingEdges.clear();
-            this.unresolvedImports.clear();
-            this.unresolvedDetails.clear();
-            this.needsRebuild = true;
+            this.db.deleteFilesByPrefix('');
             return;
         }
-        this.removeDirectoryFromGraph(relPath);
-        this.needsRebuild = true;
+        this.db.deleteFilesByPrefix(relPath);
     }
 
-    private removeFileFromGraph(relPath: string) {
-        this.outgoingEdges.delete(relPath);
-        this.incomingEdges.delete(relPath);
-        this.unresolvedImports.delete(relPath);
-        this.unresolvedDetails.delete(relPath);
+    public async removeFile(filePath: string): Promise<void> {
+        const absPath = path.isAbsolute(filePath) ? filePath : path.join(this.rootPath, filePath);
+        this.symbolIndex.dropFileFromIndex(absPath);
+    }
 
-        for (const set of this.outgoingEdges.values()) {
-            set.delete(relPath);
+    public async removeDirectory(dirPath: string): Promise<void> {
+        const absPath = path.isAbsolute(dirPath) ? dirPath : path.join(this.rootPath, dirPath);
+        this.symbolIndex.dropDirectoryFromIndex(absPath);
+    }
+
+    private clearDependencies(relativePath: string): void {
+        this.db.clearDependencies(relativePath);
+    }
+
+    private async updateDependenciesForSymbols(relativePath: string, symbols: SymbolInfo[], lastModified?: number): Promise<void> {
+        const normalized = this.normalizePath(relativePath);
+        const outgoing: EdgeMetadata[] = [];
+        const unresolved: UnresolvedMetadata[] = [];
+        const absPath = path.resolve(this.rootPath, normalized);
+
+        for (const symbol of symbols) {
+            if (symbol.type !== 'import') continue;
+            const importSymbol = symbol as ImportSymbol;
+            const resolution = this.resolver.resolveDetailed(absPath, importSymbol.source);
+            this.handleResolution(normalized, importSymbol, resolution, outgoing, unresolved);
         }
-        for (const set of this.incomingEdges.values()) {
-            set.delete(relPath);
+
+        const finalMtime = typeof lastModified === 'number'
+            ? lastModified
+            : this.db.getFile(normalized)?.last_modified ?? Date.now();
+
+        this.db.replaceDependencies({
+            relativePath: normalized,
+            lastModified: finalMtime,
+            outgoing,
+            unresolved
+        });
+        this.lastRebuiltAt = Date.now();
+    }
+
+    private handleResolution(
+        sourcePath: string,
+        importSymbol: ImportSymbol,
+        resolution: ResolutionResult,
+        outgoing: EdgeMetadata[],
+        unresolved: UnresolvedMetadata[]
+    ): void {
+        const resolved = resolution.resolvedPath;
+        if (resolved && resolved.startsWith(this.rootPath)) {
+            const targetRelative = path.relative(this.rootPath, resolved);
+            outgoing.push({
+                targetPath: this.normalizePath(targetRelative),
+                type: importSymbol.importKind,
+                metadata: resolution.metadata
+            });
+        } else {
+            unresolved.push({
+                specifier: importSymbol.source,
+                error: resolution.error,
+                metadata: resolution.metadata
+            });
         }
     }
 
-    private removeDirectoryFromGraph(relDir: string) {
-        const normalizedDir = relDir.endsWith('/') ? relDir : `${relDir}/`;
-        const match = (value: string) => value === relDir || value.startsWith(normalizedDir);
+    private normalizePath(p: string): string {
+        return p.replace(/\\/g, '/');
+    }
 
-        for (const key of Array.from(this.outgoingEdges.keys())) {
-            if (match(key)) {
-                this.outgoingEdges.delete(key);
-            }
+    private getNormalizedRelativePath(filePath: string): string {
+        if (path.isAbsolute(filePath)) {
+            return this.normalizePath(path.relative(this.rootPath, filePath));
         }
-        for (const key of Array.from(this.incomingEdges.keys())) {
-            if (match(key)) {
-                this.incomingEdges.delete(key);
-            }
-        }
-        for (const key of Array.from(this.unresolvedImports.keys())) {
-            if (match(key)) {
-                this.unresolvedImports.delete(key);
-            }
-        }
-        for (const key of Array.from(this.unresolvedDetails.keys())) {
-            if (match(key)) {
-                this.unresolvedDetails.delete(key);
-            }
-        }
-
-        for (const set of this.outgoingEdges.values()) {
-            for (const target of Array.from(set)) {
-                if (match(target)) {
-                    set.delete(target);
-                }
-            }
-        }
-        for (const set of this.incomingEdges.values()) {
-            for (const target of Array.from(set)) {
-                if (match(target)) {
-                    set.delete(target);
-                }
-            }
-        }
+        return this.normalizePath(filePath);
     }
 
     private detectMonorepo(): boolean {
@@ -286,46 +241,6 @@ export class DependencyGraph {
                 return true;
             }
         }
-
         return false;
-    }
-
-    public async getTransitiveDependencies(
-        filePath: string, 
-        direction: 'incoming' | 'outgoing',
-        maxDepth: number = 20
-    ): Promise<string[]> {
-        const startPath = this.getNormalizedRelativePath(filePath);
-
-        if (this.needsRebuild || (this.outgoingEdges.size === 0 && this.incomingEdges.size === 0)) {
-            await this.build();
-        }
-
-        const visited = new Set<string>();
-        const queue: { path: string; depth: number }[] = [{ path: startPath, depth: 0 }];
-        const result: string[] = [];
-        
-        visited.add(startPath);
-
-        while (queue.length > 0) {
-            const { path: currentPath, depth } = queue.shift()!;
-
-            if (depth >= maxDepth) continue;
-            
-            const map = direction === 'outgoing' ? this.outgoingEdges : this.incomingEdges;
-            const deps = map.get(currentPath);
-
-            if (deps) {
-                for (const dep of deps) {
-                    if (!visited.has(dep)) {
-                        visited.add(dep);
-                        result.push(dep);
-                        queue.push({ path: dep, depth: depth + 1 });
-                    }
-                }
-            }
-        }
-
-        return result;
     }
 }

@@ -31,6 +31,8 @@ import { BuildClusterOptions, ExpandableRelationship } from "./engine/ClusterSea
 import { FileSearchResult, ReadFragmentResult, EditResult, DirectoryTree, Edit, EngineConfig, SmartFileProfile, SymbolInfo, ToolSuggestion, ImpactPreview, BatchEditGuidance, ReadCodeResult, ReadCodeArgs, SearchProjectResult, SearchProjectArgs, AnalyzeRelationshipResult, EditCodeArgs, EditCodeResult, EditCodeEdit, ManageProjectResult, ManageProjectArgs, AnalyzeRelationshipArgs, ReadCodeView, SearchProjectType, ResolvedRelationshipTarget, AnalyzeRelationshipDirection, AnalyzeRelationshipNode, AnalyzeRelationshipEdge, LineRange, DiffMode } from "./types.js";
 import { IFileSystem, NodeFileSystem } from "./platform/FileSystem.js";
 import { AstAwareDiff } from "./engine/AstAwareDiff.js";
+import { IndexDatabase } from "./indexing/IndexDatabase.js";
+import { IncrementalIndexer } from "./indexing/IncrementalIndexer.js";
 
 const readFileAsync = promisify(fs.readFile);
 const writeFileAsync = promisify(fs.writeFile);
@@ -61,6 +63,8 @@ export class SmartContextServer {
     private typeDependencyTracker: TypeDependencyTracker;
     private dataFlowTracer: DataFlowTracer;
     private clusterSearchEngine: ClusterSearchEngine;
+    private indexDatabase: IndexDatabase;
+    private incrementalIndexer?: IncrementalIndexer;
     private sigintListener?: () => Promise<void>;
     private static hasSigintListener = false;
     private static readonly READ_CODE_MAX_BYTES = 1_000_000;
@@ -86,9 +90,10 @@ export class SmartContextServer {
 
         this.skeletonGenerator = new SkeletonGenerator();
         this.astManager = AstManager.getInstance();
-        this.symbolIndex = new SymbolIndex(this.rootPath, this.skeletonGenerator, this.ignoreGlobs);
+        this.indexDatabase = new IndexDatabase(this.rootPath);
+        this.symbolIndex = new SymbolIndex(this.rootPath, this.skeletonGenerator, this.ignoreGlobs, this.indexDatabase);
         this.moduleResolver = new ModuleResolver(this.rootPath);
-        this.dependencyGraph = new DependencyGraph(this.rootPath, this.symbolIndex, this.moduleResolver);
+        this.dependencyGraph = new DependencyGraph(this.rootPath, this.symbolIndex, this.moduleResolver, this.indexDatabase);
         this.referenceFinder = new ReferenceFinder(this.rootPath, this.dependencyGraph, this.symbolIndex, this.skeletonGenerator, this.moduleResolver);
         this.callGraphBuilder = new CallGraphBuilder(this.rootPath, this.symbolIndex, this.moduleResolver);
         this.typeDependencyTracker = new TypeDependencyTracker(this.rootPath, this.symbolIndex);
@@ -112,6 +117,10 @@ export class SmartContextServer {
         }, {
             precomputation: { enabled: precomputeEnabled }
         });
+        const indexingEnabled = process.env.SMART_CONTEXT_DISABLE_STREAMING_INDEX === 'true' ? false : !isTestEnv;
+        if (indexingEnabled) {
+            this.incrementalIndexer = new IncrementalIndexer(this.rootPath, this.symbolIndex, this.dependencyGraph);
+        }
 
         const requestedMode = process.env.SMART_CONTEXT_ENGINE_MODE as EngineConfig['mode'];
         const requestedBackend = process.env.SMART_CONTEXT_PARSER_BACKEND as EngineConfig['parserBackend'];
@@ -130,6 +139,7 @@ export class SmartContextServer {
                 return this.astManager.warmup();
             })
             .then(() => {
+                this.incrementalIndexer?.start();
                 this.clusterSearchEngine.startBackgroundTasks();
             })
             .catch(error => {
@@ -144,6 +154,7 @@ export class SmartContextServer {
         if (!isTestEnv && !SmartContextServer.hasSigintListener) {
             this.sigintListener = async () => {
                 this.clusterSearchEngine.stopBackgroundTasks();
+                await this.incrementalIndexer?.stop();
                 await this.server.close();
                 process.exit(0);
             };
