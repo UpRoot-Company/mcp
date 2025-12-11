@@ -1,12 +1,12 @@
 import path from "path";
-import { promises as fs } from "fs";
 import { DefinitionSymbol, SymbolInfo } from "../../types.js";
 import { PREVIEW_TIERS, RelatedSymbol, SearchCluster } from "../../types/cluster.js";
+import { IFileSystem } from "../../platform/FileSystem.js";
 
 const TOKEN_TO_CHAR_MULTIPLIER = 4;
 
 export class PreviewGenerator {
-    constructor(private readonly rootPath: string) {}
+    constructor(private readonly rootPath: string, private readonly fileSystem: IFileSystem) {}
 
     async applyPreviews(clusters: SearchCluster[]): Promise<void> {
         const contentCache = new Map<string, string>();
@@ -16,7 +16,7 @@ export class PreviewGenerator {
             }
             const absPath = path.isAbsolute(filePath) ? filePath : path.join(this.rootPath, filePath);
             try {
-                const content = await fs.readFile(absPath, "utf8");
+                const content = await this.fileSystem.readFile(absPath);
                 contentCache.set(filePath, content);
                 return content;
             } catch {

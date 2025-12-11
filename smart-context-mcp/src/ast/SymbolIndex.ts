@@ -4,6 +4,8 @@ import ignore from 'ignore';
 import { SkeletonGenerator } from './SkeletonGenerator.js';
 import { SymbolInfo } from '../types.js';
 
+const SUPPORTED_EXTENSIONS = new Set<string>(['.ts', '.tsx', '.js', '.jsx', '.py']);
+
 export interface SymbolSearchResult {
     filePath: string;
     symbol: SymbolInfo;
@@ -98,6 +100,12 @@ export class SymbolIndex {
             return cached.symbols;
         }
 
+        const ext = path.extname(filePath).toLowerCase();
+        if (!SUPPORTED_EXTENSIONS.has(ext)) {
+            this.cache.set(relativePath, { mtime: currentMtime, symbols: [] });
+            return [];
+        }
+
         const content = fs.readFileSync(filePath, 'utf-8');
         try {
             const structure = await this.skeletonGenerator.generateStructureJson(filePath, content);
@@ -144,7 +152,7 @@ export class SymbolIndex {
                     results = results.concat(this.scanFiles(absPath));
                 } else {
                     const ext = path.extname(file).toLowerCase();
-                    if (['.ts', '.tsx', '.js', '.jsx', '.py'].includes(ext)) {
+                    if (SUPPORTED_EXTENSIONS.has(ext)) {
                         results.push(absPath);
                     }
                 }

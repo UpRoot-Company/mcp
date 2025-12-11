@@ -12,12 +12,16 @@ export interface SearchOptions {
     wordBoundary?: boolean;
 }
 
+export type SearchFieldType = "symbol-definition" | "signature" | "exported-member" | "comment" | "code-body";
+
 export interface ScoreDetails {
     contentScore: number;
     filenameMultiplier: number;
     depthMultiplier: number;
+    fieldWeight: number;
     totalScore: number;
     filenameMatchType: "exact" | "partial" | "none";
+    fieldType?: SearchFieldType;
 }
 
 export type CallType = "direct" | "method" | "constructor" | "callback" | "optional" | "unknown";
@@ -175,6 +179,7 @@ export interface Document {
     score: number; // BM25 score
     filePath?: string;
     scoreDetails?: ScoreDetails;
+    fieldType?: SearchFieldType;
 }
 
 export interface FileMatch {

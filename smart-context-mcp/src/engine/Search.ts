@@ -1,10 +1,8 @@
-import { exec } from "child_process";
-import { promisify } from "util";
-import * as path from "path";
-import { BM25Ranking } from "./Ranking.js";
-import { FileSearchResult, Document, SearchOptions } from "../types.js";
-
-const execAsync = promisify(exec);
+import path from "path";
+import { BM25FRanking, BM25FConfig } from "./Ranking.js";
+import { FileSearchResult, Document, SearchOptions, SearchFieldType, SymbolInfo } from "../types.js";
+import { TrigramIndex, TrigramIndexOptions } from "./TrigramIndex.js";
+import { IFileSystem } from "../platform/FileSystem.js";
 
 const BUILTIN_EXCLUDE_GLOBS = [
     "**/node_modules/**",
@@ -16,6 +14,10 @@ const BUILTIN_EXCLUDE_GLOBS = [
     "**/*.spec.*"
 ];
 
+const MAX_CANDIDATE_FILES = 400;
+const DEFAULT_PREVIEW_LENGTH = 240;
+const DEFAULT_MATCHES_PER_FILE = 5;
+
 export interface ScoutArgs extends SearchOptions {
     keywords?: string[];
     patterns?: string[];
@@ -25,14 +27,69 @@ export interface ScoutArgs extends SearchOptions {
     basePath?: string;
 }
 
-export class SearchEngine {
-    private bm25Ranking: BM25Ranking;
-    private defaultExcludeGlobs: string[];
+interface SearchQuery {
+    raw: string;
+    regex: RegExp;
+    literalHint?: string;
+}
 
-    constructor(initialExcludeGlobs: string[] = []) {
-        this.bm25Ranking = new BM25Ranking();
+export interface SymbolMetadataProvider {
+    getSymbolsForFile(filePath: string): Promise<SymbolInfo[]>;
+}
+
+export interface SearchEngineOptions {
+    maxPreviewLength?: number;
+    maxMatchesPerFile?: number;
+    trigram?: TrigramIndexOptions;
+    symbolMetadataProvider?: SymbolMetadataProvider;
+    fieldWeights?: BM25FConfig["fieldWeights"];
+}
+
+export class SearchEngine {
+    private readonly rootPath: string;
+    private readonly fileSystem: IFileSystem;
+    private readonly bm25Ranking: BM25FRanking;
+    private readonly defaultExcludeGlobs: string[];
+    private readonly trigramIndex: TrigramIndex;
+    private readonly maxPreviewLength: number;
+    private readonly maxMatchesPerFile: number;
+    private readonly symbolMetadataProvider?: SymbolMetadataProvider;
+    private readonly symbolCache = new Map<string, SymbolInfo[]>();
+    private readonly symbolLoaders = new Map<string, Promise<SymbolInfo[]>>();
+
+    constructor(rootPath: string, fileSystem: IFileSystem, initialExcludeGlobs: string[] = [], options: SearchEngineOptions = {}) {
+        this.rootPath = path.resolve(rootPath);
+        this.fileSystem = fileSystem;
+        this.bm25Ranking = new BM25FRanking({ fieldWeights: options.fieldWeights });
         const combined = [...BUILTIN_EXCLUDE_GLOBS, ...initialExcludeGlobs];
         this.defaultExcludeGlobs = Array.from(new Set(combined));
+        this.maxPreviewLength = options.maxPreviewLength ?? DEFAULT_PREVIEW_LENGTH;
+        this.maxMatchesPerFile = options.maxMatchesPerFile ?? DEFAULT_MATCHES_PER_FILE;
+        this.symbolMetadataProvider = options.symbolMetadataProvider;
+        this.trigramIndex = new TrigramIndex(this.rootPath, this.fileSystem, {
+            ignoreGlobs: this.defaultExcludeGlobs,
+            ...options.trigram
+        });
+    }
+
+    public async warmup(): Promise<void> {
+        await this.trigramIndex.ensureReady();
+    }
+
+    public async rebuild(): Promise<void> {
+        await this.trigramIndex.rebuild();
+        this.symbolCache.clear();
+        this.symbolLoaders.clear();
+    }
+
+    public async invalidateFile(absPath: string): Promise<void> {
+        await this.trigramIndex.refreshFile(absPath);
+        this.dropSymbolMetadata(absPath);
+    }
+
+    public async invalidateDirectory(absDir: string): Promise<void> {
+        await this.trigramIndex.refreshDirectory(absDir);
+        this.dropSymbolMetadata(absDir, true);
     }
 
     public escapeRegExp(value: string, options: SearchOptions = {}): string {
@@ -40,170 +97,324 @@ export class SearchEngine {
         return options.wordBoundary ? `\\b${escaped}\\b` : escaped;
     }
 
-    public async runGrep(
-        searchPattern: string,
-        currentGrepCwd: string,
-        options: {
-            excludeDirNames?: string[];
-            excludeFilePatterns?: string[];
-            gitDiffMode?: boolean;
-        } = {}
-    ): Promise<FileSearchResult[]> {
-        const { excludeDirNames = [], excludeFilePatterns = [], gitDiffMode = false } = options;
-        const escapedPattern = searchPattern.replace(/"/g, '\\"');
-        const exclusionSegments: string[] = [];
-        if (excludeDirNames.length > 0) {
-            exclusionSegments.push(...excludeDirNames.map(dir => `--exclude-dir='${dir}'`));
-        }
-        if (excludeFilePatterns.length > 0) {
-            exclusionSegments.push(...excludeFilePatterns.map(pattern => `--exclude='${pattern}'`));
-        }
-        const commandParts = [
-            "grep",
-            "-n",
-            "-r",
-            "-I",
-            ...exclusionSegments,
-            "-E",
-            `"${escapedPattern}"`,
-            "."
-        ];
-        const command = commandParts.filter(Boolean).join(' ');
-
-        if (gitDiffMode) {
-            console.warn('gitDiffMode is not yet fully implemented.');
-        }
-
-        try {
-            const { stdout } = await execAsync(command, { cwd: currentGrepCwd });
-            const matches: FileSearchResult[] = stdout
-                .split('\n')
-                .filter(line => line.trim() !== '')
-                .map(line => {
-                    const parts = line.split(':');
-                    if (parts.length < 3) return null;
-
-                    const filePath = parts[0];
-                    const lineNumber = parseInt(parts[1], 10);
-                    const preview = parts.slice(2).join(':');
-
-                    if (isNaN(lineNumber)) return null;
-
-                    return {
-                        filePath: path.isAbsolute(filePath) ? filePath : path.resolve(currentGrepCwd, filePath),
-                        lineNumber,
-                        preview,
-                    };
-                })
-                .filter((m): m is FileSearchResult => m !== null);
-            return matches;
-        } catch (error: any) {
-            if (error.code === 1) {
-                return [];
-            }
-            throw new Error(`Grep command failed: ${error.message}`);
-        }
-    }
-
     public async runFileGrep(searchPattern: string, filePath: string): Promise<number[]> {
-        const escapedPattern = searchPattern.replace(/"/g, '\\"');
-        const command = `grep -n -E "${escapedPattern}" "${filePath}"`;
+        let regex: RegExp;
         try {
-            const { stdout } = await execAsync(command);
-            const lineNumbers: number[] = [];
-            stdout.split('\n').forEach((line) => {
-                const parts = line.split(':');
-                const num = parseInt(parts[0], 10);
-                if (!isNaN(num)) {
-                    lineNumbers.push(num);
-                }
-            });
-            return lineNumbers;
-        } catch (error: any) {
-            if (error.code === 1) return [];
-            throw error;
+            regex = new RegExp(searchPattern, "g");
+        } catch {
+            regex = new RegExp(this.escapeRegExp(searchPattern), "g");
         }
+        let content: string;
+        try {
+            content = await this.fileSystem.readFile(filePath);
+        } catch {
+            return [];
+        }
+        const lines = content.split(/\r?\n/);
+        const matches: number[] = [];
+        for (let index = 0; index < lines.length; index++) {
+            regex.lastIndex = 0;
+            if (regex.test(lines[index])) {
+                matches.push(index + 1);
+            }
+        }
+        return matches;
     }
 
     public async scout(args: ScoutArgs): Promise<FileSearchResult[]> {
         const { keywords, patterns, includeGlobs, excludeGlobs, gitDiffMode, basePath, wordBoundary } = args;
 
         if ((!keywords || keywords.length === 0) && (!patterns || patterns.length === 0)) {
-            throw new Error('At least one keyword or pattern is required.');
+            throw new Error("At least one keyword or pattern is required.");
         }
 
-        const searchConfigs = [
-            ...(keywords || []).map((k) => ({ pattern: this.escapeRegExp(k, { wordBoundary }) })),
-            ...(patterns || []).map((p) => ({ pattern: p }))
-        ];
+        if (gitDiffMode) {
+            console.warn("gitDiffMode is not yet fully implemented.");
+        }
 
-        let allMatches: FileSearchResult[] = [];
-        const baseCwd = basePath ? path.resolve(basePath) : process.cwd();
+        const queries = this.buildSearchQueries({ keywords, patterns, wordBoundary });
+        const baseCwd = basePath ? path.resolve(basePath) : this.rootPath;
+        const normalizedBase = baseCwd.startsWith(this.rootPath) ? baseCwd : this.rootPath;
         const combinedExcludeGlobs = [...this.defaultExcludeGlobs, ...(excludeGlobs || [])];
         const includeRegexes = includeGlobs && includeGlobs.length > 0
             ? includeGlobs.map(glob => this.globToRegExp(glob))
             : undefined;
         const excludeRegexes = combinedExcludeGlobs.map(glob => this.globToRegExp(glob));
-        const excludeDirNames = this.extractDirectoryNamesFromGlobs(combinedExcludeGlobs);
-        const excludeFilePatterns = this.extractFilePatternsFromGlobs(combinedExcludeGlobs);
 
-        for (const config of searchConfigs) {
-            const matches = await this.runGrep(config.pattern, baseCwd, {
-                excludeDirNames,
-                excludeFilePatterns,
-                gitDiffMode
-            });
-            const filteredMatches = matches
-                .map(match => {
-                    const relativePath = this.normalizeRelativePath(match.filePath, baseCwd);
-                    if (!relativePath) {
-                        return null;
-                    }
-                    return { ...match, filePath: relativePath };
-                })
-                .filter((match): match is FileSearchResult => match !== null)
-                .filter(match => this.shouldInclude(match.filePath, includeRegexes, excludeRegexes));
-            allMatches.push(...filteredMatches);
+        const candidateScores = await this.collectCandidateFiles(queries);
+        const matchesById = new Map<string, FileSearchResult>();
+        const matchOrigins = new Map<string, string>();
+
+        for (const [relativePath] of candidateScores) {
+            const normalizedRelative = relativePath.replace(/\\/g, "/");
+            const absPath = path.isAbsolute(relativePath)
+                ? relativePath
+                : path.join(this.rootPath, relativePath);
+            let content: string;
+            try {
+                content = await this.fileSystem.readFile(absPath);
+            } catch {
+                continue;
+            }
+            const fileMatches = this.collectMatchesFromFile(normalizedRelative, content, queries);
+            for (const match of fileMatches) {
+                const absMatchPath = path.join(this.rootPath, match.filePath);
+                const relativeToBase = this.normalizeRelativePath(absMatchPath, normalizedBase);
+                if (!relativeToBase) {
+                    continue;
+                }
+                if (!this.shouldInclude(relativeToBase, includeRegexes, excludeRegexes)) {
+                    continue;
+                }
+                const normalizedMatch: FileSearchResult = {
+                    ...match,
+                    filePath: relativeToBase
+                };
+                const docId = `${normalizedMatch.filePath}:${normalizedMatch.lineNumber}`;
+                matchesById.set(docId, normalizedMatch);
+                matchOrigins.set(docId, normalizedRelative);
+            }
         }
 
-        const matchMap = new Map<string, FileSearchResult>();
-        for (const match of allMatches) {
-            matchMap.set(`${match.filePath}:${match.lineNumber}`, match);
+        if (matchesById.size === 0) {
+            return [];
         }
-        const uniqueMatches = Array.from(matchMap.values());
 
-        const scoredDocuments: Document[] = uniqueMatches.map(match => ({
-            id: `${match.filePath}:${match.lineNumber}`,
-            text: match.preview,
-            score: 0,
-            filePath: match.filePath
-        }));
+        const fieldAssignments = await this.assignFieldTypes(matchesById);
 
-        const searchQuery = [...(keywords || []), ...(patterns || [])].join(' ');
-        const rankedDocuments = this.bm25Ranking.rank(scoredDocuments, searchQuery);
+        const documents: Document[] = Array.from(matchesById.entries()).map(([docId, match]) => {
+            const originPath = matchOrigins.get(docId);
+            const originScore = originPath ? candidateScores.get(originPath) ?? 0 : 0;
+            return {
+                id: docId,
+                text: match.preview,
+                score: originScore,
+                filePath: match.filePath,
+                fieldType: fieldAssignments.get(docId)
+            };
+        });
+        const queryText = queries.map(q => q.raw).join(" ");
+        const rankedDocuments = this.bm25Ranking.rank(documents, queryText);
 
-        const rankedFileMatches: FileSearchResult[] = rankedDocuments.map((rankedDoc: Document) => {
-            const originalMatch = matchMap.get(rankedDoc.id);
-            if (!originalMatch) {
-                const separatorIndex = rankedDoc.id.lastIndexOf(':');
-                const fallbackFilePath = rankedDoc.filePath ?? (separatorIndex !== -1 ? rankedDoc.id.slice(0, separatorIndex) : rankedDoc.id);
-                const fallbackLineNumber = separatorIndex !== -1 ? parseInt(rankedDoc.id.slice(separatorIndex + 1), 10) || 0 : 0;
+        return rankedDocuments.map(doc => {
+            const match = matchesById.get(doc.id);
+            if (!match) {
+                const [filePath, line] = this.splitDocId(doc.id);
                 return {
-                    filePath: fallbackFilePath,
-                    lineNumber: fallbackLineNumber,
-                    preview: '',
-                    score: rankedDoc.score,
-                    scoreDetails: rankedDoc.scoreDetails
+                    filePath,
+                    lineNumber: line,
+                    preview: "",
+                    score: doc.score,
+                    scoreDetails: doc.scoreDetails
                 };
             }
             return {
-                ...originalMatch,
-                score: rankedDoc.score,
-                scoreDetails: rankedDoc.scoreDetails
+                ...match,
+                score: doc.score,
+                scoreDetails: doc.scoreDetails
             };
         });
+    }
 
-        return rankedFileMatches;
+    private buildSearchQueries(args: { keywords?: string[]; patterns?: string[]; wordBoundary?: boolean }): SearchQuery[] {
+        const queries: SearchQuery[] = [];
+        for (const keyword of args.keywords ?? []) {
+            const escaped = this.escapeRegExp(keyword, { wordBoundary: args.wordBoundary });
+            queries.push({
+                raw: keyword,
+                regex: new RegExp(escaped, "g"),
+                literalHint: keyword.toLowerCase()
+            });
+        }
+        for (const pattern of args.patterns ?? []) {
+            let regex: RegExp;
+            try {
+                regex = new RegExp(pattern, "g");
+            } catch (error) {
+                throw new Error(`Invalid search pattern '${pattern}': ${(error as Error).message}`);
+            }
+            queries.push({
+                raw: pattern,
+                regex,
+                literalHint: this.extractLiteralHint(pattern)
+            });
+        }
+        return queries;
+    }
+
+    private extractLiteralHint(pattern: string): string | undefined {
+        const literalSegments = pattern
+            .split(/[^a-zA-Z0-9]+/)
+            .filter(segment => segment.length >= 3);
+        if (literalSegments.length === 0) {
+            return undefined;
+        }
+        return literalSegments.reduce((longest, current) => current.length > longest.length ? current : longest).toLowerCase();
+    }
+
+    private async collectCandidateFiles(queries: SearchQuery[]): Promise<Map<string, number>> {
+        const candidates = new Map<string, number>();
+        for (const query of queries) {
+            if (!query.literalHint || query.literalHint.length === 0) {
+                continue;
+            }
+            const matches = await this.trigramIndex.search(query.literalHint, MAX_CANDIDATE_FILES);
+            for (const candidate of matches) {
+                const normalizedPath = candidate.filePath.replace(/\\/g, "/");
+                const previous = candidates.get(normalizedPath) ?? 0;
+                candidates.set(normalizedPath, Math.max(previous, candidate.score));
+            }
+        }
+        if (candidates.size === 0) {
+            const fallback = this.trigramIndex.listFiles().slice(0, MAX_CANDIDATE_FILES);
+            for (const filePath of fallback) {
+                const normalizedPath = filePath.replace(/\\/g, "/");
+                candidates.set(normalizedPath, 0);
+            }
+        }
+        return candidates;
+    }
+
+    private collectMatchesFromFile(relativePath: string, content: string, queries: SearchQuery[]): FileSearchResult[] {
+        const matches: FileSearchResult[] = [];
+        const lines = content.split(/\r?\n/);
+        for (let index = 0; index < lines.length; index++) {
+            const line = lines[index];
+            for (const query of queries) {
+                query.regex.lastIndex = 0;
+                if (query.regex.test(line)) {
+                    matches.push({
+                        filePath: relativePath,
+                        lineNumber: index + 1,
+                        preview: this.formatPreview(line)
+                    });
+                    break;
+                }
+            }
+            if (matches.length >= this.maxMatchesPerFile) {
+                break;
+            }
+        }
+        return matches;
+    }
+
+    private formatPreview(line: string): string {
+        const trimmed = line.trim();
+        if (trimmed.length <= this.maxPreviewLength) {
+            return trimmed;
+        }
+        return `${trimmed.slice(0, this.maxPreviewLength - 1)}…`;
+    }
+
+    private async assignFieldTypes(matches: Map<string, FileSearchResult>): Promise<Map<string, SearchFieldType>> {
+        const assignments = new Map<string, SearchFieldType>();
+        const tasks = Array.from(matches.entries()).map(async ([docId, match]) => {
+            const fieldType = await this.classifyField(match.filePath, match.lineNumber, match.preview);
+            assignments.set(docId, fieldType);
+        });
+        await Promise.all(tasks);
+        return assignments;
+    }
+
+    private async classifyField(relativePath: string, lineNumber: number, preview: string): Promise<SearchFieldType> {
+        if (this.isCommentLine(preview)) {
+            return "comment";
+        }
+        const symbol = await this.findSymbolForLine(relativePath, lineNumber);
+        if (symbol && symbol.range) {
+            const startLine = symbol.range.startLine + 1;
+            const endLine = symbol.range.endLine + 1;
+            const exportFlag = this.isExportedSymbol(symbol);
+            if (lineNumber === startLine) {
+                return "symbol-definition";
+            }
+            const signatureBoundary = Math.min(endLine, startLine + 2);
+            if (lineNumber > startLine && lineNumber <= signatureBoundary) {
+                return "signature";
+            }
+            if (exportFlag) {
+                return "exported-member";
+            }
+        }
+        if (/^\s*export\s+/i.test(preview)) {
+            return "exported-member";
+        }
+        return "code-body";
+    }
+
+    private async findSymbolForLine(relativePath: string, lineNumber: number): Promise<SymbolInfo | undefined> {
+        const symbols = await this.getSymbolsForRelativePath(relativePath);
+        if (!symbols) {
+            return undefined;
+        }
+        return symbols.find(symbol => {
+            if (!symbol.range) {
+                return false;
+            }
+            const start = symbol.range.startLine + 1;
+            const end = symbol.range.endLine + 1;
+            return lineNumber >= start && lineNumber <= end;
+        });
+    }
+
+    private async getSymbolsForRelativePath(relativePath: string): Promise<SymbolInfo[] | undefined> {
+        if (!this.symbolMetadataProvider) {
+            return undefined;
+        }
+        const key = this.normalizeCacheKey(relativePath);
+        if (this.symbolCache.has(key)) {
+            return this.symbolCache.get(key);
+        }
+        let loader = this.symbolLoaders.get(key);
+        if (!loader) {
+            const absPath = path.isAbsolute(relativePath)
+                ? relativePath
+                : path.join(this.rootPath, relativePath);
+            loader = this.symbolMetadataProvider.getSymbolsForFile(absPath).catch(() => []);
+            this.symbolLoaders.set(key, loader);
+        }
+        const symbols = await loader;
+        this.symbolCache.set(key, symbols);
+        this.symbolLoaders.delete(key);
+        return symbols;
+    }
+
+    private dropSymbolMetadata(targetPath: string, includeDescendants: boolean = false): void {
+        const relative = this.normalizeRelativePath(targetPath, this.rootPath);
+        if (!relative) {
+            return;
+        }
+        const normalized = this.normalizeCacheKey(relative);
+        const predicate = (key: string) => key === normalized || (includeDescendants && key.startsWith(`${normalized}/`));
+        for (const key of Array.from(this.symbolCache.keys())) {
+            if (predicate(key)) {
+                this.symbolCache.delete(key);
+            }
+        }
+        for (const key of Array.from(this.symbolLoaders.keys())) {
+            if (predicate(key)) {
+                this.symbolLoaders.delete(key);
+            }
+        }
+    }
+
+    private normalizeCacheKey(relativePath: string): string {
+        return relativePath.replace(/\\/g, "/");
+    }
+
+    private isExportedSymbol(symbol: SymbolInfo): boolean {
+        if ((symbol as any).exportKind) {
+            return true;
+        }
+        if (Array.isArray(symbol.modifiers)) {
+            return symbol.modifiers.some(mod => mod.toLowerCase() === "export");
+        }
+        return false;
+    }
+
+    private isCommentLine(line: string): boolean {
+        const trimmed = line.trim();
+        return /^(\/\/|\/\*|\*|#)/.test(trimmed);
     }
 
     private globToRegExp(glob: string): RegExp {
@@ -237,7 +448,7 @@ export class SearchEngine {
         if (relative.startsWith('..')) {
             return null;
         }
-        return relative || path.basename(absolute);
+        return relative.replace(/\\/g, '/') || path.basename(absolute);
     }
 
     private shouldInclude(relativePath: string, includeRegexes?: RegExp[], excludeRegexes?: RegExp[]): boolean {
@@ -254,56 +465,13 @@ export class SearchEngine {
         return true;
     }
 
-    private extractDirectoryNamesFromGlobs(globs: string[]): string[] {
-        const dirs = new Set<string>();
-        for (const glob of globs) {
-            const normalized = glob.replace(/\\/g, '/');
-            const segments = normalized.split('/').filter(Boolean);
-            if (segments.length === 0) {
-                continue;
-            }
-            let candidate = segments[segments.length - 1];
-            if (/[*?[]/.test(candidate) && segments.length > 1) {
-                candidate = segments[segments.length - 2];
-            }
-            if (/[*?[]/.test(candidate)) {
-                continue;
-            }
-            dirs.add(candidate);
+    private splitDocId(docId: string): [string, number] {
+        const separatorIndex = docId.lastIndexOf(':');
+        if (separatorIndex === -1) {
+            return [docId, 0];
         }
-        return Array.from(dirs);
-    }
-
-    private extractFilePatternsFromGlobs(globs: string[]): string[] {
-        const patterns = new Set<string>();
-        for (const glob of globs) {
-            let normalized = glob.replace(/\\/g, '/').replace(/^\.\//, '');
-            if (!normalized) {
-                continue;
-            }
-            const explicitlyDirectory = normalized.endsWith('/') || normalized.endsWith('/**');
-            if (normalized.endsWith('/**')) {
-                normalized = normalized.slice(0, -3);
-            }
-            if (explicitlyDirectory) {
-                normalized = normalized.replace(/\/$/, '');
-            }
-            const segments = normalized.split('/').filter(Boolean);
-            if (segments.length === 0) {
-                continue;
-            }
-            if (explicitlyDirectory) {
-                continue;
-            }
-            const lastSegment = segments[segments.length - 1];
-            const hasWildcard = /[*?]/.test(lastSegment);
-            const looksLikeFile = lastSegment.includes('.') || hasWildcard;
-            const endsWithWildcardOnly = lastSegment === '**';
-            if (!looksLikeFile || endsWithWildcardOnly) {
-                continue;
-            }
-            patterns.add(lastSegment);
-        }
-        return Array.from(patterns);
+        const filePath = docId.slice(0, separatorIndex);
+        const line = parseInt(docId.slice(separatorIndex + 1), 10);
+        return [filePath, Number.isFinite(line) ? line : 0];
     }
 }

@@ -11,6 +11,7 @@ import { PreviewGenerator } from "./PreviewGenerator.js";
 import { CacheableSearchOptions, ClusterCache, ClusterCacheConfig } from "./ClusterCache.js";
 import { HotSpotDetector } from "./HotSpotDetector.js";
 import { ClusterPrecomputationEngine, ClusterPrecomputationConfig } from "./ClusterPrecomputationEngine.js";
+import { IFileSystem } from "../../platform/FileSystem.js";
 
 const DEFAULT_MAX_CLUSTERS = 5;
 const DEFAULT_TOKEN_BUDGET = 5000;
@@ -21,6 +22,7 @@ export interface ClusterSearchEngineDeps {
     callGraphBuilder: CallGraphBuilder;
     typeDependencyTracker: TypeDependencyTracker;
     dependencyGraph: DependencyGraph;
+    fileSystem: IFileSystem;
 }
 
 export interface ClusterSearchOptions {
@@ -59,7 +61,7 @@ export class ClusterSearchEngine {
             deps.callGraphBuilder,
             deps.typeDependencyTracker
         );
-        this.previewGenerator = new PreviewGenerator(deps.rootPath);
+        this.previewGenerator = new PreviewGenerator(deps.rootPath, deps.fileSystem);
         this.clusterCache = new ClusterCache(deps.rootPath, config.cache);
         this.precomputationEnabled = config.precomputation?.enabled !== false;
         if (this.precomputationEnabled) {

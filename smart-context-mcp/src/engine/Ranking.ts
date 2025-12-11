@@ -1,14 +1,33 @@
 
 import * as path from "path";
-import { Document, ScoreDetails } from "../types.js";
+import { Document, ScoreDetails, SearchFieldType } from "../types.js";
 
-export class BM25Ranking {
-    private k1: number;
-    private b: number;
+const DEFAULT_FIELD_WEIGHTS: Record<SearchFieldType, number> = {
+    "symbol-definition": 10,
+    "signature": 6,
+    "exported-member": 3,
+    "comment": 0.5,
+    "code-body": 1,
+};
 
-    constructor(k1: number = 1.2, b: number = 0.75) {
-        this.k1 = k1;
-        this.b = b;
+export interface BM25FConfig {
+    k1?: number;
+    b?: number;
+    fieldWeights?: Partial<Record<SearchFieldType, number>>;
+}
+
+export class BM25FRanking {
+    private readonly k1: number;
+    private readonly b: number;
+    private readonly fieldWeights: Record<SearchFieldType, number>;
+
+    constructor(config: BM25FConfig = {}) {
+        this.k1 = config.k1 ?? 1.2;
+        this.b = config.b ?? 0.75;
+        this.fieldWeights = {
+            ...DEFAULT_FIELD_WEIGHTS,
+            ...(config.fieldWeights ?? {})
+        };
     }
 
     public rank(documents: Document[], query: string): Document[] {
@@ -50,13 +69,17 @@ export class BM25Ranking {
             const derivedFilePath = doc.filePath ?? this.extractFilePathFromId(doc.id);
             const filenameImpact = this.calculateFilenameMultiplier(derivedFilePath, queryTokens);
             const depthMultiplier = this.calculateDepthMultiplier(derivedFilePath);
-            const totalScore = contentScore * filenameImpact.multiplier * depthMultiplier;
+            const fieldType = doc.fieldType ?? "code-body";
+            const fieldWeight = this.fieldWeights[fieldType] ?? 1;
+            const totalScore = contentScore * filenameImpact.multiplier * depthMultiplier * fieldWeight;
             const details: ScoreDetails = {
                 contentScore,
                 filenameMultiplier: filenameImpact.multiplier,
                 depthMultiplier,
+                fieldWeight,
                 totalScore,
-                filenameMatchType: filenameImpact.matchType
+                filenameMatchType: filenameImpact.matchType,
+                fieldType
             };
             doc.score = totalScore;
             doc.filePath = derivedFilePath ?? doc.filePath;

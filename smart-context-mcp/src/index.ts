@@ -29,6 +29,7 @@ import { AgentWorkflowGuidance } from "./engine/AgentPlaybook.js";
 import { ClusterSearchEngine, ClusterSearchOptions, ClusterExpansionOptions } from "./engine/ClusterSearch/index.js";
 import { BuildClusterOptions, ExpandableRelationship } from "./engine/ClusterSearch/ClusterBuilder.js";
 import { FileSearchResult, ReadFragmentResult, EditResult, DirectoryTree, Edit, EngineConfig, SmartFileProfile, SymbolInfo, ToolSuggestion, ImpactPreview, BatchEditGuidance, ReadCodeResult, ReadCodeArgs, SearchProjectResult, SearchProjectArgs, AnalyzeRelationshipResult, EditCodeArgs, EditCodeResult, EditCodeEdit, ManageProjectResult, ManageProjectArgs, AnalyzeRelationshipArgs, ReadCodeView, SearchProjectType, ResolvedRelationshipTarget, AnalyzeRelationshipDirection, AnalyzeRelationshipNode, AnalyzeRelationshipEdge, LineRange } from "./types.js";
+import { IFileSystem, NodeFileSystem } from "./platform/FileSystem.js";
 
 const readFileAsync = promisify(fs.readFile);
 const writeFileAsync = promisify(fs.writeFile);
@@ -41,6 +42,7 @@ const ENABLE_DEBUG_LOGS = process.env.SMART_CONTEXT_DEBUG === 'true';
 export class SmartContextServer {
     private server: Server;
     private rootPath: string;
+    private fileSystem: IFileSystem;
     private ig: any;
     private ignoreGlobs: string[];
     private searchEngine: SearchEngine;
@@ -62,7 +64,7 @@ export class SmartContextServer {
     private static hasSigintListener = false;
     private static readonly READ_CODE_MAX_BYTES = 1_000_000;
 
-        constructor(rootPath: string) {
+        constructor(rootPath: string, fileSystem?: IFileSystem) {
         if (ENABLE_DEBUG_LOGS) {
             console.error("DEBUG: SmartContextServer constructor started");
         }
@@ -76,14 +78,14 @@ export class SmartContextServer {
         });
 
         this.rootPath = path.resolve(rootPath);
+        this.fileSystem = fileSystem ?? new NodeFileSystem(this.rootPath);
         const isTestEnv = process.env.NODE_ENV === 'test' || process.env.JEST_WORKER_ID !== undefined;
         this.ig = (ignore.default as any)();
         this.ignoreGlobs = this._loadIgnoreFiles();
 
-        this.searchEngine = new SearchEngine(this.ignoreGlobs);
-        this.contextEngine = new ContextEngine(this.ig);
-        this.editorEngine = new EditorEngine(this.rootPath); // Pass rootPath to EditorEngine
-        this.historyEngine = new HistoryEngine(this.rootPath);
+        this.contextEngine = new ContextEngine(this.ig, this.fileSystem);
+        this.editorEngine = new EditorEngine(this.rootPath, this.fileSystem);
+        this.historyEngine = new HistoryEngine(this.rootPath, this.fileSystem);
         this.editCoordinator = new EditCoordinator(this.editorEngine, this.historyEngine, this.rootPath);
         this.skeletonGenerator = new SkeletonGenerator();
         this.astManager = AstManager.getInstance();
@@ -93,14 +95,18 @@ export class SmartContextServer {
         this.referenceFinder = new ReferenceFinder(this.rootPath, this.dependencyGraph, this.symbolIndex, this.skeletonGenerator, this.moduleResolver);
         this.callGraphBuilder = new CallGraphBuilder(this.rootPath, this.symbolIndex, this.moduleResolver);
         this.typeDependencyTracker = new TypeDependencyTracker(this.rootPath, this.symbolIndex);
-        this.dataFlowTracer = new DataFlowTracer(this.rootPath, this.symbolIndex);
+        this.dataFlowTracer = new DataFlowTracer(this.rootPath, this.symbolIndex, this.fileSystem);
+        this.searchEngine = new SearchEngine(this.rootPath, this.fileSystem, this.ignoreGlobs, {
+            symbolMetadataProvider: this.symbolIndex
+        });
         const precomputeEnabled = process.env.SMART_CONTEXT_DISABLE_PRECOMPUTE === 'true' ? false : !isTestEnv;
         this.clusterSearchEngine = new ClusterSearchEngine({
             rootPath: this.rootPath,
             symbolIndex: this.symbolIndex,
             callGraphBuilder: this.callGraphBuilder,
             typeDependencyTracker: this.typeDependencyTracker,
-            dependencyGraph: this.dependencyGraph
+            dependencyGraph: this.dependencyGraph,
+            fileSystem: this.fileSystem
         }, {
             precomputation: { enabled: precomputeEnabled }
         });
@@ -1100,6 +1106,7 @@ export class SmartContextServer {
             this.callGraphBuilder.invalidateFile(absPath);
             this.typeDependencyTracker.invalidateFile(absPath);
             this.clusterSearchEngine.invalidateFile(absPath);
+            await this.searchEngine.invalidateFile(absPath);
         }
     }
 
@@ -1458,6 +1465,7 @@ export class SmartContextServer {
                     this.typeDependencyTracker.clearCaches();
                     this.typeDependencyTracker.clearCaches();
                     this.clusterSearchEngine.clearCache();
+                    await this.searchEngine.rebuild();
                     const status = await this.dependencyGraph.getIndexStatus();
                     return { content: [{ type: "text", text: JSON.stringify({ message: "Index rebuilt successfully", status }, null, 2) }] };
                 }
@@ -1467,6 +1475,7 @@ export class SmartContextServer {
                     this.callGraphBuilder.invalidateFile(absPath);
                     this.typeDependencyTracker.invalidateFile(absPath);
                     this.clusterSearchEngine.invalidateFile(absPath);
+                    await this.searchEngine.invalidateFile(absPath);
                     const status = await this.dependencyGraph.getIndexStatus();
                     return { content: [{ type: "text", text: JSON.stringify({ message: `Invalidated ${args.filePath}`, status }, null, 2) }] };
                 }
@@ -1479,7 +1488,8 @@ export class SmartContextServer {
                     await this.dependencyGraph.invalidateDirectory(absDir);
                     this.callGraphBuilder.invalidateDirectory(absDir);
                     this.typeDependencyTracker.invalidateDirectory(absDir);
-                     this.clusterSearchEngine.invalidateDirectory(absDir);
+                    this.clusterSearchEngine.invalidateDirectory(absDir);
+                    await this.searchEngine.invalidateDirectory(absDir);
                     const status = await this.dependencyGraph.getIndexStatus();
                     return { content: [{ type: "text", text: JSON.stringify({ message: `Invalidated directory ${dirArg}`, status }, null, 2) }] };
                 }
@@ -1512,6 +1522,7 @@ export class SmartContextServer {
                     this.callGraphBuilder.invalidateFile(absPath);
                     this.typeDependencyTracker.invalidateFile(absPath);
                     this.clusterSearchEngine.invalidateFile(absPath);
+                    await this.searchEngine.invalidateFile(absPath);
                     return { content: [{ type: "text", text: `Successfully wrote to ${args.filePath}` }] };
                 }
                 case "edit_file": {
@@ -1541,6 +1552,7 @@ export class SmartContextServer {
                         this.callGraphBuilder.invalidateFile(absPath);
                         this.typeDependencyTracker.invalidateFile(absPath);
                         this.clusterSearchEngine.invalidateFile(absPath);
+                        await this.searchEngine.invalidateFile(absPath);
                     }
 
                     if (impactPreview) {
@@ -1602,6 +1614,7 @@ export class SmartContextServer {
                             this.callGraphBuilder.invalidateFile(fileEdit.filePath);
                             this.typeDependencyTracker.invalidateFile(fileEdit.filePath);
                             this.clusterSearchEngine.invalidateFile(fileEdit.filePath);
+                            await this.searchEngine.invalidateFile(fileEdit.filePath);
                         }
                     }
 

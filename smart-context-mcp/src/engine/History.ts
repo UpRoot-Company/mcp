@@ -1,10 +1,6 @@
-import * as fs from "fs";
 import * as path from "path";
-import { promisify } from "util";
-import { EditOperation, HistoryItem } from "../types.js";
-
-const readFileAsync = promisify(fs.readFile);
-const writeFileAsync = promisify(fs.writeFile);
+import { HistoryItem } from "../types.js";
+import { IFileSystem } from "../platform/FileSystem.js";
 
 interface HistoryState {
     undoStack: HistoryItem[];
@@ -14,19 +10,21 @@ interface HistoryState {
 export class HistoryEngine {
     private rootPath: string;
     private historyFilePath: string;
+    private readonly fileSystem: IFileSystem;
 
-    constructor(rootPath: string) {
+    constructor(rootPath: string, fileSystem: IFileSystem) {
         this.rootPath = rootPath;
         this.historyFilePath = path.join(rootPath, ".mcp", "history.json");
+        this.fileSystem = fileSystem;
     }
 
     private async readHistory(): Promise<HistoryState> {
-        if (!fs.existsSync(this.historyFilePath)) {
+        if (!(await this.fileSystem.exists(this.historyFilePath))) {
             return { undoStack: [], redoStack: [] };
         }
 
         try {
-            const content = await readFileAsync(this.historyFilePath, "utf-8");
+            const content = await this.fileSystem.readFile(this.historyFilePath);
             const parsed = JSON.parse(content);
             return {
                 undoStack: Array.isArray(parsed.undoStack) ? parsed.undoStack : [],
@@ -39,12 +37,12 @@ export class HistoryEngine {
 
     private async writeHistory(state: HistoryState): Promise<void> {
         const dir = path.dirname(this.historyFilePath);
-        if (!fs.existsSync(dir)) {
-            fs.mkdirSync(dir, { recursive: true });
+        if (!(await this.fileSystem.exists(dir))) {
+            await this.fileSystem.createDir(dir);
         }
 
         const json = JSON.stringify(state, null, 2);
-        await writeFileAsync(this.historyFilePath, json, "utf-8");
+        await this.fileSystem.writeFile(this.historyFilePath, json);
     }
 
     public async pushOperation(op: HistoryItem): Promise<void> {

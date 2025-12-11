@@ -1,5 +1,3 @@
-import * as fs from "fs";
-import { promisify } from "util";
 import * as path from "path";
 import * as crypto from "crypto";
 import { createRequire } from "module";
@@ -7,6 +5,7 @@ import { MyersDiff } from "./Diff.js";
 import levenshtein from "fast-levenshtein";
 import { Edit, EditOperation, EditResult, LineRange, MatchDiagnostics, ToolSuggestion } from "../types.js";
 import { LineCounter } from "./LineCounter.js";
+import { IFileSystem } from "../platform/FileSystem.js";
 const require = createRequire(import.meta.url);
 let importedXxhash: any = null;
 try {
@@ -15,11 +14,6 @@ try {
     importedXxhash = null;
 }
 const XXH: any = importedXxhash ? ((importedXxhash as any).default ?? importedXxhash) : null;
-
-const readFileAsync = promisify(fs.readFile);
-const writeFileAsync = promisify(fs.writeFile);
-const readdirAsync = promisify(fs.readdir);
-const unlinkAsync = promisify(fs.unlink);
 
 interface Match {
     start: number;
@@ -60,16 +54,17 @@ export class MatchNotFoundError extends Error {
 export class EditorEngine {
     private rootPath: string;
     private backupsDir: string;
+    private readonly fileSystem: IFileSystem;
 
-    constructor(rootPath: string) {
+    constructor(rootPath: string, fileSystem: IFileSystem) {
         this.rootPath = rootPath;
         this.backupsDir = path.join(rootPath, ".mcp", "backups");
-        this._ensureBackupsDirExists();
+        this.fileSystem = fileSystem;
     }
 
-    private _ensureBackupsDirExists(): void {
-        if (!fs.existsSync(this.backupsDir)) {
-            fs.mkdirSync(this.backupsDir, { recursive: true });
+    private async ensureBackupsDirExists(): Promise<void> {
+        if (!(await this.fileSystem.exists(this.backupsDir))) {
+            await this.fileSystem.createDir(this.backupsDir);
         }
     }
 
@@ -85,7 +80,8 @@ export class EditorEngine {
 
     private async _createTimestampedBackup(originalFilePath: string, content: string): Promise<void> {
         const backupPath = this._getBackupFilePath(originalFilePath);
-        await writeFileAsync(backupPath, content);
+        await this.ensureBackupsDirExists();
+        await this.fileSystem.writeFile(backupPath, content);
     }
 
     private async _enforceRetentionPolicy(originalFilePath: string, maxBackups: number = 10): Promise<void> {
@@ -95,7 +91,8 @@ export class EditorEngine {
                 .replace(/["\/\\:]/g, "_")
                 .replace(/^_/, "");
 
-            const files = await readdirAsync(this.backupsDir);
+            await this.ensureBackupsDirExists();
+            const files = await this.fileSystem.readDir(this.backupsDir);
             const relevantBackups = files
                 .filter((f) => f.startsWith(`${encodedPathPrefix}_`) && f.endsWith(".bak"))
                 .sort((a, b) => b.localeCompare(a));
@@ -103,7 +100,7 @@ export class EditorEngine {
             if (relevantBackups.length > maxBackups) {
                 const toDelete = relevantBackups.slice(maxBackups);
                 for (const file of toDelete) {
-                    await unlinkAsync(path.join(this.backupsDir, file));
+                    await this.fileSystem.deleteFile(path.join(this.backupsDir, file));
                 }
             }
         } catch (error: any) {
@@ -836,11 +833,11 @@ export class EditorEngine {
         edits: Edit[],
         dryRun: boolean = false
     ): Promise<EditResult> {
-        if (!fs.existsSync(filePath)) {
+        if (!(await this.fileSystem.exists(filePath))) {
             return { success: false, message: `File not found: ${filePath}` };
         }
 
-        const originalContent = await readFileAsync(filePath, "utf-8");
+        const originalContent = await this.fileSystem.readFile(filePath);
         let plannedMatches: Match[];
 
         try {
@@ -929,7 +926,7 @@ export class EditorEngine {
         const relativePath = path.relative(this.rootPath, filePath);
         await this._createTimestampedBackup(relativePath, originalContent);
         await this._enforceRetentionPolicy(relativePath);
-        await writeFileAsync(filePath, newContent);
+        await this.fileSystem.writeFile(filePath, newContent);
 
         return {
             success: true,

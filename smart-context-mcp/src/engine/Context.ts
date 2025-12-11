@@ -1,18 +1,14 @@
-
-import * as fs from "fs";
 import * as path from "path";
-import { promisify } from "util";
-import { LineRange, ReadFragmentResult, DirectoryTree } from "../types.js";
-
-const readFileAsync = promisify(fs.readFile);
-const readdirAsync = promisify(fs.readdir);
-const statAsync = promisify(fs.stat);
+import { LineRange, ReadFragmentResult } from "../types.js";
+import { IFileSystem } from "../platform/FileSystem.js";
 
 export class ContextEngine {
     private ig: any;
+    private readonly fileSystem: IFileSystem;
 
-    constructor(ig: any) {
+    constructor(ig: any, fileSystem: IFileSystem) {
         this.ig = ig;
+        this.fileSystem = fileSystem;
     }
 
     private mergeIntervals(ranges: LineRange[]): LineRange[] {
@@ -35,11 +31,11 @@ export class ContextEngine {
     }
 
     public async readFragment(filePath: string, ranges: LineRange[], contextLines: number = 0): Promise<ReadFragmentResult> {
-        if (!fs.existsSync(filePath)) {
+        if (!(await this.fileSystem.exists(filePath))) {
             throw new Error(`File not found: ${filePath}`);
         }
 
-        const fileContent = await readFileAsync(filePath, 'utf-8');
+        const fileContent = await this.fileSystem.readFile(filePath);
         const allLines = fileContent.split('\n');
         const totalLines = allLines.length;
 
@@ -76,7 +72,7 @@ export class ContextEngine {
     }
 
     public async listDirectoryTree(dirPath: string, depth: number = 2, rootDir?: string): Promise<string> {
-        if (!fs.existsSync(dirPath)) {
+        if (!(await this.fileSystem.exists(dirPath))) {
             throw new Error(`Directory not found: ${dirPath}`);
         }
         const effectiveRootDir = rootDir || dirPath;
@@ -88,7 +84,7 @@ export class ContextEngine {
 
         let output = '';
         try {
-            const items = await readdirAsync(currentPath);
+            const items = await this.fileSystem.readDir(currentPath);
             const filteredItems = items.filter(item => {
                 const relativePath = path.relative(rootDir, path.join(currentPath, item));
                 return !this.ig.ignores(relativePath);
@@ -98,7 +94,7 @@ export class ContextEngine {
                 const item = filteredItems[i];
                 const isLast = i === filteredItems.length - 1;
                 const itemPath = path.join(currentPath, item);
-                const stats = await statAsync(itemPath);
+                const stats = await this.fileSystem.stat(itemPath);
 
                 const marker = isLast ? '└── ' : '├── ';
                 const childPrefix = isLast ? '    ' : '│   ';

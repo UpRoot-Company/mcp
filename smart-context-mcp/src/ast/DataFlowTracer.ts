@@ -1,8 +1,8 @@
 import path from "path";
-import fs from "fs/promises";
 import { AstManager } from "./AstManager.js";
 import { SymbolIndex } from "./SymbolIndex.js";
 import { DataFlowEdge, DataFlowResult, DataFlowStep, DataFlowStepType, DefinitionSymbol, SymbolInfo } from "../types.js";
+import { IFileSystem } from "../platform/FileSystem.js";
 
 interface RawOccurrence {
     step: DataFlowStep;
@@ -20,7 +20,8 @@ export class DataFlowTracer {
 
     constructor(
         private readonly rootPath: string,
-        private readonly symbolIndex: SymbolIndex
+        private readonly symbolIndex: SymbolIndex,
+        private readonly fileSystem: IFileSystem
     ) {}
 
     public async traceVariable(
@@ -32,7 +33,7 @@ export class DataFlowTracer {
         const absPath = path.isAbsolute(filePath) ? filePath : path.join(this.rootPath, filePath);
         let content: string;
         try {
-            content = await fs.readFile(absPath, "utf-8");
+            content = await this.fileSystem.readFile(absPath);
         } catch {
             return null;
         }
