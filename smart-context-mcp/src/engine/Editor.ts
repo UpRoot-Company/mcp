@@ -4,7 +4,7 @@ import { createRequire } from "module";
 import { MyersDiff } from "./Diff.js";
 import { PatienceDiff } from "./PatienceDiff.js";
 import levenshtein from "fast-levenshtein";
-import { DiffMode, Edit, EditOperation, EditResult, LineRange, MatchDiagnostics, ToolSuggestion } from "../types.js";
+import { DiffMode, Edit, EditOperation, EditResult, LineRange, MatchDiagnostics, ToolSuggestion, SemanticDiffProvider, SemanticDiffSummary } from "../types.js";
 import { LineCounter } from "./LineCounter.js";
 import { IFileSystem } from "../platform/FileSystem.js";
 const require = createRequire(import.meta.url);
@@ -60,11 +60,13 @@ export class EditorEngine {
     private rootPath: string;
     private backupsDir: string;
     private readonly fileSystem: IFileSystem;
+    private readonly semanticDiffProvider?: SemanticDiffProvider;
 
-    constructor(rootPath: string, fileSystem: IFileSystem) {
+    constructor(rootPath: string, fileSystem: IFileSystem, semanticDiffProvider?: SemanticDiffProvider) {
         this.rootPath = rootPath;
         this.backupsDir = path.join(rootPath, ".mcp", "backups");
         this.fileSystem = fileSystem;
+        this.semanticDiffProvider = semanticDiffProvider;
     }
 
     private async ensureBackupsDirExists(): Promise<void> {
@@ -842,6 +844,7 @@ export class EditorEngine {
         if (!(await this.fileSystem.exists(filePath))) {
             return { success: false, message: `File not found: ${filePath}` };
         }
+        const diffMode: DiffMode = options?.diffMode === "semantic" ? "semantic" : "myers";
 
         const originalContent = await this.fileSystem.readFile(filePath);
         let plannedMatches: Match[];
@@ -912,10 +915,10 @@ export class EditorEngine {
         };
 
         if (dryRun) {
-            const diffMode: DiffMode = options?.diffMode === "semantic" ? "semantic" : "myers";
             let diffText: string;
             let added = 0;
             let removed = 0;
+            let semanticSummary: SemanticDiffSummary | undefined;
 
             if (diffMode === "semantic") {
                 const hunks = PatienceDiff.diff(originalContent, newContent, {
@@ -926,6 +929,9 @@ export class EditorEngine {
                 diffText = PatienceDiff.formatUnified(hunks);
                 added = summary.added;
                 removed = summary.removed;
+                if (this.semanticDiffProvider) {
+                    semanticSummary = await this.semanticDiffProvider.diff(filePath, originalContent, newContent);
+                }
             } else {
                 const summary = MyersDiff.diffLinesStructured(originalContent, newContent);
                 diffText = summary.diff;
@@ -944,6 +950,8 @@ export class EditorEngine {
                     added,
                     removed
                 }],
+                semanticSummary,
+                diffModeUsed: diffMode,
                 operation
             };
         }
@@ -956,6 +964,7 @@ export class EditorEngine {
         return {
             success: true,
             message: `Successfully applied ${edits.length} edits.`,
+            diffModeUsed: diffMode,
             operation: {
                 ...operation,
                 filePath: relativePath,

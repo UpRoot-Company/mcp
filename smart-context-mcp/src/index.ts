@@ -30,6 +30,7 @@ import { ClusterSearchEngine, ClusterSearchOptions, ClusterExpansionOptions } fr
 import { BuildClusterOptions, ExpandableRelationship } from "./engine/ClusterSearch/ClusterBuilder.js";
 import { FileSearchResult, ReadFragmentResult, EditResult, DirectoryTree, Edit, EngineConfig, SmartFileProfile, SymbolInfo, ToolSuggestion, ImpactPreview, BatchEditGuidance, ReadCodeResult, ReadCodeArgs, SearchProjectResult, SearchProjectArgs, AnalyzeRelationshipResult, EditCodeArgs, EditCodeResult, EditCodeEdit, ManageProjectResult, ManageProjectArgs, AnalyzeRelationshipArgs, ReadCodeView, SearchProjectType, ResolvedRelationshipTarget, AnalyzeRelationshipDirection, AnalyzeRelationshipNode, AnalyzeRelationshipEdge, LineRange, DiffMode } from "./types.js";
 import { IFileSystem, NodeFileSystem } from "./platform/FileSystem.js";
+import { AstAwareDiff } from "./engine/AstAwareDiff.js";
 
 const readFileAsync = promisify(fs.readFile);
 const writeFileAsync = promisify(fs.writeFile);
@@ -83,10 +84,6 @@ export class SmartContextServer {
         this.ig = (ignore.default as any)();
         this.ignoreGlobs = this._loadIgnoreFiles();
 
-        this.contextEngine = new ContextEngine(this.ig, this.fileSystem);
-        this.editorEngine = new EditorEngine(this.rootPath, this.fileSystem);
-        this.historyEngine = new HistoryEngine(this.rootPath, this.fileSystem);
-        this.editCoordinator = new EditCoordinator(this.editorEngine, this.historyEngine, this.rootPath);
         this.skeletonGenerator = new SkeletonGenerator();
         this.astManager = AstManager.getInstance();
         this.symbolIndex = new SymbolIndex(this.rootPath, this.skeletonGenerator, this.ignoreGlobs);
@@ -96,6 +93,11 @@ export class SmartContextServer {
         this.callGraphBuilder = new CallGraphBuilder(this.rootPath, this.symbolIndex, this.moduleResolver);
         this.typeDependencyTracker = new TypeDependencyTracker(this.rootPath, this.symbolIndex);
         this.dataFlowTracer = new DataFlowTracer(this.rootPath, this.symbolIndex, this.fileSystem);
+        const semanticDiffProvider = new AstAwareDiff(this.skeletonGenerator);
+        this.contextEngine = new ContextEngine(this.ig, this.fileSystem);
+        this.editorEngine = new EditorEngine(this.rootPath, this.fileSystem, semanticDiffProvider);
+        this.historyEngine = new HistoryEngine(this.rootPath, this.fileSystem);
+        this.editCoordinator = new EditCoordinator(this.editorEngine, this.historyEngine, this.rootPath);
         this.searchEngine = new SearchEngine(this.rootPath, this.fileSystem, this.ignoreGlobs, {
             symbolMetadataProvider: this.symbolIndex
         });

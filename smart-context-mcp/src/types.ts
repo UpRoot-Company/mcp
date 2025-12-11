@@ -88,6 +88,34 @@ export interface EditExecutionOptions {
     diffMode?: DiffMode;
 }
 
+export type SemanticChangeType = "add" | "remove" | "modify" | "move" | "rename";
+
+export interface SemanticChange {
+    type: SemanticChangeType;
+    symbolType?: string;
+    name: string;
+    oldName?: string;
+    similarity?: number;
+    oldLocation?: LineRange;
+    newLocation?: LineRange;
+    summary?: string;
+}
+
+export interface SemanticDiffSummary {
+    changes: SemanticChange[];
+    stats: {
+        added: number;
+        removed: number;
+        modified: number;
+        renamed: number;
+        moved: number;
+    };
+}
+
+export interface SemanticDiffProvider {
+    diff(filePath: string, oldContent: string, newContent: string): Promise<SemanticDiffSummary | undefined>;
+}
+
 export interface ToolSuggestion {
     toolName: string;
     rationale: string;
@@ -129,6 +157,8 @@ export interface EditResult {
     structuredDiff?: { filePath: string; diff: string; added: number; removed: number }[];
     originalContent?: string;
     newContent?: string;
+    semanticSummary?: SemanticDiffSummary;
+    diffModeUsed?: DiffMode;
     details?: ErrorDetails;
     suggestion?: ToolSuggestion;
     errorCode?: string;
