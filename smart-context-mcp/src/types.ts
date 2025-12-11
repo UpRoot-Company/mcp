@@ -394,3 +394,127 @@ export interface EngineConfig {
     snapshotDir?: string;
     rootPath?: string;
 }
+
+export type ReadCodeView = "full" | "skeleton" | "fragment";
+
+export interface ReadCodeArgs {
+    filePath: string;
+    view?: ReadCodeView;
+    lineRange?: string;
+}
+
+export interface ReadCodeResult {
+    content: string;
+    metadata: {
+        lines: number;
+        language: string | null;
+        path: string;
+    };
+    truncated: boolean;
+}
+
+export type SearchProjectType = "auto" | "file" | "symbol" | "directory";
+
+export interface SearchProjectArgs {
+    query: string;
+    type?: SearchProjectType;
+    maxResults?: number;
+}
+
+export interface SearchProjectResultEntry {
+    type: "file" | "symbol" | "directory";
+    path: string;
+    score: number;
+    context?: string;
+    line?: number;
+}
+
+export interface SearchProjectResult {
+    results: SearchProjectResultEntry[];
+    inferredType?: "file" | "symbol" | "directory";
+}
+
+export type AnalyzeRelationshipMode = "impact" | "dependencies" | "calls" | "data_flow" | "types";
+
+export type AnalyzeRelationshipDirection = "upstream" | "downstream" | "both";
+
+export interface AnalyzeRelationshipArgs {
+    target: string;
+    targetType?: "auto" | "file" | "symbol";
+    contextPath?: string;
+    mode: AnalyzeRelationshipMode;
+    direction?: AnalyzeRelationshipDirection;
+    maxDepth?: number;
+    fromLine?: number;
+}
+
+export interface AnalyzeRelationshipNode {
+    id: string;
+    type: string;
+    path?: string;
+    label?: string;
+}
+
+export interface AnalyzeRelationshipEdge {
+    source: string;
+    target: string;
+    relation: string;
+}
+
+export interface ResolvedRelationshipTarget {
+    type: "file" | "symbol" | "variable";
+    path: string;
+    symbolName?: string;
+}
+
+export interface AnalyzeRelationshipResult {
+    nodes: AnalyzeRelationshipNode[];
+    edges: AnalyzeRelationshipEdge[];
+    resolvedTarget: ResolvedRelationshipTarget;
+}
+
+export interface EditCodeEdit {
+    filePath: string;
+    operation: "replace" | "create" | "delete";
+    targetString?: string;
+    replacementString?: string;
+    lineRange?: LineRange;
+    beforeContext?: string;
+    afterContext?: string;
+    fuzzyMode?: "whitespace" | "levenshtein";
+    anchorSearchRange?: { lines: number; chars: number };
+    indexRange?: IndexRange;
+    normalization?: "exact" | "whitespace" | "structural";
+    expectedHash?: Edit["expectedHash"];
+}
+
+export interface EditCodeArgs {
+    edits: EditCodeEdit[];
+    dryRun?: boolean;
+    createMissingDirectories?: boolean;
+    ignoreMistakes?: boolean;
+}
+
+export interface EditCodeResultEntry {
+    filePath: string;
+    applied: boolean;
+    error?: string;
+    diff?: string;
+}
+
+export interface EditCodeResult {
+    success: boolean;
+    results: EditCodeResultEntry[];
+    transactionId?: string;
+}
+
+export type ManageProjectCommand = "undo" | "redo" | "guidance" | "status";
+
+export interface ManageProjectArgs {
+    command: ManageProjectCommand;
+}
+
+export interface ManageProjectResult {
+    output: string;
+    data?: any;
+}

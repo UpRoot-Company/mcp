@@ -7,6 +7,7 @@ import { promisify } from "util";
 import * as path from "path";
 import * as ignore from "ignore";
 import * as url from "url";
+import * as crypto from "crypto";
 
 // Engine Imports
 import { SearchEngine } from "./engine/Search.js";
@@ -27,11 +28,14 @@ import { FileProfiler, FileMetadataAnalysis } from "./engine/FileProfiler.js";
 import { AgentWorkflowGuidance } from "./engine/AgentPlaybook.js";
 import { ClusterSearchEngine, ClusterSearchOptions, ClusterExpansionOptions } from "./engine/ClusterSearch/index.js";
 import { BuildClusterOptions, ExpandableRelationship } from "./engine/ClusterSearch/ClusterBuilder.js";
-import { FileSearchResult, ReadFragmentResult, EditResult, DirectoryTree, Edit, EngineConfig, SmartFileProfile, SymbolInfo, ToolSuggestion, ImpactPreview, BatchEditGuidance } from "./types.js";
+import { FileSearchResult, ReadFragmentResult, EditResult, DirectoryTree, Edit, EngineConfig, SmartFileProfile, SymbolInfo, ToolSuggestion, ImpactPreview, BatchEditGuidance, ReadCodeResult, ReadCodeArgs, SearchProjectResult, SearchProjectArgs, AnalyzeRelationshipResult, EditCodeArgs, EditCodeResult, EditCodeEdit, ManageProjectResult, ManageProjectArgs, AnalyzeRelationshipArgs, ReadCodeView, SearchProjectType, ResolvedRelationshipTarget, AnalyzeRelationshipDirection, AnalyzeRelationshipNode, AnalyzeRelationshipEdge, LineRange } from "./types.js";
 
 const readFileAsync = promisify(fs.readFile);
 const writeFileAsync = promisify(fs.writeFile);
 const statAsync = promisify(fs.stat);
+const mkdirAsync = promisify(fs.mkdir);
+const unlinkAsync = promisify(fs.unlink);
+const accessAsync = promisify(fs.access);
 const ENABLE_DEBUG_LOGS = process.env.SMART_CONTEXT_DEBUG === 'true';
 
 export class SmartContextServer {
@@ -55,6 +59,7 @@ export class SmartContextServer {
     private dataFlowTracer: DataFlowTracer;
     private clusterSearchEngine: ClusterSearchEngine;
     private sigintListener?: () => Promise<void>;
+    private static readonly READ_CODE_MAX_BYTES = 1_000_000;
 
         constructor(rootPath: string) {
         if (ENABLE_DEBUG_LOGS) {
@@ -483,6 +488,661 @@ export class SmartContextServer {
         return options;
     }
 
+    private parseLineRangeSpec(rangeSpec?: string): LineRange {
+        if (typeof rangeSpec !== "string" || !rangeSpec.trim()) {
+            throw new McpError(ErrorCode.InvalidParams, "lineRange is required when view=\"fragment\".");
+        }
+        const match = rangeSpec.trim().match(/^(\d+)\s*-\s*(\d+)$/);
+        if (!match) {
+            throw new McpError(ErrorCode.InvalidParams, `Invalid lineRange '${rangeSpec}'. Use 'start-end'.`);
+        }
+        const start = Number(match[1]);
+        const end = Number(match[2]);
+        if (!Number.isFinite(start) || !Number.isFinite(end) || start < 1 || end < start) {
+            throw new McpError(ErrorCode.InvalidParams, `Invalid lineRange '${rangeSpec}'. Ensure start >= 1 and end >= start.`);
+        }
+        return { start, end };
+    }
+
+    private extractFragmentContent(content: string, range: LineRange): string {
+        const lines = content.split(/\r?\n/);
+        if (range.end > lines.length) {
+            throw new McpError(ErrorCode.InvalidParams, `lineRange exceeds file length (${lines.length}).`);
+        }
+        return lines.slice(range.start - 1, range.end).join('\n');
+    }
+
+    private inferSearchProjectType(query?: string): "symbol" | "file" | "directory" {
+        const trimmed = (query || "").trim();
+        if (!trimmed || trimmed === ".") {
+            return "directory";
+        }
+        if (/\/$/.test(trimmed)) {
+            return "directory";
+        }
+        if (/[\\/]/.test(trimmed) || /[*?]/.test(trimmed)) {
+            return "file";
+        }
+        if (/^(function:|class:|symbol:|method:)/i.test(trimmed)) {
+            return "symbol";
+        }
+        if (trimmed.includes("(")) {
+            return "symbol";
+        }
+        return "symbol";
+    }
+
+    private normalizeMaxResults(value: any, fallback = 20): number {
+        if (typeof value !== "number" || !Number.isFinite(value)) {
+            return fallback;
+        }
+        const coerced = Math.max(1, Math.floor(value));
+        return Math.min(100, coerced);
+    }
+
+    private clampScore(value: number): number {
+        if (!Number.isFinite(value)) {
+            return 0;
+        }
+        return Math.max(0, Math.min(1, value));
+    }
+
+    private async pathExists(absPath: string): Promise<boolean> {
+        try {
+            await accessAsync(absPath, fs.constants.F_OK);
+            return true;
+        } catch {
+            return false;
+        }
+    }
+
+    private async executeReadCode(args: ReadCodeArgs): Promise<ReadCodeResult> {
+        if (!args || typeof args.filePath !== "string" || !args.filePath.trim()) {
+            throw new McpError(ErrorCode.InvalidParams, "Provide 'filePath' to read_code.");
+        }
+        const absPath = this._getAbsPathAndVerify(args.filePath);
+        const view = (args.view ?? "full") as ReadCodeView;
+        if (!["full", "skeleton", "fragment"].includes(view)) {
+            throw new McpError(ErrorCode.InvalidParams, `Invalid view '${args.view}'. Use full|skeleton|fragment.`);
+        }
+
+        const [content, stats] = await Promise.all([
+            readFileAsync(absPath, "utf-8"),
+            statAsync(absPath)
+        ]);
+
+        const metadata: ReadCodeResult["metadata"] = {
+            lines: content.length === 0 ? 0 : content.split(/\r?\n/).length,
+            language: path.extname(absPath).replace('.', '') || null,
+            path: this.normalizeRelativePath(absPath)
+        };
+
+        let truncated = false;
+        let payload: string;
+
+        switch (view) {
+            case "full": {
+                truncated = stats.size > SmartContextServer.READ_CODE_MAX_BYTES;
+                payload = truncated
+                    ? content.slice(0, SmartContextServer.READ_CODE_MAX_BYTES)
+                    : content;
+                break;
+            }
+            case "skeleton": {
+                payload = await this.skeletonGenerator.generateSkeleton(absPath, content);
+                break;
+            }
+            case "fragment": {
+                const lineRange = this.parseLineRangeSpec(args.lineRange);
+                payload = this.extractFragmentContent(content, lineRange);
+                break;
+            }
+            default:
+                throw new McpError(ErrorCode.InvalidParams, `Unsupported view '${view}'.`);
+        }
+
+        return {
+            content: payload,
+            metadata,
+            truncated
+        };
+    }
+
+    private async executeSearchProject(args: SearchProjectArgs): Promise<SearchProjectResult> {
+        if (!args || typeof args.query !== "string" || !args.query.trim()) {
+            throw new McpError(ErrorCode.InvalidParams, "Provide 'query' to search_project.");
+        }
+        const requestedType = (args.type ?? "auto") as SearchProjectType;
+        const maxResults = this.normalizeMaxResults(args.maxResults);
+
+        if (requestedType === "directory") {
+            return { results: await this.runDirectorySearchResults(args.query, maxResults) };
+        }
+        if (requestedType === "symbol") {
+            return { results: await this.runSymbolSearchResults(args.query, maxResults) };
+        }
+        if (requestedType === "file") {
+            return { results: await this.runFileSearchResults(args.query, maxResults) };
+        }
+
+        const inferred = this.inferSearchProjectType(args.query);
+        if (inferred === "directory") {
+            return { results: await this.runDirectorySearchResults(args.query, maxResults), inferredType: inferred };
+        }
+        if (inferred === "file") {
+            return { results: await this.runFileSearchResults(args.query, maxResults), inferredType: inferred };
+        }
+
+        let symbolResults = await this.runClusterSearchResults(args.query, maxResults);
+        if (symbolResults.length === 0) {
+            symbolResults = await this.runSymbolSearchResults(args.query, maxResults);
+        }
+        return { results: symbolResults, inferredType: "symbol" };
+    }
+
+    private async runClusterSearchResults(query: string, maxResults: number): Promise<SearchProjectResult["results"]> {
+        const response = await this.clusterSearchEngine.search(query, {
+            includePreview: true,
+            maxClusters: Math.min(maxResults, 5)
+        });
+
+        const entries: SearchProjectResult["results"] = [];
+        for (const cluster of response.clusters) {
+            for (const seed of cluster.seeds) {
+                const absSeedPath = path.isAbsolute(seed.filePath)
+                    ? seed.filePath
+                    : path.join(this.rootPath, seed.filePath);
+                const normalizedPath = this.normalizeRelativePath(absSeedPath);
+                const symbolSignature = (seed.symbol as any)?.signature as string | undefined;
+                const symbolContent = (seed.symbol as any)?.content as string | undefined;
+                entries.push({
+                    type: "symbol",
+                    path: normalizedPath,
+                    score: this.clampScore(seed.matchScore ?? cluster.metadata.relevanceScore ?? 0),
+                    context: seed.fullPreview || symbolSignature || symbolContent,
+                    line: typeof seed.symbol.range?.startLine === "number"
+                        ? seed.symbol.range.startLine + 1
+                        : undefined
+                });
+                if (entries.length >= maxResults) {
+                    return entries;
+                }
+            }
+        }
+        return entries;
+    }
+
+    private async runSymbolSearchResults(query: string, maxResults: number): Promise<SearchProjectResult["results"]> {
+        const matches = await this.symbolIndex.search(query);
+        return matches.slice(0, maxResults).map((match, index) => {
+            const symbolSignature = (match.symbol as any)?.signature as string | undefined;
+            const symbolContent = (match.symbol as any)?.content as string | undefined;
+            return {
+                type: "symbol",
+                path: match.filePath,
+                score: this.clampScore(1 - index / Math.max(1, maxResults)),
+                context: symbolSignature || symbolContent,
+                line: typeof match.symbol.range?.startLine === "number"
+                    ? match.symbol.range.startLine + 1
+                    : undefined
+            };
+        });
+    }
+
+    private async runFileSearchResults(query: string, maxResults: number): Promise<SearchProjectResult["results"]> {
+        const matches = await this.searchEngine.scout({
+            keywords: [query],
+            basePath: this.rootPath
+        });
+        return matches.slice(0, maxResults).map(match => ({
+            type: "file",
+            path: match.filePath,
+            score: this.clampScore(match.score ?? 0),
+            context: match.preview,
+            line: match.lineNumber
+        }));
+    }
+
+    private async runDirectorySearchResults(query: string, _maxResults: number): Promise<SearchProjectResult["results"]> {
+        const target = query.trim() || ".";
+        const absPath = this._getAbsPathAndVerify(target);
+        const tree = await this.contextEngine.listDirectoryTree(absPath, 2, this.rootPath);
+        return [{
+            type: "directory",
+            path: this.normalizeRelativePath(absPath),
+            score: 1,
+            context: tree
+        }];
+    }
+
+    private makeNodeId(prefix: string, identifier: string): string {
+        return `${prefix}:${identifier}`;
+    }
+
+    private async executeAnalyzeRelationship(args: AnalyzeRelationshipArgs): Promise<AnalyzeRelationshipResult> {
+        if (!args || typeof args.target !== "string" || !args.target.trim()) {
+            throw new McpError(ErrorCode.InvalidParams, "Provide 'target' to analyze_relationship.");
+        }
+        const mode = args.mode as "impact" | "dependencies" | "calls" | "data_flow" | "types";
+        if (!mode) {
+            throw new McpError(ErrorCode.InvalidParams, "Provide 'mode' to analyze_relationship.");
+        }
+        const direction = (args.direction ?? "both") as AnalyzeRelationshipDirection;
+        const maxDepth = typeof args.maxDepth === "number" && Number.isFinite(args.maxDepth)
+            ? Math.max(1, Math.floor(args.maxDepth))
+            : (mode === "impact" ? 20 : mode === "calls" ? 3 : mode === "types" ? 2 : mode === "data_flow" ? 10 : 1);
+
+        const resolved = await this.resolveRelationshipTarget(args, mode);
+        const nodes = new Map<string, AnalyzeRelationshipNode>();
+        const edges: AnalyzeRelationshipEdge[] = [];
+        const addNode = (node: AnalyzeRelationshipNode) => {
+            if (!nodes.has(node.id)) {
+                nodes.set(node.id, node);
+            }
+        };
+        const addFileNode = (relativePath: string) => {
+            const id = this.makeNodeId("file", relativePath);
+            addNode({ id, type: "file", path: relativePath });
+            return id;
+        };
+
+        if ((mode === "dependencies" || mode === "impact") && resolved.type !== "file") {
+            throw new McpError(ErrorCode.InvalidParams, `${mode} mode requires a file target.`);
+        }
+        if ((mode === "calls" || mode === "types") && resolved.type !== "symbol") {
+            throw new McpError(ErrorCode.InvalidParams, `${mode} mode requires a symbol target.`);
+        }
+        if (mode === "data_flow" && resolved.type !== "variable") {
+            throw new McpError(ErrorCode.InvalidParams, "data_flow mode requires 'contextPath' to point to a file.");
+        }
+
+        if (mode === "dependencies") {
+            const absTarget = this._getAbsPathAndVerify(resolved.path);
+            const baseId = addFileNode(this.normalizeRelativePath(absTarget));
+            if (direction === "downstream" || direction === "both") {
+                const downstream = await this.dependencyGraph.getDependencies(absTarget, 'outgoing');
+                for (const dep of downstream) {
+                    const depId = addFileNode(dep);
+                    edges.push({ source: baseId, target: depId, relation: "imports" });
+                }
+            }
+            if (direction === "upstream" || direction === "both") {
+                const upstream = await this.dependencyGraph.getDependencies(absTarget, 'incoming');
+                for (const parent of upstream) {
+                    const parentId = addFileNode(parent);
+                    edges.push({ source: parentId, target: baseId, relation: "imported_by" });
+                }
+            }
+        } else if (mode === "impact") {
+            const absTarget = this._getAbsPathAndVerify(resolved.path);
+            const baseId = addFileNode(this.normalizeRelativePath(absTarget));
+            const directions: Array<{ dir: 'incoming' | 'outgoing'; relation: string }> = [];
+            if (direction === "downstream" || direction === "both") {
+                directions.push({ dir: 'outgoing', relation: 'impact' });
+            }
+            if (direction === "upstream" || direction === "both") {
+                directions.push({ dir: 'incoming', relation: 'impact' });
+            }
+            for (const entry of directions) {
+                const impacted = await this.dependencyGraph.getTransitiveDependencies(absTarget, entry.dir, maxDepth);
+                for (const relPath of impacted) {
+                    const impactedId = addFileNode(relPath);
+                    if (entry.dir === 'outgoing') {
+                        edges.push({ source: baseId, target: impactedId, relation: entry.relation });
+                    } else {
+                        edges.push({ source: impactedId, target: baseId, relation: entry.relation });
+                    }
+                }
+            }
+        } else if (mode === "calls") {
+            const absPath = this._getAbsPathAndVerify(resolved.path);
+            const callDirection = direction as CallGraphDirection;
+            const callGraph = await this.callGraphBuilder.analyzeSymbol(resolved.symbolName!, absPath, callDirection, maxDepth);
+            if (!callGraph) {
+                throw new McpError(ErrorCode.InvalidParams, `Symbol '${resolved.symbolName}' not found in ${resolved.path}.`);
+            }
+            for (const node of Object.values(callGraph.visitedNodes)) {
+                addNode({
+                    id: node.symbolId,
+                    type: node.symbolType,
+                    path: node.filePath,
+                    label: node.symbolName
+                });
+                for (const callee of node.callees) {
+                    edges.push({ source: node.symbolId, target: callee.toSymbolId, relation: "calls" });
+                }
+            }
+        } else if (mode === "types") {
+            const absPath = this._getAbsPathAndVerify(resolved.path);
+            const typeGraph = await this.typeDependencyTracker.analyzeType(resolved.symbolName!, absPath, direction === "upstream" ? "incoming" : direction === "downstream" ? "outgoing" : "both", maxDepth);
+            if (!typeGraph) {
+                throw new McpError(ErrorCode.InvalidParams, `Type symbol '${resolved.symbolName}' not found in ${resolved.path}.`);
+            }
+            for (const node of Object.values(typeGraph.visitedNodes)) {
+                addNode({
+                    id: node.symbolId,
+                    type: node.symbolType,
+                    path: node.filePath,
+                    label: node.symbolName
+                });
+                for (const edge of node.dependencies) {
+                    edges.push({ source: edge.fromSymbolId, target: edge.toSymbolId, relation: edge.relationKind });
+                }
+            }
+        } else if (mode === "data_flow") {
+            const absPath = this._getAbsPathAndVerify(resolved.path);
+            const flow = await this.dataFlowTracer.traceVariable(resolved.symbolName!, absPath, args.fromLine, maxDepth);
+            if (!flow) {
+                throw new McpError(ErrorCode.InvalidParams, `Unable to trace variable '${resolved.symbolName}' in ${resolved.path}.`);
+            }
+            for (const stepId of flow.orderedStepIds) {
+                const step = flow.steps[stepId];
+                addNode({
+                    id: step.id,
+                    type: step.stepType,
+                    path: step.filePath,
+                    label: step.textSnippet
+                });
+            }
+            for (const edge of flow.edges) {
+                edges.push({ source: edge.fromStepId, target: edge.toStepId, relation: edge.relation });
+            }
+        }
+
+        return {
+            nodes: Array.from(nodes.values()),
+            edges,
+            resolvedTarget: resolved
+        };
+    }
+
+    private async resolveRelationshipTarget(args: AnalyzeRelationshipArgs, mode: AnalyzeRelationshipArgs["mode"]): Promise<ResolvedRelationshipTarget> {
+        const targetType = (args.targetType ?? "auto");
+        if (mode === "data_flow") {
+            if (!args.contextPath) {
+                throw new McpError(ErrorCode.InvalidParams, "data_flow mode requires 'contextPath'.");
+            }
+            const absCtx = this._getAbsPathAndVerify(args.contextPath);
+            return {
+                type: "variable",
+                path: this.normalizeRelativePath(absCtx),
+                symbolName: args.target
+            };
+        }
+
+        if (targetType === "file" || targetType === "auto") {
+            try {
+                const absPath = this._getAbsPathAndVerify(args.target);
+                if (await this.pathExists(absPath)) {
+                    return {
+                        type: "file",
+                        path: this.normalizeRelativePath(absPath)
+                    };
+                }
+            } catch (error) {
+                if (targetType === "file") {
+                    throw new McpError(ErrorCode.InvalidParams, (error as Error).message);
+                }
+            }
+        }
+
+        const contextPath = args.contextPath ? this._getAbsPathAndVerify(args.contextPath) : undefined;
+        if (contextPath) {
+            const symbols = await this.symbolIndex.getSymbolsForFile(contextPath);
+            const match = symbols.find(symbol => symbol.name === args.target);
+            if (match) {
+                return {
+                    type: "symbol",
+                    path: this.normalizeRelativePath(contextPath),
+                    symbolName: match.name
+                };
+            }
+        }
+
+        const matches = await this.symbolIndex.search(args.target);
+        if (!matches.length) {
+            throw new McpError(ErrorCode.InvalidParams, `Unable to resolve symbol '${args.target}'. Provide 'contextPath' to disambiguate.`);
+        }
+        const first = matches[0];
+        const absPath = this._getAbsPathAndVerify(first.filePath);
+        return {
+            type: "symbol",
+            path: this.normalizeRelativePath(absPath),
+            symbolName: first.symbol.name
+        };
+    }
+
+    private async executeEditCode(args: EditCodeArgs): Promise<EditCodeResult> {
+        if (!args || !Array.isArray(args.edits) || args.edits.length === 0) {
+            throw new McpError(ErrorCode.InvalidParams, "Provide at least one edit in 'edits'.");
+        }
+        const dryRun = Boolean(args.dryRun);
+        const createDirs = Boolean(args.createMissingDirectories);
+        const ignoreMistakes = Boolean(args.ignoreMistakes);
+        const transactionId = dryRun
+            ? undefined
+            : (typeof crypto.randomUUID === "function" ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`);
+        const results: EditCodeResult["results"] = [];
+        const rollbackActions: Array<() => Promise<void>> = [];
+        const touchedFiles = new Set<string>();
+
+        try {
+            await this.handleCreateOperations(args.edits, dryRun, createDirs, results, rollbackActions, touchedFiles);
+            await this.handleDeleteOperations(args.edits, dryRun, results, rollbackActions, touchedFiles);
+            await this.handleReplaceOperations(args.edits, dryRun, ignoreMistakes, results, touchedFiles);
+        } catch (error: any) {
+            await this.rollbackActions(rollbackActions);
+            const message = error instanceof McpError ? error.message : (error?.message ?? "edit_code failed");
+            results.push({ filePath: error?.filePath ?? args.edits[0]?.filePath ?? "", applied: false, error: message });
+            return { success: false, results, transactionId };
+        }
+
+        if (!dryRun && touchedFiles.size > 0) {
+            await this.invalidateTouchedFiles(touchedFiles);
+        }
+
+        return { success: true, results, transactionId };
+    }
+
+    private async handleCreateOperations(
+        edits: EditCodeEdit[],
+        dryRun: boolean,
+        createDirs: boolean,
+        results: EditCodeResult["results"],
+        rollback: Array<() => Promise<void>>,
+        touchedFiles: Set<string>
+    ): Promise<void> {
+        for (const edit of edits) {
+            if (edit.operation !== "create") continue;
+            if (typeof edit.replacementString !== "string") {
+                throw new McpError(ErrorCode.InvalidParams, "create operation requires 'replacementString'.");
+            }
+            const absPath = this._getAbsPathAndVerify(edit.filePath);
+            if (await this.pathExists(absPath)) {
+                throw new McpError(ErrorCode.InvalidParams, `File '${edit.filePath}' already exists.`);
+            }
+            const parentDir = path.dirname(absPath);
+            const parentExists = await this.pathExists(parentDir);
+            if (!parentExists && !createDirs) {
+                throw new McpError(ErrorCode.InvalidParams, `Missing directory '${this.normalizeRelativePath(parentDir)}'. Set createMissingDirectories=true.`);
+            }
+            if (!dryRun) {
+                if (!parentExists && createDirs) {
+                    await mkdirAsync(parentDir, { recursive: true });
+                }
+                await writeFileAsync(absPath, edit.replacementString);
+                touchedFiles.add(absPath);
+                rollback.push(async () => {
+                    if (await this.pathExists(absPath)) {
+                        await unlinkAsync(absPath);
+                    }
+                });
+            }
+            results.push({
+                filePath: this.normalizeRelativePath(absPath),
+                applied: !dryRun,
+                diff: dryRun ? "Dry run: would create file." : "Created file."
+            });
+        }
+    }
+
+    private async handleDeleteOperations(
+        edits: EditCodeEdit[],
+        dryRun: boolean,
+        results: EditCodeResult["results"],
+        rollback: Array<() => Promise<void>>,
+        touchedFiles: Set<string>
+    ): Promise<void> {
+        for (const edit of edits) {
+            if (edit.operation !== "delete") continue;
+            const absPath = this._getAbsPathAndVerify(edit.filePath);
+            if (!await this.pathExists(absPath)) {
+                throw new McpError(ErrorCode.InvalidParams, `File '${edit.filePath}' does not exist.`);
+            }
+            let previousContent = "";
+            if (!dryRun) {
+                previousContent = await readFileAsync(absPath, 'utf-8');
+                await unlinkAsync(absPath);
+                touchedFiles.add(absPath);
+                const backup = previousContent;
+                rollback.push(async () => {
+                    await writeFileAsync(absPath, backup);
+                });
+            }
+            results.push({
+                filePath: this.normalizeRelativePath(absPath),
+                applied: !dryRun,
+                diff: dryRun ? "Dry run: would delete file." : "Deleted file."
+            });
+        }
+    }
+
+    private async handleReplaceOperations(
+        edits: EditCodeEdit[],
+        dryRun: boolean,
+        ignoreMistakes: boolean,
+        results: EditCodeResult["results"],
+        touchedFiles: Set<string>
+    ): Promise<void> {
+        const fileMap = new Map<string, Edit[]>();
+        const fileOrder: string[] = [];
+        for (const edit of edits) {
+            if (edit.operation !== "replace") continue;
+            if (typeof edit.targetString !== "string") {
+                throw new McpError(ErrorCode.InvalidParams, "replace operation requires 'targetString'.");
+            }
+            const absPath = this._getAbsPathAndVerify(edit.filePath);
+            if (!fileMap.has(absPath)) {
+                fileMap.set(absPath, []);
+                fileOrder.push(absPath);
+            }
+            const normalizedEdit: Edit = {
+                targetString: edit.targetString,
+                replacementString: edit.replacementString ?? "",
+                lineRange: edit.lineRange,
+                beforeContext: edit.beforeContext,
+                afterContext: edit.afterContext,
+                fuzzyMode: edit.fuzzyMode ?? (ignoreMistakes ? "whitespace" : undefined),
+                anchorSearchRange: edit.anchorSearchRange,
+                indexRange: edit.indexRange,
+                normalization: edit.normalization,
+                expectedHash: edit.expectedHash
+            };
+            fileMap.get(absPath)!.push(normalizedEdit);
+        }
+
+        if (fileMap.size === 0) {
+            return;
+        }
+
+        const fileEdits = fileOrder.map(filePath => ({ filePath, edits: fileMap.get(filePath)! }));
+        const result = await this.editCoordinator.applyBatchEdits(fileEdits, dryRun);
+        if (!result.success) {
+            throw new McpError(ErrorCode.InternalError, result.message ?? "Failed to apply edits.");
+        }
+
+        if (!dryRun) {
+            for (const { filePath } of fileEdits) {
+                touchedFiles.add(filePath);
+            }
+        }
+
+        for (const { filePath } of fileEdits) {
+            results.push({
+                filePath: this.normalizeRelativePath(filePath),
+                applied: !dryRun,
+                diff: result.message ?? (dryRun ? "Dry run: edits validated." : "Edits applied.")
+            });
+        }
+    }
+
+    private async rollbackActions(actions: Array<() => Promise<void>>): Promise<void> {
+        for (let i = actions.length - 1; i >= 0; i--) {
+            try {
+                await actions[i]();
+            } catch (error) {
+                if (ENABLE_DEBUG_LOGS) {
+                    console.error("[edit_code] rollback failed", error);
+                }
+            }
+        }
+    }
+
+    private async invalidateTouchedFiles(touchedFiles: Set<string>): Promise<void> {
+        for (const absPath of touchedFiles) {
+            this.callGraphBuilder.invalidateFile(absPath);
+            this.typeDependencyTracker.invalidateFile(absPath);
+            this.clusterSearchEngine.invalidateFile(absPath);
+        }
+    }
+
+    private async executeManageProject(args: ManageProjectArgs): Promise<ManageProjectResult> {
+        if (!args || typeof args.command !== "string") {
+            throw new McpError(ErrorCode.InvalidParams, "Provide 'command' to manage_project.");
+        }
+        switch (args.command) {
+            case "undo": {
+                const result = await this.editCoordinator.undo();
+                if (!result.success) {
+                    throw new McpError(ErrorCode.InternalError, result.message ?? "Undo failed");
+                }
+                this.callGraphBuilder.clearCaches();
+                this.typeDependencyTracker.clearCaches();
+                return { output: result.message ?? "Undid last edit.", data: result };
+            }
+            case "redo": {
+                const result = await this.editCoordinator.redo();
+                if (!result.success) {
+                    throw new McpError(ErrorCode.InternalError, result.message ?? "Redo failed");
+                }
+                this.callGraphBuilder.clearCaches();
+                return { output: result.message ?? "Redid last edit.", data: result };
+            }
+            case "guidance": {
+                const playbookPath = path.join(this.rootPath, 'docs', 'agent-playbook.md');
+                let markdown: string | undefined;
+                try {
+                    markdown = await readFileAsync(playbookPath, 'utf-8');
+                } catch {
+                    markdown = undefined;
+                }
+                return {
+                    output: "Returned workflow guidance.",
+                    data: {
+                        structured: AgentWorkflowGuidance,
+                        markdown: markdown ?? 'docs/agent-playbook.md not found.'
+                    }
+                };
+            }
+            case "status": {
+                const status = await this.dependencyGraph.getIndexStatus();
+                return { output: "Index status retrieved.", data: status };
+            }
+            default:
+                throw new McpError(ErrorCode.InvalidParams, `Unknown manage_project command '${args.command}'.`);
+        }
+    }
+
     private parseExpandRelationshipsInput(input: any): BuildClusterOptions["expandRelationships"] | undefined {
         if (!input || typeof input !== "object") {
             return undefined;
@@ -509,369 +1169,7 @@ export class SmartContextServer {
     private setupHandlers(): void {
         this.server.setRequestHandler(ListToolsRequestSchema, async () => {
             return {
-                tools: [
-                    {
-                        name: "read_file",
-                        description: "Reads file content. By default, it returns a JSON Smart File Profile (metadata, skeleton, complexity metrics, impacted tests, guidance). Set 'full: true' strictly only when you need the entire raw content.",
-                        inputSchema: {
-                            type: "object",
-                            properties: {
-                                filePath: { type: "string" },
-                                full: { type: "boolean", description: "If true, reads the entire raw content. Defaults to false (returns profile).", default: false }
-                            },
-                            required: ["filePath"]
-                        }
-                    },
-                    {
-                        name: "read_fragment",
-                        description: "Smartly extracts relevant sections of a file based on keywords or line ranges.",
-                        inputSchema: {
-                            type: "object",
-                            properties: {
-                                filePath: { type: "string" },
-                                keywords: { type: "array", items: { type: "string" } },
-                                patterns: { type: "array", items: { type: "string" } },
-                                contextLines: { type: "number", default: 0 },
-                                lineRanges: { type: "array", items: { type: "object", properties: { start: { type: "number" }, end: { type: "number" } } } }
-                            },
-                            required: ["filePath"]
-                        }
-                    },
-                    {
-                        name: "read_file_skeleton",
-                        description: "Reads the file and returns a skeleton view (signatures only) by folding function/method bodies. Useful for understanding code structure, with optional JSON output.",
-                        inputSchema: {
-                            type: "object",
-                            properties: {
-                                filePath: { type: "string" },
-                                format: { type: "string", enum: ["text", "json"], default: "text" }
-                            },
-                            required: ["filePath"]
-                        }
-                    },
-                    {
-                        name: "search_symbol_definitions",
-                        description: "Searches for symbol definitions (classes, functions, methods) across the project using AST parsing.",
-                        inputSchema: {
-                            type: "object",
-                            properties: {
-                                query: { type: "string" }
-                            },
-                            required: ["query"]
-                        }
-                    },
-                    {
-                        name: "get_file_dependencies",
-                        description: "Analyzes direct file dependencies (imports/exports) based on AST.",
-                        inputSchema: {
-                            type: "object",
-                            properties: {
-                                filePath: { type: "string" },
-                                direction: { type: "string", enum: ["incoming", "outgoing"], default: "outgoing" }
-                            },
-                            required: ["filePath"]
-                        }
-                    },
-                    {
-                        name: "analyze_impact",
-                        description: "Analyzes transitive dependencies to assess the impact of changes to a file.",
-                        inputSchema: {
-                            type: "object",
-                            properties: {
-                                filePath: { type: "string" },
-                                direction: { type: "string", enum: ["incoming", "outgoing"], default: "incoming" },
-                                maxDepth: { type: "number", default: 20 }
-                            },
-                            required: ["filePath"]
-                        }
-                    },
-                    {
-                        name: "analyze_symbol_impact",
-                        description: "Builds a symbol-level call graph to understand upstream/downstream impact chains.",
-                        inputSchema: {
-                            type: "object",
-                            properties: {
-                                symbolName: { type: "string" },
-                                filePath: { type: "string" },
-                                direction: { type: "string", enum: ["upstream", "downstream", "both"], default: "both" },
-                                maxDepth: { type: "number", default: 3 }
-                            },
-                            required: ["symbolName", "filePath"]
-                        }
-                    },
-                    {
-                        name: "analyze_type_dependencies",
-                        description: "Traces TypeScript class/interface/type-alias relationships (extends, implements, alias, constraints).",
-                        inputSchema: {
-                            type: "object",
-                            properties: {
-                                symbolName: { type: "string" },
-                                filePath: { type: "string" },
-                                direction: { type: "string", enum: ["incoming", "outgoing", "both"], default: "both" },
-                                maxDepth: { type: "number", default: 2 }
-                            },
-                            required: ["symbolName", "filePath"]
-                        }
-                    },
-                    {
-                        name: "trace_data_flow",
-                        description: "Traces how a variable moves through definitions, assignments, calls, and returns.",
-                        inputSchema: {
-                            type: "object",
-                            properties: {
-                                variableName: { type: "string" },
-                                fromFile: { type: "string" },
-                                fromLine: { type: "number" },
-                                maxSteps: { type: "number", default: 10 }
-                            },
-                            required: ["variableName", "fromFile"]
-                        }
-                    },
-                    {
-                        name: "find_symbol_references",
-                        description: "Finds all references (usages) of a symbol using AST-based static analysis.",
-                        inputSchema: {
-                            type: "object",
-                            properties: {
-                                symbolName: { type: "string" },
-                                contextFile: { type: "string", description: "The file where the symbol is defined." }
-                            },
-                            required: ["symbolName", "contextFile"]
-                        }
-                    },
-                    {
-                        name: "preview_rename",
-                        description: "Preview a rename operation across the project. Returns a diff of changes.",
-                        inputSchema: {
-                            type: "object",
-                            properties: {
-                                symbolName: { type: "string" },
-                                newName: { type: "string" },
-                                definitionFilePath: { type: "string" }
-                            },
-                            required: ["symbolName", "newName", "definitionFilePath"]
-                                                }
-                    },
-                    {
-                        name: "get_index_status",
-                        description: "Retrieves the status of the project index, including file counts and unresolved dependencies.",
-                        inputSchema: {
-                            type: "object",
-                            properties: {},
-                        }
-                    },
-                    {
-                        name: "rebuild_index",
-                        description: "Forces a rebuild of the dependency graph and clears resolution caches.",
-                        inputSchema: {
-                            type: "object",
-                            properties: {},
-                        }
-                    },
-                    {
-                        name: "invalidate_index_file",
-                        description: "Invalidates cached symbol and dependency information for a single file.",
-                        inputSchema: {
-                            type: "object",
-                            properties: {
-                                filePath: { type: "string" }
-                            },
-                            required: ["filePath"]
-                        }
-                    },
-                    {
-                        name: "invalidate_index_directory",
-                        description: "Invalidates cached index data for an entire directory (recursive).",
-                        inputSchema: {
-                            type: "object",
-                            properties: {
-                                directoryPath: { type: "string" }
-                            },
-                            required: ["directoryPath"]
-                        }
-                    },
-                    {
-                        name: "write_file",
-                        description: "Creates a new file or overwrites an existing file completely.",
-                        inputSchema: {
-                            type: "object",
-                            properties: {
-                                filePath: { type: "string" },
-                                content: { type: "string" }
-                            },
-                            required: ["filePath", "content"]
-                        }
-                    },
-                    {
-                        name: "edit_file",
-                        description: "Applies multiple edits to a file safely using atomic transaction and conflict detection.",
-                        inputSchema: {
-                            type: "object",
-                            properties: {
-                                filePath: { type: "string" },
-                                edits: {
-                                    type: "array",
-                                    items: {
-                                        type: "object",
-                                        properties: {
-                                            targetString: { type: "string" },
-                                            replacementString: { type: "string" },
-                                            lineRange: { type: "object", properties: { start: { type: "number" }, end: { type: "number" } } },
-                                            beforeContext: { type: "string" },
-                                            afterContext: { type: "string" },
-                                            fuzzyMode: { type: "string", enum: ["whitespace", "levenshtein"] },
-                                            anchorSearchRange: { type: "object", properties: { lines: { type: "number" }, chars: { type: "number" } } }
-                                        },
-                                        required: ["targetString", "replacementString"]
-                                    }
-                                },
-                                dryRun: { type: "boolean" }
-                            },
-                            required: ["filePath", "edits"]
-                        }
-                    },
-                    {
-                        name: "batch_edit",
-                        description: "Applies edits to multiple files atomically (all or nothing).",
-                        inputSchema: {
-                            type: "object",
-                            properties: {
-                                fileEdits: {
-                                    type: "array",
-                                    items: {
-                                        type: "object",
-                                        properties: {
-                                            filePath: { type: "string" },
-                                            edits: {
-                                                type: "array",
-                                                items: {
-                                                    type: "object",
-                                                    properties: {
-                                                        targetString: { type: "string" },
-                                                        replacementString: { type: "string" },
-                                                        lineRange: { type: "object", properties: { start: { type: "number" }, end: { type: "number" } } },
-                                                        beforeContext: { type: "string" },
-                                                        afterContext: { type: "string" },
-                                                        fuzzyMode: { type: "string", enum: ["whitespace", "levenshtein"] },
-                                                        anchorSearchRange: { type: "object", properties: { lines: { type: "number" }, chars: { type: "number" } } }
-                                                    },
-                                                    required: ["targetString", "replacementString"]
-                                                }
-                                            }
-                                        },
-                                        required: ["filePath", "edits"]
-                                    }
-                                },
-                                dryRun: { type: "boolean" }
-                            },
-                            required: ["fileEdits"]
-                        }
-                    },
-                    {
-                        name: "debug_edit_match",
-                        description: "Diagnose why an edit_file match failed.",
-                        inputSchema: {
-                            type: "object",
-                            properties: {
-                                filePath: { type: "string" },
-                                targetString: { type: "string" },
-                                lineRange: { type: "object", properties: { start: { type: "number" }, end: { type: "number" } } },
-                                normalization: { type: "string", enum: ["exact", "whitespace", "structural"] }
-                            },
-                            required: ["filePath", "targetString"]
-                        }
-                    },
-                    {
-                        name: "undo_last_edit",
-                        description: "Undoes the last successful edit_file operation using stored inverse edits.",
-                        inputSchema: {
-                            type: "object",
-                            properties: {},
-                        },
-                    },
-                    {
-                        name: "redo_last_edit",
-                        description: "Redoes the last undone edit_file operation using stored forward edits.",
-                        inputSchema: {
-                            type: "object",
-                            properties: {},
-                        },
-                    },
-                    {
-                        name: "search_with_context",
-                        description: "Searches for symbols and returns context-aware clusters (callers, callees, type families, co-located symbols).",
-                        inputSchema: {
-                            type: "object",
-                            properties: {
-                                query: { type: "string", description: "Search query supporting filters like function:, class:, in:path" },
-                                maxClusters: { type: "number", default: 5 },
-                                expansionDepth: { type: "number", default: 2 },
-                                includePreview: { type: "boolean", default: true },
-                                tokenBudget: { type: "number", default: 5000 },
-                                expandRelationships: {
-                                    type: "object",
-                                    properties: {
-                                        callers: { type: "boolean", default: false },
-                                        callees: { type: "boolean", default: false },
-                                        typeFamily: { type: "boolean", default: false },
-                                        colocated: { type: "boolean", default: true },
-                                        siblings: { type: "boolean", default: true },
-                                        all: { type: "boolean", default: false }
-                                    }
-                                }
-                            },
-                            required: ["query"]
-                        }
-                    },
-                    {
-                        name: "expand_cluster_relationship",
-                        description: "Expands a specific relationship (callers/callees/typeFamily) for a previously returned cluster.",
-                        inputSchema: {
-                            type: "object",
-                            properties: {
-                                clusterId: { type: "string" },
-                                relationshipType: { type: "string", enum: ["callers", "callees", "typeFamily"] },
-                                expansionDepth: { type: "number", default: 1 },
-                                limit: { type: "number", default: 20 },
-                                includePreview: { type: "boolean", default: true }
-                            },
-                            required: ["clusterId", "relationshipType"]
-                        }
-                    },
-                    {
-                        name: "search_files",
-                        description: "Searches for keywords or patterns across the project.",
-                        inputSchema: {
-                            type: "object",
-                            properties: {
-                                keywords: { type: "array", items: { type: "string" } },
-                                patterns: { type: "array", items: { type: "string" } },
-                                includeGlobs: { type: "array", items: { type: "string" } },
-                                excludeGlobs: { type: "array", items: { type: "string" } }
-                            }
-                        }
-                    },
-                    {
-                        name: "get_workflow_guidance",
-                        description: "Retrieves the canonical agent playbook for interacting with the codebase.",
-                        inputSchema: {
-                            type: "object",
-                            properties: {},
-                        }
-                    },
-                    {
-                        name: "list_directory",
-                        description: "Lists directory contents in a tree-like structure, respecting common ignore files.",
-                        inputSchema: {
-                            type: "object",
-                            properties: {
-                                path: { type: "string" },
-                                depth: { type: "number", default: 2 }
-                            },
-                            required: ["path"]
-                        }
-                    }
-                ],
+                tools: this.listIntentTools(),
             };
         });
 
@@ -880,9 +1178,120 @@ export class SmartContextServer {
         });
     }
 
+    private listIntentTools() {
+        return [
+            {
+                name: "read_code",
+                description: "Reads code with full, skeleton, or fragment views and standardized metadata.",
+                inputSchema: {
+                    type: "object",
+                    properties: {
+                        filePath: { type: "string" },
+                        view: { type: "string", enum: ["full", "skeleton", "fragment"], default: "full" },
+                        lineRange: { type: "string", description: "Required when view=\"fragment\". Format: start-end." }
+                    },
+                    required: ["filePath"]
+                }
+            },
+            {
+                name: "search_project",
+                description: "Unified search across files, symbols, directories, and cluster-based insights.",
+                inputSchema: {
+                    type: "object",
+                    properties: {
+                        query: { type: "string" },
+                        type: { type: "string", enum: ["auto", "file", "symbol", "directory"], default: "auto" },
+                        maxResults: { type: "number", default: 20 }
+                    },
+                    required: ["query"]
+                }
+            },
+            {
+                name: "analyze_relationship",
+                description: "Explores dependencies, impact, call graphs, type graphs, or data flow for a target.",
+                inputSchema: {
+                    type: "object",
+                    properties: {
+                        target: { type: "string" },
+                        targetType: { type: "string", enum: ["auto", "file", "symbol"], default: "auto" },
+                        contextPath: { type: "string" },
+                        mode: { type: "string", enum: ["impact", "dependencies", "calls", "data_flow", "types"] },
+                        direction: { type: "string", enum: ["upstream", "downstream", "both"], default: "both" },
+                        maxDepth: { type: "number" },
+                        fromLine: { type: "number", description: "Optional line hint for data_flow." }
+                    },
+                    required: ["target", "mode"]
+                }
+            },
+            {
+                name: "edit_code",
+                description: "Atomic editor for creating, deleting, or replacing code across files.",
+                inputSchema: {
+                    type: "object",
+                    properties: {
+                        edits: {
+                            type: "array",
+                            items: {
+                                type: "object",
+                                properties: {
+                                    filePath: { type: "string" },
+                                    operation: { type: "string", enum: ["replace", "create", "delete"] },
+                                    targetString: { type: "string" },
+                                    replacementString: { type: "string" },
+                                    lineRange: { type: "object", properties: { start: { type: "number" }, end: { type: "number" } } },
+                                    beforeContext: { type: "string" },
+                                    afterContext: { type: "string" },
+                                    fuzzyMode: { type: "string", enum: ["whitespace", "levenshtein"] },
+                                    anchorSearchRange: { type: "object", properties: { lines: { type: "number" }, chars: { type: "number" } } },
+                                    normalization: { type: "string", enum: ["exact", "whitespace", "structural"] }
+                                },
+                                required: ["filePath", "operation"]
+                            }
+                        },
+                        dryRun: { type: "boolean", default: false },
+                        createMissingDirectories: { type: "boolean", default: false },
+                        ignoreMistakes: { type: "boolean", default: false }
+                    },
+                    required: ["edits"]
+                }
+            },
+            {
+                name: "manage_project",
+                description: "Runs project-level commands like undo, redo, workflow guidance, and index status.",
+                inputSchema: {
+                    type: "object",
+                    properties: {
+                        command: { type: "string", enum: ["undo", "redo", "guidance", "status"] }
+                    },
+                    required: ["command"]
+                }
+            }
+        ];
+    }
+
     private async handleCallTool(toolName: string, args: any): Promise<any> {
         try {
             switch (toolName) {
+                case "read_code": {
+                    const result = await this.executeReadCode(args as ReadCodeArgs);
+                    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+                }
+                case "search_project": {
+                    const result = await this.executeSearchProject(args as SearchProjectArgs);
+                    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+                }
+                case "analyze_relationship": {
+                    const result = await this.executeAnalyzeRelationship(args as AnalyzeRelationshipArgs);
+                    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+                }
+                case "edit_code": {
+                    const result = await this.executeEditCode(args as EditCodeArgs);
+                    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+                }
+                case "manage_project": {
+                    const result = await this.executeManageProject(args as ManageProjectArgs);
+                    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+                }
                 case "read_file": {
                     const absPath = this._getAbsPathAndVerify(args.filePath);
                     const content = await readFileAsync(absPath, 'utf-8');
