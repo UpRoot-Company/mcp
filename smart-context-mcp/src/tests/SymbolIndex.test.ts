@@ -2,8 +2,11 @@ import { jest } from '@jest/globals';
 import { SymbolIndex } from '../ast/SymbolIndex.js';
 import { SkeletonGenerator } from '../ast/SkeletonGenerator.js';
 import { AstManager } from '../ast/AstManager.js';
+import { IndexDatabase } from '../indexing/IndexDatabase.js';
+import { SymbolInfo } from '../types.js';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as os from 'os';
 
 describe('SymbolIndex', () => {
     const testDir = path.join(process.cwd(), 'src', 'tests', 'symbol_index_test_env');
@@ -77,5 +80,64 @@ describe('SymbolIndex', () => {
         } finally {
             warnSpy.mockRestore();
         }
+    });
+});
+
+describe('SymbolIndex persistence (disk-backed)', () => {
+    class StubSkeleton {
+        public parseCount = 0;
+        constructor(private readonly symbolName: string, private readonly shouldThrow = false) {}
+
+        async generateStructureJson(): Promise<SymbolInfo[]> {
+            if (this.shouldThrow) {
+                throw new Error('generateStructureJson should not be invoked');
+            }
+            this.parseCount++;
+            return [{
+                type: 'function',
+                name: this.symbolName,
+                range: { startLine: 0, endLine: 0, startByte: 0, endByte: this.symbolName.length },
+                content: `function ${this.symbolName}() {}`,
+                modifiers: [],
+                doc: ''
+            }];
+        }
+
+        async getLanguageForFile(): Promise<string> {
+            return 'typescript';
+        }
+    }
+
+    const createdRoots: string[] = [];
+    const createTempRoot = () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'symbol-index-persist-'));
+        createdRoots.push(dir);
+        return dir;
+    };
+
+    afterEach(() => {
+        while (createdRoots.length) {
+            const dir = createdRoots.pop()!;
+            fs.rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    it('reuses persisted symbols without re-parsing unchanged files', async () => {
+        const root = createTempRoot();
+        const db = new IndexDatabase(root);
+        const filePath = path.join(root, 'persist.ts');
+        fs.writeFileSync(filePath, 'export const persisted = 1;');
+
+        const firstGenerator = new StubSkeleton('PersistedSymbol');
+        const firstIndex = new SymbolIndex(root, firstGenerator as unknown as SkeletonGenerator, [], db);
+        const firstSymbols = await firstIndex.getSymbolsForFile(filePath);
+        expect(firstSymbols[0].name).toBe('PersistedSymbol');
+        expect(firstGenerator.parseCount).toBe(1);
+
+        const secondGenerator = new StubSkeleton('ShouldNotAppear', true);
+        const secondIndex = new SymbolIndex(root, secondGenerator as unknown as SkeletonGenerator, [], db);
+        const reusedSymbols = await secondIndex.getSymbolsForFile(filePath);
+        expect(secondGenerator.parseCount).toBe(0);
+        expect(reusedSymbols[0].name).toBe('PersistedSymbol');
     });
 });

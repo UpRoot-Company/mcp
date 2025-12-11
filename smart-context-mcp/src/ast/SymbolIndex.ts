@@ -25,6 +25,8 @@ export class SymbolIndex {
     private readonly skeletonGenerator: SkeletonGenerator;
     private readonly ignoreFilter: ReturnType<typeof ignore.default>;
     private readonly db: IndexDatabase;
+    private initialScanCompleted = false;
+    private baselinePromise?: Promise<void>;
 
     constructor(rootPath: string, skeletonGenerator: SkeletonGenerator, ignorePatterns: string[], db?: IndexDatabase) {
         this.rootPath = rootPath;
@@ -78,6 +80,7 @@ export class SymbolIndex {
     }
 
     public async search(query: string): Promise<SymbolSearchResult[]> {
+        await this.ensureBaselineIndex();
         const results: SymbolSearchResult[] = [];
         const queryLower = query.toLowerCase();
         const symbolMap = this.db.streamAllSymbols();
@@ -92,6 +95,7 @@ export class SymbolIndex {
     }
 
     public async getAllSymbols(): Promise<Map<string, SymbolInfo[]>> {
+        await this.ensureBaselineIndex();
         return this.db.streamAllSymbols();
     }
 
@@ -127,17 +131,11 @@ export class SymbolIndex {
 
         const content = fs.readFileSync(filePath, 'utf-8');
         const symbols = await this.extractSymbols(filePath, content);
-        let language: string | null | undefined;
-        try {
-            language = await this.skeletonGenerator.getLanguageForFile(filePath);
-        } catch {
-            language = undefined;
-        }
         this.cache.set(relativePath, { mtime: currentMtime, symbols });
         this.db.replaceSymbols({
             relativePath,
             lastModified: currentMtime,
-            language,
+            language: null,
             symbols
         });
         return symbols;
@@ -181,5 +179,75 @@ export class SymbolIndex {
     private toRelative(filePath: string): string {
         const absPath = path.isAbsolute(filePath) ? filePath : path.join(this.rootPath, filePath);
         return path.relative(this.rootPath, absPath).replace(/\\/g, '/');
+    }
+
+    private async ensureBaselineIndex(): Promise<void> {
+        if (this.baselinePromise) {
+            return this.baselinePromise;
+        }
+        this.baselinePromise = this.syncWithDisk();
+        try {
+            await this.baselinePromise;
+        } finally {
+            this.baselinePromise = undefined;
+        }
+    }
+
+    private async syncWithDisk(): Promise<void> {
+        const records = this.db.listFiles();
+        const recordMap = new Map(records.map(record => [record.path, record]));
+        const files = this.scanFiles(this.rootPath);
+        const seen = new Set<string>();
+
+        for (const filePath of files) {
+            const relative = this.toRelative(filePath);
+            seen.add(relative);
+            let stats: fs.Stats;
+            try {
+                stats = fs.statSync(filePath);
+            } catch {
+                continue;
+            }
+            const record = recordMap.get(relative);
+            if (!record || record.last_modified !== stats.mtimeMs) {
+                await this.getSymbolsForFile(filePath);
+            }
+        }
+
+        for (const record of recordMap.values()) {
+            if (!seen.has(record.path)) {
+                this.db.deleteFile(record.path);
+                this.cache.delete(record.path);
+            }
+        }
+        this.initialScanCompleted = true;
+    }
+
+    private scanFiles(dir: string): string[] {
+        let results: string[] = [];
+        let list: string[] = [];
+        try {
+            list = fs.readdirSync(dir);
+        } catch {
+            return [];
+        }
+        for (const entry of list) {
+            const absPath = path.join(dir, entry);
+            const relPath = path.relative(this.rootPath, absPath);
+            if (relPath && this.shouldIgnore(relPath)) {
+                continue;
+            }
+            try {
+                const stat = fs.statSync(absPath);
+                if (stat.isDirectory()) {
+                    results = results.concat(this.scanFiles(absPath));
+                } else if (this.isSupported(absPath)) {
+                    results.push(absPath);
+                }
+            } catch {
+                continue;
+            }
+        }
+        return results;
     }
 }

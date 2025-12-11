@@ -136,18 +136,38 @@ describe('DependencyGraph', () => {
     });
 
     describe('index invalidation', () => {
-        it('should rebuild automatically after file invalidation', async () => {
+        it('drops dependencies after file invalidation and repopulates after update', async () => {
             await graph.invalidateFile(path.join(testDir, 'main.ts'));
-            const deps = await graph.getDependencies('main.ts', 'outgoing');
+            let deps = await graph.getDependencies('main.ts', 'outgoing');
+            expect(deps).toHaveLength(0);
+
+            await graph.updateFileDependencies(path.join(testDir, 'main.ts'));
+            deps = await graph.getDependencies('main.ts', 'outgoing');
             const normalizedDeps = deps.map((d: string) => d.replace(/\\/g, '/'));
             expect(normalizedDeps).toContain('utils.ts');
         });
 
-        it('should rebuild automatically after directory invalidation', async () => {
+        it('removes directory-scoped data until affected files are reprocessed', async () => {
             await graph.invalidateDirectory(path.join(testDir, 'shared'));
-            const deps = await graph.getDependencies('component.ts', 'outgoing');
+            let deps = await graph.getDependencies('component.ts', 'outgoing');
+            expect(deps).toHaveLength(0);
+
+            await graph.updateFileDependencies(path.join(testDir, 'shared', 'index.ts'));
+            await graph.updateFileDependencies(path.join(testDir, 'component.ts'));
+            deps = await graph.getDependencies('component.ts', 'outgoing');
             const normalizedDeps = deps.map((d: string) => d.replace(/\\/g, '/'));
             expect(normalizedDeps).toContain('shared/index.ts');
+        });
+
+        it('removes persisted entries when files are deleted explicitly', async () => {
+            await graph.removeFile(path.join(testDir, 'utils.ts'));
+            const incoming = await graph.getDependencies('utils.ts', 'incoming');
+            expect(incoming).toHaveLength(0);
+
+            // Restore file for other tests
+            fs.writeFileSync(path.join(testDir, 'utils.ts'), 'export const util = 1;');
+            await graph.updateFileDependencies(path.join(testDir, 'utils.ts'));
+            await graph.updateFileDependencies(path.join(testDir, 'main.ts'));
         });
     });
 });
