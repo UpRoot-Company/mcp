@@ -4,6 +4,7 @@ import { AstManager } from "../ast/AstManager.js";
 import { SkeletonGenerator } from "../ast/SkeletonGenerator.js";
 import { SymbolIndex } from "../ast/SymbolIndex.js";
 import { DataFlowTracer } from "../ast/DataFlowTracer.js";
+import { NodeFileSystem } from "../platform/FileSystem.js";
 
 describe("DataFlowTracer", () => {
     const testDir = path.join(process.cwd(), "src", "tests", "data_flow_test_env");
@@ -46,7 +47,7 @@ function logValue(value: number) {
     beforeEach(() => {
         const generator = new SkeletonGenerator();
         symbolIndex = new SymbolIndex(testDir, generator, []);
-        tracer = new DataFlowTracer(testDir, symbolIndex);
+        tracer = new DataFlowTracer(testDir, symbolIndex, new NodeFileSystem(testDir));
     });
 
     it("captures definition, assignment, call, and return steps", async () => {

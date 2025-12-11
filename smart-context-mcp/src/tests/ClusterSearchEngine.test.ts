@@ -12,6 +12,7 @@ import { ClusterBuilder } from '../engine/ClusterSearch/ClusterBuilder.js';
 import { ClusterSearchEngine } from '../engine/ClusterSearch/index.js';
 import { ExpansionState } from '../types/cluster.js';
 import { DependencyGraph } from '../ast/DependencyGraph.js';
+import { NodeFileSystem } from '../platform/FileSystem.js';
 
 const testDir = path.join(process.cwd(), 'src', 'tests', 'cluster_search_env');
 
@@ -27,6 +28,7 @@ describe('ClusterSearch Phase 2 Components', () => {
     let callGraphBuilder: CallGraphBuilder;
     let typeDependencyTracker: TypeDependencyTracker;
     let dependencyGraph: DependencyGraph;
+    let fileSystem: NodeFileSystem;
 
     beforeAll(async () => {
         await AstManager.getInstance().init();
@@ -82,6 +84,7 @@ export function teardownUser(name: string) {
         callGraphBuilder = new CallGraphBuilder(testDir, symbolIndex, moduleResolver);
         typeDependencyTracker = new TypeDependencyTracker(testDir, symbolIndex);
         dependencyGraph = new DependencyGraph(testDir, symbolIndex, moduleResolver);
+        fileSystem = new NodeFileSystem(testDir);
     });
 
     it('parses filters and intent from query strings', () => {
@@ -151,7 +154,8 @@ export function teardownUser(name: string) {
             symbolIndex,
             callGraphBuilder,
             typeDependencyTracker,
-            dependencyGraph
+            dependencyGraph,
+            fileSystem
         }, {
             precomputation: { enabled: false }
         });
@@ -172,7 +176,8 @@ export function teardownUser(name: string) {
             symbolIndex,
             callGraphBuilder,
             typeDependencyTracker,
-            dependencyGraph
+            dependencyGraph,
+            fileSystem
         }, {
             precomputation: { enabled: false }
         });

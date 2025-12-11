@@ -3,6 +3,7 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import { HistoryEngine } from "../engine/History.js";
+import { NodeFileSystem } from "../platform/FileSystem.js";
 
 describe("HistoryEngine", () => {
   let tempDir: string;
@@ -11,7 +12,7 @@ describe("HistoryEngine", () => {
 
   beforeAll(() => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "history-engine-test-"));
-    engine = new HistoryEngine(tempDir);
+    engine = new HistoryEngine(tempDir, new NodeFileSystem(tempDir));
     historyFilePath = path.join(tempDir, ".mcp", "history.json");
   });
 

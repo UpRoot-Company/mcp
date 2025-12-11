@@ -1,3 +1,4 @@
+import { jest } from '@jest/globals';
 import { SymbolIndex } from '../ast/SymbolIndex.js';
 import { SkeletonGenerator } from '../ast/SkeletonGenerator.js';
 import { AstManager } from '../ast/AstManager.js';
@@ -19,6 +20,7 @@ describe('SymbolIndex', () => {
         // Create test files
         fs.writeFileSync(path.join(testDir, 'test.ts'), 'class TestClass { method() {} }');
         fs.writeFileSync(path.join(testDir, 'utils.py'), 'def python_helper(): pass');
+        fs.writeFileSync(path.join(testDir, 'notes.txt'), 'plain text content');
         
         fs.mkdirSync(path.join(testDir, 'nested'));
         fs.writeFileSync(path.join(testDir, 'nested', 'deep.ts'), 'function deepFunc() {}');
@@ -63,5 +65,17 @@ describe('SymbolIndex', () => {
         const results = await index.search('helper');
         expect(results.length).toBeGreaterThan(0);
         expect(results[0].symbol.name).toBe('python_helper');
+    });
+
+    it('should skip unsupported extensions without emitting warnings', async () => {
+        const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+        try {
+            const unsupportedPath = path.join(testDir, 'notes.txt');
+            const symbols = await index.getSymbolsForFile(unsupportedPath);
+            expect(symbols).toHaveLength(0);
+            expect(warnSpy).not.toHaveBeenCalled();
+        } finally {
+            warnSpy.mockRestore();
+        }
     });
 });
