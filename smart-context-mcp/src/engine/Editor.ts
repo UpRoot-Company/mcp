@@ -65,7 +65,7 @@ export class EditorEngine {
 
     constructor(rootPath: string, fileSystem: IFileSystem, semanticDiffProvider?: SemanticDiffProvider) {
         this.rootPath = rootPath;
-        this.backupsDir = path.join(rootPath, ".mcp", "backups");
+        this.backupsDir = path.join(rootPath, ".mcp", "smart-context", "backups");
         this.fileSystem = fileSystem;
         this.semanticDiffProvider = semanticDiffProvider;
     }

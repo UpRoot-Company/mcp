@@ -41,7 +41,7 @@ export class LanguageConfigLoader {
     private readonly configPath: string;
 
     constructor(private readonly rootPath: string) {
-        this.configPath = path.join(this.rootPath, ".smart-context", "languages.json");
+        this.configPath = path.join(this.rootPath, ".mcp", "smart-context", "languages.json");
         this.config = this.loadConfig();
     }
 
