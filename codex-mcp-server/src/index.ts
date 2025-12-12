@@ -78,14 +78,14 @@ const TOOLS: Tool[] = [
 // -----------------------------------------------------------------------------
 
 interface CodexConfig {
-  model: "gpt-5.1-codex-mini" | "gpt-5.1-codex" | "gpt-5.1-codex-max";
+  model: "gpt-5.1-codex-mini" | "gpt-5.2" | "gpt-5.1-codex-max";
   reasoningEffort: "low" | "medium" | "high";
 }
 
 const TOOL_CONFIG_MAP: Record<string, CodexConfig> = {
-  polish_syntax: { model: "gpt-5.1-codex-mini", reasoningEffort: "low" },
-  scaffold_unit_test: { model: "gpt-5.1-codex", reasoningEffort: "medium" },
-  generate_implementation: { model: "gpt-5.1-codex", reasoningEffort: "medium" },
+  polish_syntax: { model: "gpt-5.1-codex-mini", reasoningEffort: "medium" },
+  scaffold_unit_test: { model: "gpt-5.2", reasoningEffort: "low" },
+  generate_implementation: { model: "gpt-5.2", reasoningEffort: "medium" },
   optimize_algorithm: { model: "gpt-5.1-codex-max", reasoningEffort: "high" },
 }
 
