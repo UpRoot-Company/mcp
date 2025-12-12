@@ -32,6 +32,17 @@ export class DependencyGraph {
         this.db = db ?? this.symbolIndex.getDatabase();
     }
 
+    public isBuilt(): boolean {
+        return this.lastRebuiltAt > 0;
+    }
+
+    public async ensureBuilt(): Promise<void> {
+        if (this.isBuilt()) {
+            return;
+        }
+        await this.build();
+    }
+
     public async build(): Promise<void> {
         const symbolMap = await this.symbolIndex.getAllSymbols();
         for (const [relativePath, symbols] of symbolMap) {

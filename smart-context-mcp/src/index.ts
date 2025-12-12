@@ -3,7 +3,9 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { ListToolsRequestSchema, CallToolRequestSchema, McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import * as fs from "fs";
-import { promisify } from "util";
+
+
+
 import * as path from "path";
 import * as ignore from "ignore";
 import * as url from "url";
@@ -29,24 +31,20 @@ import { AgentWorkflowGuidance } from "./engine/AgentPlaybook.js";
 import { ClusterSearchEngine, ClusterSearchOptions, ClusterExpansionOptions } from "./engine/ClusterSearch/index.js";
 import { BuildClusterOptions, ExpandableRelationship } from "./engine/ClusterSearch/ClusterBuilder.js";
 import { FileSearchResult, ReadFragmentResult, EditResult, DirectoryTree, Edit, EngineConfig, SmartFileProfile, SymbolInfo, ToolSuggestion, ImpactPreview, BatchEditGuidance, ReadCodeResult, ReadCodeArgs, SearchProjectResult, SearchProjectArgs, AnalyzeRelationshipResult, EditCodeArgs, EditCodeResult, EditCodeEdit, ManageProjectResult, ManageProjectArgs, AnalyzeRelationshipArgs, ReadCodeView, SearchProjectType, ResolvedRelationshipTarget, AnalyzeRelationshipDirection, AnalyzeRelationshipNode, AnalyzeRelationshipEdge, LineRange, DiffMode } from "./types.js";
-import { IFileSystem, NodeFileSystem } from "./platform/FileSystem.js";
+import { FileStats, IFileSystem, NodeFileSystem } from "./platform/FileSystem.js";
 import { AstAwareDiff } from "./engine/AstAwareDiff.js";
 import { IndexDatabase } from "./indexing/IndexDatabase.js";
 import { IncrementalIndexer } from "./indexing/IncrementalIndexer.js";
 import { TransactionLog, TransactionLogEntry } from "./engine/TransactionLog.js";
 import { metrics } from "./utils/MetricsCollector.js";
 
-const readFileAsync = promisify(fs.readFile);
-const writeFileAsync = promisify(fs.writeFile);
-const statAsync = promisify(fs.stat);
-const mkdirAsync = promisify(fs.mkdir);
-const unlinkAsync = promisify(fs.unlink);
-const accessAsync = promisify(fs.access);
+
 const ENABLE_DEBUG_LOGS = process.env.SMART_CONTEXT_DEBUG === 'true';
 
 export class SmartContextServer {
     private server: Server;
     private rootPath: string;
+    private rootRealPath?: string;
     private fileSystem: IFileSystem;
     private ig: any;
     private ignoreGlobs: string[];
@@ -85,8 +83,18 @@ export class SmartContextServer {
             },
         });
 
-        this.rootPath = path.resolve(rootPath);
+                this.rootPath = path.resolve(rootPath);
         this.fileSystem = fileSystem ?? new NodeFileSystem(this.rootPath);
+        if (this.fileSystem instanceof NodeFileSystem) {
+            try {
+                const real = (fs.realpathSync as any).native
+                    ? (fs.realpathSync as any).native(this.rootPath)
+                    : fs.realpathSync(this.rootPath);
+                this.rootRealPath = real;
+            } catch {
+                this.rootRealPath = undefined;
+            }
+        }
         const isTestEnv = process.env.NODE_ENV === 'test' || process.env.JEST_WORKER_ID !== undefined;
         this.ig = (ignore.default as any)();
         this.ignoreGlobs = this._loadIgnoreFiles();
@@ -187,8 +195,8 @@ export class SmartContextServer {
             this.ig.add(content);
             const parsed = content
                 .split(/\r?\n/)
-                .map(line => line.trim())
-                .filter(line => line.length > 0 && !line.startsWith('#'));
+                .map((line: string) => line.trim())
+                .filter((line: string) => line.length > 0 && !line.startsWith('#'));
             patterns.push(...parsed);
         };
         const gitignorePath = path.join(this.rootPath, '.gitignore');
@@ -198,7 +206,7 @@ export class SmartContextServer {
         return patterns;
     }
 
-    private _getAbsPathAndVerify(filePath: string): string {
+        private _getAbsPathAndVerify(filePath: string): string {
         const absPath = path.isAbsolute(filePath)
             ? path.normalize(filePath)
             : path.join(this.rootPath, filePath);
@@ -207,6 +215,45 @@ export class SmartContextServer {
             throw new McpError(ErrorCode.InvalidParams,
                 `SecurityViolation: File path is outside the allowed root directory.`);
         }
+
+        // Harden against symlink escape (Node filesystem only).
+        if (this.fileSystem instanceof NodeFileSystem && this.rootRealPath) {
+            const rootReal = this.rootRealPath;
+            const isInsideRoot = (candidate: string) => candidate === rootReal || candidate.startsWith(rootReal + path.sep);
+
+            // If the path exists, resolve it directly.
+            try {
+                const realAbs = (fs.realpathSync as any).native
+                    ? (fs.realpathSync as any).native(absPath)
+                    : fs.realpathSync(absPath);
+                if (!isInsideRoot(realAbs)) {
+                    throw new McpError(ErrorCode.InvalidParams,
+                        `SecurityViolation: File path resolves outside the allowed root directory.`);
+                }
+            } catch {
+                // If it doesn't exist (create/write), validate against the nearest existing parent.
+                let parent = path.dirname(absPath);
+                while (parent !== this.rootPath && !fs.existsSync(parent)) {
+                    const next = path.dirname(parent);
+                    if (next === parent) {
+                        break;
+                    }
+                    parent = next;
+                }
+                try {
+                    const realParent = (fs.realpathSync as any).native
+                        ? (fs.realpathSync as any).native(parent)
+                        : fs.realpathSync(parent);
+                    if (!isInsideRoot(realParent)) {
+                        throw new McpError(ErrorCode.InvalidParams,
+                            `SecurityViolation: Parent directory resolves outside the allowed root directory.`);
+                    }
+                } catch {
+                    // If we can't realpath the parent, fall back to the prefix check above.
+                }
+            }
+        }
+
         return absPath;
     }
 
@@ -239,12 +286,14 @@ export class SmartContextServer {
         return relative.replace(/\\/g, '/');
     }
 
-    private async buildSmartFileProfile(absPath: string, content: string, stats: fs.Stats): Promise<SmartFileProfile> {
+        private async buildSmartFileProfile(absPath: string, content: string, stats: FileStats | fs.Stats): Promise<SmartFileProfile> {
+        await this.dependencyGraph.ensureBuilt();
         const relativePath = path.relative(this.rootPath, absPath) || path.basename(absPath);
         const [outgoingDeps, incomingRefs] = await Promise.all([
             this.dependencyGraph.getDependencies(absPath, 'outgoing'),
             this.dependencyGraph.getDependencies(absPath, 'incoming')
         ]);
+
 
         let skeleton = '// Skeleton generation failed or not applicable for this file type.';
         try {
@@ -264,15 +313,24 @@ export class SmartContextServer {
             console.error(`Structure extraction failed for ${absPath}:`, error);
         }
 
-        const metaAnalysis = FileProfiler.analyzeMetadata(content, absPath);
+                const metaAnalysis = FileProfiler.analyzeMetadata(content, absPath);
         const lineCount = content.length === 0 ? 0 : content.split(/\r?\n/).length;
+
+        const mtimeMs = typeof (stats as any).mtimeMs === "number"
+            ? (stats as any).mtimeMs
+            : (stats as any).mtime instanceof Date
+                ? (stats as any).mtime.getTime()
+                : typeof (stats as any).mtime === "number"
+                    ? (stats as any).mtime
+                    : Date.now();
+
         const metadata: SmartFileProfile['metadata'] = {
             filePath: absPath,
             relativePath,
             sizeBytes: stats.size,
             lineCount,
             language: path.extname(absPath).replace('.', '') || null,
-            lastModified: stats.mtime.toISOString(),
+            lastModified: new Date(mtimeMs).toISOString(),
             newlineStyle: metaAnalysis.newlineStyle,
             encoding: 'utf-8',
             hasBOM: metaAnalysis.hasBOM,
@@ -607,16 +665,15 @@ export class SmartContextServer {
         return Math.max(0, Math.min(1, value));
     }
 
-    private async pathExists(absPath: string): Promise<boolean> {
+        private async pathExists(absPath: string): Promise<boolean> {
         try {
-            await accessAsync(absPath, fs.constants.F_OK);
-            return true;
+            return await this.fileSystem.exists(absPath);
         } catch {
             return false;
         }
     }
 
-    private async executeReadCode(args: ReadCodeArgs): Promise<ReadCodeResult> {
+        private async executeReadCode(args: ReadCodeArgs): Promise<ReadCodeResult> {
         if (!args || typeof args.filePath !== "string" || !args.filePath.trim()) {
             throw new McpError(ErrorCode.InvalidParams, "Provide 'filePath' to read_code.");
         }
@@ -627,8 +684,8 @@ export class SmartContextServer {
         }
 
         const [content, stats] = await Promise.all([
-            readFileAsync(absPath, "utf-8"),
-            statAsync(absPath)
+            this.fileSystem.readFile(absPath),
+            this.fileSystem.stat(absPath)
         ]);
 
         const metadata: ReadCodeResult["metadata"] = {
@@ -788,7 +845,7 @@ export class SmartContextServer {
         return `${prefix}:${identifier}`;
     }
 
-    private async executeAnalyzeRelationship(args: AnalyzeRelationshipArgs): Promise<AnalyzeRelationshipResult> {
+        private async executeAnalyzeRelationship(args: AnalyzeRelationshipArgs): Promise<AnalyzeRelationshipResult> {
         if (!args || typeof args.target !== "string" || !args.target.trim()) {
             throw new McpError(ErrorCode.InvalidParams, "Provide 'target' to analyze_relationship.");
         }
@@ -800,6 +857,11 @@ export class SmartContextServer {
         const maxDepth = typeof args.maxDepth === "number" && Number.isFinite(args.maxDepth)
             ? Math.max(1, Math.floor(args.maxDepth))
             : (mode === "impact" ? 20 : mode === "calls" ? 3 : mode === "types" ? 2 : mode === "data_flow" ? 10 : 1);
+
+        // Ensure file-level dependency graph is available for dependency/impact queries.
+        if (mode === "dependencies" || mode === "impact") {
+            await this.dependencyGraph.ensureBuilt();
+        }
 
         const resolved = await this.resolveRelationshipTarget(args, mode);
         const nodes = new Map<string, AnalyzeRelationshipNode>();
@@ -824,6 +886,7 @@ export class SmartContextServer {
         if (mode === "data_flow" && resolved.type !== "variable") {
             throw new McpError(ErrorCode.InvalidParams, "data_flow mode requires 'contextPath' to point to a file.");
         }
+
 
         if (mode === "dependencies") {
             const absTarget = this._getAbsPathAndVerify(resolved.path);
@@ -1036,15 +1099,15 @@ export class SmartContextServer {
             if (!parentExists && !createDirs) {
                 throw new McpError(ErrorCode.InvalidParams, `Missing directory '${this.normalizeRelativePath(parentDir)}'. Set createMissingDirectories=true.`);
             }
-            if (!dryRun) {
+                        if (!dryRun) {
                 if (!parentExists && createDirs) {
-                    await mkdirAsync(parentDir, { recursive: true });
+                    await this.fileSystem.createDir(parentDir);
                 }
-                await writeFileAsync(absPath, edit.replacementString);
+                await this.fileSystem.writeFile(absPath, edit.replacementString);
                 touchedFiles.add(absPath);
                 rollback.push(async () => {
                     if (await this.pathExists(absPath)) {
-                        await unlinkAsync(absPath);
+                        await this.fileSystem.deleteFile(absPath);
                     }
                 });
             }
@@ -1070,13 +1133,17 @@ export class SmartContextServer {
                 throw new McpError(ErrorCode.InvalidParams, `File '${edit.filePath}' does not exist.`);
             }
             let previousContent = "";
-            if (!dryRun) {
-                previousContent = await readFileAsync(absPath, 'utf-8');
-                await unlinkAsync(absPath);
+                        if (!dryRun) {
+                previousContent = await this.fileSystem.readFile(absPath);
+                await this.fileSystem.deleteFile(absPath);
                 touchedFiles.add(absPath);
                 const backup = previousContent;
                 rollback.push(async () => {
-                    await writeFileAsync(absPath, backup);
+                    const parentDir = path.dirname(absPath);
+                    if (!await this.pathExists(parentDir)) {
+                        await this.fileSystem.createDir(parentDir);
+                    }
+                    await this.fileSystem.writeFile(absPath, backup);
                 });
             }
             results.push({
@@ -1163,8 +1230,9 @@ export class SmartContextServer {
         }
     }
 
-    private async invalidateTouchedFiles(touchedFiles: Set<string>): Promise<void> {
+        private async invalidateTouchedFiles(touchedFiles: Set<string>): Promise<void> {
         for (const absPath of touchedFiles) {
+            await this.dependencyGraph.invalidateFile(absPath);
             this.callGraphBuilder.invalidateFile(absPath);
             this.typeDependencyTracker.invalidateFile(absPath);
             this.clusterSearchEngine.invalidateFile(absPath);
@@ -1197,8 +1265,8 @@ export class SmartContextServer {
             case "guidance": {
                 const playbookPath = path.join(this.rootPath, 'docs', 'agent-playbook.md');
                 let markdown: string | undefined;
-                try {
-                    markdown = await readFileAsync(playbookPath, 'utf-8');
+                                try {
+                    markdown = await this.fileSystem.readFile(playbookPath);
                 } catch {
                     markdown = undefined;
                 }
@@ -1210,7 +1278,8 @@ export class SmartContextServer {
                     }
                 };
             }
-            case "status": {
+                        case "status": {
+                await this.dependencyGraph.ensureBuilt();
                 const status = await this.dependencyGraph.getIndexStatus();
                 return { output: "Index status retrieved.", data: status };
             }
@@ -1347,38 +1416,41 @@ export class SmartContextServer {
                     required: ["edits"]
                 }
             },
-            {
+                        {
                 name: "manage_project",
-                description: "Runs project-level commands like undo, redo, workflow guidance, and index status.",
+                description: "Runs project-level commands like undo, redo, workflow guidance, index status, and metrics.",
                 inputSchema: {
                     type: "object",
                     properties: {
-                        command: { type: "string", enum: ["undo", "redo", "guidance", "status"] }
+                        command: { type: "string", enum: ["undo", "redo", "guidance", "status", "metrics"] }
                     },
-                                        required: ["command"]
+                    required: ["command"]
                 }
             },
-            {
+                        {
                 name: "read_file",
-                description: "Reads the complete content of a file. This is a compatibility alias for 'read_code'.",
-                inputSchema: {
-                    type: "object",
-                    properties: {
-                        path: { type: "string", description: "Path to the file" }
-                    },
-                    required: ["path"]
-                }
-            },
-            {
-                name: "write_file",
-                description: "Overwrites the entire content of a file. This is a compatibility alias for simple file writing.",
+                description: "Reads a file. Returns a Smart File Profile by default; set full=true (or view=\"full\") for raw content.",
                 inputSchema: {
                     type: "object",
                     properties: {
                         path: { type: "string", description: "Path to the file" },
-                        content: { type: "string", description: "New content for the file" }
+                        filePath: { type: "string", description: "Path to the file (legacy)" },
+                        full: { type: "boolean" },
+                        view: { type: "string", enum: ["full", "profile"] }
+                    }
+                }
+            },
+            {
+                name: "write_file",
+                description: "Overwrites a file's full contents.",
+                inputSchema: {
+                    type: "object",
+                    properties: {
+                        path: { type: "string" },
+                        filePath: { type: "string" },
+                        content: { type: "string" }
                     },
-                    required: ["path", "content"]
+                    required: ["content"]
                 }
             },
             {
@@ -1387,9 +1459,240 @@ export class SmartContextServer {
                 inputSchema: {
                     type: "object",
                     properties: {
-                        path: { type: "string", description: "Path to the file" }
+                        path: { type: "string" },
+                        filePath: { type: "string" }
+                    }
+                }
+            },
+            {
+                name: "read_fragment",
+                description: "Reads file fragments by explicit line ranges or keyword/pattern matches.",
+                inputSchema: {
+                    type: "object",
+                    properties: {
+                        filePath: { type: "string" },
+                        keywords: { type: "array", items: { type: "string" } },
+                        patterns: { type: "array", items: { type: "string" } },
+                        lineRanges: { type: "array", items: { type: "object", properties: { start: { type: "number" }, end: { type: "number" } }, required: ["start", "end"] } },
+                        contextLines: { type: "number" }
+                    },
+                    required: ["filePath"]
+                }
+            },
+            {
+                name: "list_directory",
+                description: "Lists a directory tree (ASCII).",
+                inputSchema: {
+                    type: "object",
+                    properties: {
+                        path: { type: "string" },
+                        depth: { type: "number" }
                     },
                     required: ["path"]
+                }
+            },
+            {
+                name: "search_files",
+                description: "Legacy file search (SearchEngine.scout).",
+                inputSchema: {
+                    type: "object",
+                    properties: {
+                        keywords: { type: "array", items: { type: "string" } },
+                        patterns: { type: "array", items: { type: "string" } },
+                        includeGlobs: { type: "array", items: { type: "string" } },
+                        excludeGlobs: { type: "array", items: { type: "string" } },
+                        smartCase: { type: "boolean" },
+                        caseSensitive: { type: "boolean" },
+                        maxMatchesPerFile: { type: "number" }
+                    }
+                }
+            },
+            {
+                name: "search_with_context",
+                description: "Legacy cluster search entry point.",
+                inputSchema: {
+                    type: "object",
+                    properties: {
+                        query: { type: "string" }
+                    },
+                    required: ["query"]
+                }
+            },
+            {
+                name: "expand_cluster_relationship",
+                description: "Expands a cached cluster relationship from a previous search_with_context call.",
+                inputSchema: {
+                    type: "object",
+                    properties: {
+                        clusterId: { type: "string" },
+                        relationshipType: { type: "string", enum: ["callers", "callees", "typeFamily"] }
+                    },
+                    required: ["clusterId", "relationshipType"]
+                }
+            },
+            {
+                name: "rebuild_index",
+                description: "Rebuilds internal indexes (legacy).",
+                inputSchema: { type: "object", properties: {} }
+            },
+            {
+                name: "invalidate_index_file",
+                description: "Invalidates indexes for a single file (legacy).",
+                inputSchema: {
+                    type: "object",
+                    properties: { filePath: { type: "string" } },
+                    required: ["filePath"]
+                }
+            },
+            {
+                name: "invalidate_index_directory",
+                description: "Invalidates indexes for a directory (legacy).",
+                inputSchema: {
+                    type: "object",
+                    properties: { directoryPath: { type: "string" }, path: { type: "string" } }
+                }
+            },
+            {
+                name: "edit_file",
+                description: "Legacy single-file edit wrapper (deprecated; prefer edit_code).",
+                inputSchema: {
+                    type: "object",
+                    properties: {
+                        filePath: { type: "string" },
+                        edits: { type: "array", items: { type: "object" } },
+                        dryRun: { type: "boolean" }
+                    },
+                    required: ["filePath", "edits"]
+                }
+            },
+            {
+                name: "batch_edit",
+                description: "Legacy batch edit wrapper (deprecated; prefer edit_code).",
+                inputSchema: {
+                    type: "object",
+                    properties: {
+                        fileEdits: { type: "array", items: { type: "object" } },
+                        dryRun: { type: "boolean" }
+                    },
+                    required: ["fileEdits"]
+                }
+            },
+            {
+                name: "undo_last_edit",
+                description: "Legacy undo (deprecated; prefer manage_project undo).",
+                inputSchema: { type: "object", properties: {} }
+            },
+            {
+                name: "redo_last_edit",
+                description: "Legacy redo (deprecated; prefer manage_project redo).",
+                inputSchema: { type: "object", properties: {} }
+            },
+            {
+                name: "get_index_status",
+                description: "Legacy index status (deprecated; prefer manage_project status).",
+                inputSchema: { type: "object", properties: {} }
+            },
+            {
+                name: "get_workflow_guidance",
+                description: "Legacy workflow guidance (deprecated; prefer manage_project guidance).",
+                inputSchema: { type: "object", properties: {} }
+            },
+            {
+                name: "debug_edit_match",
+                description: "Returns diagnostics for an edit match.",
+                inputSchema: {
+                    type: "object",
+                    properties: {
+                        filePath: { type: "string" },
+                        targetString: { type: "string" },
+                        lineRange: { type: "object" },
+                        normalization: { type: "string" }
+                    },
+                    required: ["filePath", "targetString"]
+                }
+            },
+            {
+                name: "read_file_skeleton",
+                description: "Legacy skeleton reader.",
+                inputSchema: {
+                    type: "object",
+                    properties: {
+                        filePath: { type: "string" },
+                        format: { type: "string", enum: ["text", "json"] }
+                    },
+                    required: ["filePath"]
+                }
+            },
+            {
+                name: "search_symbol_definitions",
+                description: "Legacy symbol search.",
+                inputSchema: {
+                    type: "object",
+                    properties: { query: { type: "string" } },
+                    required: ["query"]
+                }
+            },
+            {
+                name: "get_file_dependencies",
+                description: "Legacy file dependency listing.",
+                inputSchema: {
+                    type: "object",
+                    properties: { filePath: { type: "string" }, direction: { type: "string" } },
+                    required: ["filePath"]
+                }
+            },
+            {
+                name: "analyze_impact",
+                description: "Legacy transitive dependency impact.",
+                inputSchema: {
+                    type: "object",
+                    properties: { filePath: { type: "string" }, direction: { type: "string" }, maxDepth: { type: "number" } },
+                    required: ["filePath"]
+                }
+            },
+            {
+                name: "analyze_symbol_impact",
+                description: "Legacy call graph impact analysis.",
+                inputSchema: {
+                    type: "object",
+                    properties: { symbolName: { type: "string" }, filePath: { type: "string" }, direction: { type: "string" }, maxDepth: { type: "number" } },
+                    required: ["symbolName", "filePath"]
+                }
+            },
+            {
+                name: "analyze_type_dependencies",
+                description: "Legacy type dependency analysis.",
+                inputSchema: {
+                    type: "object",
+                    properties: { symbolName: { type: "string" }, filePath: { type: "string" }, direction: { type: "string" }, maxDepth: { type: "number" } },
+                    required: ["symbolName", "filePath"]
+                }
+            },
+            {
+                name: "trace_data_flow",
+                description: "Legacy data flow trace.",
+                inputSchema: {
+                    type: "object",
+                    properties: { variableName: { type: "string" }, fromFile: { type: "string" }, fromLine: { type: "number" }, maxSteps: { type: "number" } },
+                    required: ["variableName", "fromFile"]
+                }
+            },
+            {
+                name: "find_symbol_references",
+                description: "Legacy reference search.",
+                inputSchema: {
+                    type: "object",
+                    properties: { symbolName: { type: "string" }, contextFile: { type: "string" } },
+                    required: ["symbolName", "contextFile"]
+                }
+            },
+            {
+                name: "preview_rename",
+                description: "Legacy rename preview (dry run batch edit).",
+                inputSchema: {
+                    type: "object",
+                    properties: { symbolName: { type: "string" }, definitionFilePath: { type: "string" }, newName: { type: "string" } },
+                    required: ["symbolName", "definitionFilePath", "newName"]
                 }
             }
         ];
@@ -1418,47 +1721,58 @@ export class SmartContextServer {
                     const result = await this.executeManageProject(args as ManageProjectArgs);
                     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
                 }
-                                case "read_file": {
-	                    const filePath = args.path || args.filePath;
-	                    if (!filePath) {
-	                        return this._createErrorResponse("MissingParameter", "Provide 'path' to read_file.");
-	                    }
-	                    const absPath = this._getAbsPathAndVerify(filePath);
-	                    const content = await readFileAsync(absPath, "utf-8");
-	                    const fullMode = args.full === true || args.view === "full";
-	                    if (fullMode) {
-	                        return { content: [{ type: "text", text: content }] };
-	                    }
-	                    try {
-	                        const stats = await statAsync(absPath);
-	                        const profile = await this.buildSmartFileProfile(absPath, content, stats);
-	                        return { content: [{ type: "text", text: JSON.stringify(profile, null, 2) }] };
-	                    } catch (error: any) {
-	                        console.error(`Failed to build Smart File Profile for ${absPath}:`, error);
-	                        return this._createErrorResponse("ProfileBuildFailed", `Failed to build Smart File Profile: ${error.message}`);
-	                    }
-	                }
-                case "analyze_file": {
+                                                case "read_file": {
+                    const filePath = args.path || args.filePath;
+                    if (!filePath) {
+                        return this._createErrorResponse("MissingParameter", "Provide 'path' to read_file.");
+                    }
+                    const absPath = this._getAbsPathAndVerify(filePath);
+                    const fullMode = args.full === true || args.view === "full";
+
+                    try {
+                        const [content, stats] = await Promise.all([
+                            this.fileSystem.readFile(absPath),
+                            this.fileSystem.stat(absPath)
+                        ]);
+
+                        if (fullMode) {
+                            // Protect against extremely large payloads.
+                            const payload = stats.size > SmartContextServer.READ_CODE_MAX_BYTES
+                                ? content.slice(0, SmartContextServer.READ_CODE_MAX_BYTES)
+                                : content;
+                            return { content: [{ type: "text", text: payload }] };
+                        }
+
+                        const profile = await this.buildSmartFileProfile(absPath, content, stats);
+                        return { content: [{ type: "text", text: JSON.stringify(profile, null, 2) }] };
+                    } catch (error: any) {
+                        console.error(`Failed to read/build Smart File Profile for ${absPath}:`, error);
+                        return this._createErrorResponse("InternalError", error.message);
+                    }
+                }
+                                case "analyze_file": {
                     // Logic moved from old read_file
                     const filePath = args.path || args.filePath;
                     if (!filePath) {
                         return this._createErrorResponse("MissingParameter", "Provide 'path' to analyze_file.");
                     }
                     const absPath = this._getAbsPathAndVerify(filePath);
-                    const content = await readFileAsync(absPath, 'utf-8');
 
                     try {
-                        const stats = await statAsync(absPath);
+                        const [content, stats] = await Promise.all([
+                            this.fileSystem.readFile(absPath),
+                            this.fileSystem.stat(absPath)
+                        ]);
                         const profile = await this.buildSmartFileProfile(absPath, content, stats);
                         return { content: [{ type: "text", text: JSON.stringify(profile, null, 2) }] };
                     } catch (error: any) {
                         console.error(`Failed to build Smart File Profile for ${absPath}:`, error);
-                        return this._createErrorResponse("ProfileBuildFailed", `Failed to build Smart File Profile: ${error.message}`);
+                        return this._createErrorResponse("InternalError", error.message);
                     }
                 }
-                case "read_file_skeleton": {
+                                case "read_file_skeleton": {
                     const absPath = this._getAbsPathAndVerify(args.filePath);
-                    const content = await readFileAsync(absPath, 'utf-8');
+                    const content = await this.fileSystem.readFile(absPath);
                     const format = args.format || 'text'; // Default to text
 
                     if (format === 'json') {
@@ -1474,13 +1788,15 @@ export class SmartContextServer {
                     const results = await this.symbolIndex.search(query);
                     return { content: [{ type: "text", text: JSON.stringify(results, null, 2) }] };
                 }
-                case "get_file_dependencies": {
+                                case "get_file_dependencies": {
+                    await this.dependencyGraph.ensureBuilt();
                     const absPath = this._getAbsPathAndVerify(args.filePath);
                     const direction = args.direction || 'outgoing';
                     const deps = await this.dependencyGraph.getDependencies(absPath, direction);
                     return { content: [{ type: "text", text: JSON.stringify(deps, null, 2) }] };
                 }
-                case "analyze_impact": {
+                                case "analyze_impact": {
+                    await this.dependencyGraph.ensureBuilt();
                     const absPath = this._getAbsPathAndVerify(args.filePath);
                     const direction = args.direction || 'incoming';
                     const maxDepth = args.maxDepth || 20;
@@ -1587,15 +1903,15 @@ export class SmartContextServer {
                                         const result = await this.editCoordinator.applyBatchEdits(fileEdits, true);
                     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
                 }
-                case "get_index_status": {
+                                case "get_index_status": {
+                    await this.dependencyGraph.ensureBuilt();
                     const status = await this.dependencyGraph.getIndexStatus();
                     return { content: [{ type: "text", text: JSON.stringify(status, null, 2) }] };
                 }
-                case "rebuild_index": {
+                                case "rebuild_index": {
                     this.moduleResolver.clearCache();
                     await this.dependencyGraph.build();
                     this.callGraphBuilder.clearCaches();
-                    this.typeDependencyTracker.clearCaches();
                     this.typeDependencyTracker.clearCaches();
                     this.clusterSearchEngine.clearCache();
                     await this.searchEngine.rebuild();
@@ -1649,7 +1965,7 @@ export class SmartContextServer {
                     const result: ReadFragmentResult = await this.contextEngine.readFragment(absPath, ranges, args.contextLines);
                     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
                 }
-                                case "write_file": {
+                                                case "write_file": {
                     // Simple overwrite alias
                     const filePath = args.path || args.filePath;
                     if (!filePath) {
@@ -1659,14 +1975,15 @@ export class SmartContextServer {
                         return this._createErrorResponse("MissingParameter", "Provide 'content' to write_file.");
                     }
                     const absPath = this._getAbsPathAndVerify(filePath);
-                    await writeFileAsync(absPath, args.content);
-                    
-                    // Invalidate caches
+                    await this.fileSystem.writeFile(absPath, String(args.content));
+
+                    // Invalidate indexes/caches
+                    await this.dependencyGraph.invalidateFile(absPath);
                     this.callGraphBuilder.invalidateFile(absPath);
                     this.typeDependencyTracker.invalidateFile(absPath);
                     this.clusterSearchEngine.invalidateFile(absPath);
                     await this.searchEngine.invalidateFile(absPath);
-                    
+
                     return { content: [{ type: "text", text: `Successfully wrote to ${filePath}` }] };
                 }
                 case "edit_file": {
@@ -1838,8 +2155,8 @@ export class SmartContextServer {
                 case "get_workflow_guidance": {
                     const playbookPath = path.join(this.rootPath, 'docs', 'agent-playbook.md');
                     let markdown: string | undefined;
-                    try {
-                        markdown = await readFileAsync(playbookPath, 'utf-8');
+                                        try {
+                        markdown = await this.fileSystem.readFile(playbookPath);
                     } catch (error) {
                         console.warn(`Agent playbook markdown missing:`, error);
                     }
@@ -1853,9 +2170,9 @@ export class SmartContextServer {
                     const tree: string = await this.contextEngine.listDirectoryTree(absPath, args.depth, this.rootPath);
                     return { content: [{ type: "text", text: tree }] };
                 }
-                case "debug_edit_match": {
+                                case "debug_edit_match": {
                     const absPath = this._getAbsPathAndVerify(args.filePath);
-                    const content = await readFileAsync(absPath, 'utf-8');
+                    const content = await this.fileSystem.readFile(absPath);
                     const edit: Edit = {
                         targetString: args.targetString,
                         replacementString: "", // Not used for diagnostics

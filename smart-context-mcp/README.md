@@ -7,7 +7,7 @@
 
 ## 🎯 Overview
 
-Smart Context MCP는 AI 에이전트가 코드베이스를 효과적으로 탐색하고 수정할 수 있도록 5가지 Intent 기반 도구를 제공합니다:
+Smart Context MCP는 AI 에이전트가 코드베이스를 효과적으로 탐색하고 수정할 수 있도록 **5가지 Intent 기반 도구**와 **호환성 도구**를 제공합니다:
 
 | Tool | Purpose |
 |------|---------|
@@ -16,8 +16,8 @@ Smart Context MCP는 AI 에이전트가 코드베이스를 효과적으로 탐�
 | `analyze_relationship` | 의존성, 콜그래프, 타입, 데이터 플로우 분석 |
 | `edit_code` | 원자적 코드 편집 (생성/삭제/교체) |
 | `manage_project` | 프로젝트 관리 (undo/redo/상태/가이던스/메트릭) |
-| `read_file` | `read_code`의 별칭 (호환성 제공) |
-| `write_file` | 파일 덮어쓰기 별칭 (호환성 제공) |
+| `read_file` | 기본은 Smart File Profile(JSON), `full: true`면 원문 반환 (호환성 제공) |
+| `write_file` | 파일 전체 덮어쓰기 + 인덱스/캐시 무효화 (호환성 제공) |
 | `analyze_file` | 상세 파일 프로필 및 메타데이터 분석 |
 
 ### 핵심 기능
@@ -251,22 +251,41 @@ Smart Context는 ADR-020 워크플로우를 커버하는 5개의 Intent 기반 �
 ```typescript
 {
   metadata: {
+    filePath: string;
+    relativePath: string;
+    sizeBytes: number;
     lineCount: number;
-    language: string;
-    lastModified: string;
-    isConfigFile: boolean;
+    language: string | null;
+    lastModified?: string; // ISO date string
+    newlineStyle?: "lf" | "crlf" | "mixed";
+    encoding?: string;
+    hasBOM?: boolean;
+    usesTabs?: boolean;
+    indentSize?: number | null;
+    isConfigFile?: boolean;
+    configType?: "tsconfig" | "package.json" | "lintrc" | "editorconfig" | "other";
+    configScope?: "project" | "directory" | "file";
   };
   structure: {
-    skeleton: string;         // 주요 심볼과 구조만 남긴 요약본
-    complexity: {
+    skeleton: string;
+    symbols: SymbolInfo[];
+    complexity?: {
       functionCount: number;
-      maxNestingDepth: number;
+      linesOfCode: number;
+      maxNestingDepth?: number;
     };
   };
   usage: {
-    incomingFiles: string[];  // 이 파일을 import하는 파일들
-    outgoingFiles: string[];  // 이 파일이 import하는 파일들
-    testFiles: string[];      // 관련 테스트 파일
+    incomingCount: number;
+    incomingFiles: string[];
+    outgoingCount?: number;
+    outgoingFiles?: string[];
+    testFiles?: string[];
+  };
+  guidance: {
+    bodyHidden: boolean;
+    readFullHint: string;
+    readFragmentHint: string;
   };
 }
 ```
@@ -375,7 +394,19 @@ Smart Context는 ADR-020 워크플로우를 커버하는 5개의 Intent 기반 �
 ```
 
 ### `write_file`
-파일 전체 내용을 덮어씁니다. 내부적으로 캐시 무효화를 트리거합니다.
+파일 전체 내용을 덮어씁니다. 내부적으로 인덱스/캐시 무효화를 트리거합니다.
+
+**Parameters**
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `path` | string | ✅ | 파일 경로 |
+| `content` | string | ✅ | 새 파일 내용 |
+| `filePath` | string | | `path`의 레거시 이름 |
+
+**Example**
+```json
+{ "path": "README.md", "content": "# Updated\n" }
+```
 
 ---
 
