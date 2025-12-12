@@ -113,14 +113,14 @@ export class TrigramIndex {
 
     public async search(term: string, limit: number = 200): Promise<SearchCandidate[]> {
         await this.ensureReady();
-        const sanitized = this.normalizeQuery(term);
+        const sanitized = TrigramIndex.normalizeQuery(term);
         if (!sanitized) {
             return [];
         }
         if (sanitized.length < 3) {
             return this.searchBySubstring(sanitized, limit);
         }
-        const trigramCounts = this.extractTrigramCounts(sanitized);
+        const trigramCounts = TrigramIndex.extractTrigramCounts(sanitized);
         if (trigramCounts.size === 0) {
             return [];
         }
@@ -224,7 +224,7 @@ export class TrigramIndex {
         } catch {
             return;
         }
-        const trigramFreq = this.extractTrigramCounts(content);
+        const trigramFreq = TrigramIndex.extractTrigramCounts(content);
         this.removeEntry(relativePath);
         const entry: FileEntry = {
             path: relativePath,
@@ -258,7 +258,7 @@ export class TrigramIndex {
         }
     }
 
-    private extractTrigramCounts(content: string): Map<string, number> {
+    public static extractTrigramCounts(content: string): Map<string, number> {
         const freq = new Map<string, number>();
         const normalized = content.replace(/[\r\n]+/g, " ").toLowerCase();
         if (normalized.length < 3) {
@@ -298,7 +298,7 @@ export class TrigramIndex {
         return results;
     }
 
-    private normalizeQuery(input: string): string {
+    public static normalizeQuery(input: string): string {
         return input.normalize("NFKC").trim().toLowerCase();
     }
 

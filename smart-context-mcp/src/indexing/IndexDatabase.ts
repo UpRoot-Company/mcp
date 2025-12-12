@@ -55,6 +55,10 @@ export class IndexDatabase {
         this.statements = this.prepareStatements();
     }
 
+    public getHandle(): Database.Database {
+        return this.db;
+    }
+
     private ensureDataDir(): string {
         const dataDir = path.join(this.rootPath, '.smart-context');
         fs.mkdirSync(dataDir, { recursive: true });

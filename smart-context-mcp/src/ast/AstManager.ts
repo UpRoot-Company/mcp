@@ -4,26 +4,7 @@ import { WebTreeSitterBackend } from './WebTreeSitterBackend.js';
 import { JsAstBackend } from './JsAstBackend.js';
 import { SnapshotBackend } from './SnapshotBackend.js';
 import { EngineConfig } from '../types.js';
-
-const EXT_TO_LANG: Record<string, string> = {
-    '.ts': 'typescript',
-    '.mts': 'typescript',
-    '.cts': 'typescript',
-    '.tsx': 'tsx',
-    '.js': 'tsx',
-    '.mjs': 'tsx',
-    '.cjs': 'tsx',
-    '.jsx': 'tsx',
-    '.py': 'python',
-    '.go': 'go',
-    '.rs': 'rust',
-    '.java': 'java',
-    '.c': 'c',
-    '.cpp': 'cpp',
-    '.json': 'json',
-    '.yaml': 'yaml',
-    '.yml': 'yaml'
-};
+import { LanguageConfigLoader } from '../config/LanguageConfig.js';
 
 export class AstManager {
     private static instance: AstManager;
@@ -31,6 +12,7 @@ export class AstManager {
     private backend: AstBackend;
     private engineConfig: EngineConfig;
     private activeBackend?: string;
+    private languageConfig?: LanguageConfigLoader;
 
     private constructor() {
         this.backend = new WebTreeSitterBackend();
@@ -46,16 +28,28 @@ export class AstManager {
 
     public static resetForTesting(): void {
         if (AstManager.instance) {
+            (AstManager.instance.backend as any)?.dispose?.();
             AstManager.instance.initialized = false;
             AstManager.instance.backend = new WebTreeSitterBackend();
             AstManager.instance.engineConfig = { mode: 'prod', parserBackend: 'auto' };
             AstManager.instance.activeBackend = undefined;
+            AstManager.instance.languageConfig?.dispose();
+            AstManager.instance.languageConfig = undefined;
         }
     }
 
     public async init(config?: EngineConfig): Promise<void> {
         const resolved = this.resolveConfig(config);
         this.engineConfig = resolved;
+        const root = resolved.rootPath ?? process.cwd();
+        this.languageConfig?.dispose();
+        this.languageConfig = new LanguageConfigLoader(root);
+        const isTestEnv = resolved.mode === 'test' || process.env.NODE_ENV === 'test' || process.env.JEST_WORKER_ID !== undefined;
+        if (!isTestEnv) {
+            this.languageConfig.watch(() => {
+                console.info('[LanguageConfig] Reloaded language mappings');
+            });
+        }
 
         if (this.initialized) {
             return;
@@ -71,15 +65,15 @@ export class AstManager {
 
     public async parseFile(filePath: string, content: string): Promise<AstDocument> {
         if (!this.initialized) await this.init();
-        return this.backend.parseFile(filePath, content);
+        const mapping = this.getLanguageMapping(filePath);
+        return this.backend.parseFile(filePath, content, mapping?.languageId);
     }
 
     public async getParserForFile(filePath: string): Promise<any> {
         if (!this.initialized) await this.init();
-        let langName: string;
-        try {
-            langName = this.resolveLanguageId(filePath);
-        } catch {
+        const mapping = this.getLanguageMapping(filePath);
+        const langName = mapping?.languageId;
+        if (!langName) {
             return null;
         }
         if (typeof (this.backend as any).getParser === 'function') {
@@ -95,27 +89,9 @@ export class AstManager {
 
     public async getLanguageForFile(filePath: string): Promise<any> {
         if (!this.initialized) await this.init();
-        
-        // This assumes backend can return a language object compatible with what caller needs (Query)
-        // WebTreeSitterBackend returns a tree-sitter Language.
-        // We need to map filePath to languageId.
-        // WebTreeSitterBackend has this logic inside parseFile.
-        // We need to expose it or duplicate it. 
-        // Ideally AstBackend has 'identifyLanguage(filePath)'?
-        // Or we just pass the extension/hint to getLanguage.
-        
-        const ext = path.extname(filePath).toLowerCase();
-        // Duplicate map for now or move to shared? 
-        // It's in WebTreeSitterBackend. 
-        // Let's rely on standard extension mapping or ask backend.
-        // For now, let's hardcode common ones or use a shared constant.
-        // I'll stick to the one in WebTreeSitterBackend but I can't access it easily.
-        // I'll just copy the map here for getLanguage resolution if needed, OR 
-        // better: AstBackend should have getLanguageId(filePath).
-        
-        // For minimal changes:
-        const langName = this.resolveLanguageId(filePath);
-        return this.backend.getLanguage(langName);
+        const mapping = this.getLanguageMapping(filePath);
+        const languageId = mapping?.languageId ?? path.extname(filePath).replace('.', '');
+        return this.backend.getLanguage(languageId);
     }
 
     public getLanguageId(filePath: string): string {
@@ -190,7 +166,9 @@ export class AstManager {
             try {
                 const backend = this.instantiateBackend(candidate);
                 await backend.initialize();
+                const previousBackend = this.backend;
                 this.backend = backend;
+                (previousBackend as any)?.dispose?.();
                 this.initialized = true;
                 this.activeBackend = candidate;
                 return;
@@ -203,11 +181,19 @@ export class AstManager {
     }
 
     private resolveLanguageId(filePath: string): string {
-        const ext = path.extname(filePath).toLowerCase();
-        const langName = EXT_TO_LANG[ext];
-        if (!langName) {
-            throw new Error(`Unsupported language for ${filePath}`);
+        const mapping = this.getLanguageMapping(filePath);
+        if (mapping?.languageId) {
+            return mapping.languageId;
         }
-        return langName;
+        const fallback = path.extname(filePath).replace('.', '');
+        if (fallback) {
+            return fallback;
+        }
+        throw new Error(`Unsupported language for ${filePath}`);
+    }
+
+    private getLanguageMapping(filePath: string) {
+        const ext = path.extname(filePath).toLowerCase();
+        return this.languageConfig?.getLanguageMapping(ext);
     }
 }

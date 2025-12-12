@@ -3,6 +3,8 @@ import { BM25FRanking, BM25FConfig } from "./Ranking.js";
 import { FileSearchResult, Document, SearchOptions, SearchFieldType, SymbolInfo } from "../types.js";
 import { TrigramIndex, TrigramIndexOptions } from "./TrigramIndex.js";
 import { IFileSystem } from "../platform/FileSystem.js";
+import { CallGraphMetricsBuilder, CallGraphSignals } from "./CallGraphMetricsBuilder.js";
+import { CallGraphBuilder } from "../ast/CallGraphBuilder.js";
 
 const BUILTIN_EXCLUDE_GLOBS = [
     "**/node_modules/**",
@@ -35,6 +37,7 @@ interface SearchQuery {
 
 export interface SymbolMetadataProvider {
     getSymbolsForFile(filePath: string): Promise<SymbolInfo[]>;
+    getAllSymbols?(): Promise<Map<string, SymbolInfo[]>>;
 }
 
 export interface SearchEngineOptions {
@@ -43,6 +46,7 @@ export interface SearchEngineOptions {
     trigram?: TrigramIndexOptions;
     symbolMetadataProvider?: SymbolMetadataProvider;
     fieldWeights?: BM25FConfig["fieldWeights"];
+    callGraphBuilder?: CallGraphBuilder;
 }
 
 export class SearchEngine {
@@ -56,6 +60,8 @@ export class SearchEngine {
     private readonly symbolMetadataProvider?: SymbolMetadataProvider;
     private readonly symbolCache = new Map<string, SymbolInfo[]>();
     private readonly symbolLoaders = new Map<string, Promise<SymbolInfo[]>>();
+    private readonly callGraphMetricsBuilder?: CallGraphMetricsBuilder;
+    private callGraphSignals?: Map<string, CallGraphSignals>;
 
     constructor(rootPath: string, fileSystem: IFileSystem, initialExcludeGlobs: string[] = [], options: SearchEngineOptions = {}) {
         this.rootPath = path.resolve(rootPath);
@@ -66,6 +72,9 @@ export class SearchEngine {
         this.maxPreviewLength = options.maxPreviewLength ?? DEFAULT_PREVIEW_LENGTH;
         this.maxMatchesPerFile = options.maxMatchesPerFile ?? DEFAULT_MATCHES_PER_FILE;
         this.symbolMetadataProvider = options.symbolMetadataProvider;
+        this.callGraphMetricsBuilder = options.callGraphBuilder
+            ? new CallGraphMetricsBuilder(options.callGraphBuilder)
+            : undefined;
         this.trigramIndex = new TrigramIndex(this.rootPath, this.fileSystem, {
             ignoreGlobs: this.defaultExcludeGlobs,
             ...options.trigram
@@ -80,16 +89,19 @@ export class SearchEngine {
         await this.trigramIndex.rebuild();
         this.symbolCache.clear();
         this.symbolLoaders.clear();
+        this.callGraphSignals = undefined;
     }
 
     public async invalidateFile(absPath: string): Promise<void> {
         await this.trigramIndex.refreshFile(absPath);
         this.dropSymbolMetadata(absPath);
+        this.callGraphSignals = undefined;
     }
 
     public async invalidateDirectory(absDir: string): Promise<void> {
         await this.trigramIndex.refreshDirectory(absDir);
         this.dropSymbolMetadata(absDir, true);
+        this.callGraphSignals = undefined;
     }
 
     public escapeRegExp(value: string, options: SearchOptions = {}): string {
@@ -185,16 +197,19 @@ export class SearchEngine {
         const documents: Document[] = Array.from(matchesById.entries()).map(([docId, match]) => {
             const originPath = matchOrigins.get(docId);
             const originScore = originPath ? candidateScores.get(originPath) ?? 0 : 0;
+            const meta = fieldAssignments.get(docId);
             return {
                 id: docId,
                 text: match.preview,
                 score: originScore,
                 filePath: match.filePath,
-                fieldType: fieldAssignments.get(docId)
+                fieldType: meta?.fieldType,
+                symbolId: meta?.symbolId
             };
         });
         const queryText = queries.map(q => q.raw).join(" ");
-        const rankedDocuments = this.bm25Ranking.rank(documents, queryText);
+        const callGraphSignals = await this.getCallGraphSignals();
+        const rankedDocuments = this.bm25Ranking.rank(documents, queryText, callGraphSignals);
 
         return rankedDocuments.map(doc => {
             const match = matchesById.get(doc.id);
@@ -334,40 +349,41 @@ export class SearchEngine {
         return `${trimmed.slice(0, this.maxPreviewLength - 1)}…`;
     }
 
-    private async assignFieldTypes(matches: Map<string, FileSearchResult>): Promise<Map<string, SearchFieldType>> {
-        const assignments = new Map<string, SearchFieldType>();
+    private async assignFieldTypes(matches: Map<string, FileSearchResult>): Promise<Map<string, { fieldType: SearchFieldType; symbolId?: string }>> {
+        const assignments = new Map<string, { fieldType: SearchFieldType; symbolId?: string }>();
         const tasks = Array.from(matches.entries()).map(async ([docId, match]) => {
-            const fieldType = await this.classifyField(match.filePath, match.lineNumber, match.preview);
-            assignments.set(docId, fieldType);
+            const meta = await this.classifyField(match.filePath, match.lineNumber, match.preview);
+            assignments.set(docId, meta);
         });
         await Promise.all(tasks);
         return assignments;
     }
 
-    private async classifyField(relativePath: string, lineNumber: number, preview: string): Promise<SearchFieldType> {
+    private async classifyField(relativePath: string, lineNumber: number, preview: string): Promise<{ fieldType: SearchFieldType; symbolId?: string }> {
         if (this.isCommentLine(preview)) {
-            return "comment";
+            return { fieldType: "comment" };
         }
         const symbol = await this.findSymbolForLine(relativePath, lineNumber);
         if (symbol && symbol.range) {
             const startLine = symbol.range.startLine + 1;
             const endLine = symbol.range.endLine + 1;
             const exportFlag = this.isExportedSymbol(symbol);
+            const symbolId = this.makeSymbolId(relativePath, symbol.name);
             if (lineNumber === startLine) {
-                return "symbol-definition";
+                return { fieldType: "symbol-definition", symbolId };
             }
             const signatureBoundary = Math.min(endLine, startLine + 2);
             if (lineNumber > startLine && lineNumber <= signatureBoundary) {
-                return "signature";
+                return { fieldType: "signature", symbolId };
             }
             if (exportFlag) {
-                return "exported-member";
+                return { fieldType: "exported-member", symbolId };
             }
         }
         if (/^\s*export\s+/i.test(preview)) {
-            return "exported-member";
+            return { fieldType: "exported-member" };
         }
-        return "code-body";
+        return { fieldType: "code-body" };
     }
 
     private async findSymbolForLine(relativePath: string, lineNumber: number): Promise<SymbolInfo | undefined> {
@@ -430,6 +446,56 @@ export class SearchEngine {
         return relativePath.replace(/\\/g, "/");
     }
 
+    private makeSymbolId(relativePath: string, symbolName: string): string {
+        const normalized = this.normalizeCacheKey(relativePath);
+        return `${normalized}::${symbolName}`;
+    }
+
+    private async getCallGraphSignals(): Promise<Map<string, CallGraphSignals> | undefined> {
+        if (!this.callGraphMetricsBuilder || !this.symbolMetadataProvider?.getAllSymbols) {
+            return undefined;
+        }
+        if (this.callGraphSignals) {
+            return this.callGraphSignals;
+        }
+        const entries = await this.collectEntrySymbols(25);
+        if (entries.length === 0) {
+            return undefined;
+        }
+        this.callGraphSignals = await this.callGraphMetricsBuilder.buildMetrics(entries);
+        return this.callGraphSignals;
+    }
+
+    private async collectEntrySymbols(limit: number): Promise<Array<{ symbolName: string; filePath: string }>> {
+        if (!this.symbolMetadataProvider?.getAllSymbols) {
+            return [];
+        }
+        let symbolMap: Map<string, SymbolInfo[]> | undefined;
+        try {
+            symbolMap = await this.symbolMetadataProvider.getAllSymbols();
+        } catch (error) {
+            console.warn("[Search] Failed to load symbol metadata for call graph metrics:", error);
+            return [];
+        }
+
+        const entries: Array<{ symbolName: string; filePath: string }> = [];
+        for (const [filePath, symbols] of symbolMap.entries()) {
+            for (const symbol of symbols) {
+                if (!symbol.name || !this.isDefinitionSymbol(symbol)) {
+                    continue;
+                }
+                if (!this.isExportedSymbol(symbol)) {
+                    continue;
+                }
+                entries.push({ symbolName: symbol.name, filePath });
+                if (entries.length >= limit) {
+                    return entries;
+                }
+            }
+        }
+        return entries;
+    }
+
     private isExportedSymbol(symbol: SymbolInfo): boolean {
         if ((symbol as any).exportKind) {
             return true;
@@ -438,6 +504,11 @@ export class SearchEngine {
             return symbol.modifiers.some(mod => mod.toLowerCase() === "export");
         }
         return false;
+    }
+
+    private isDefinitionSymbol(symbol: SymbolInfo): boolean {
+        const type = (symbol as any).type;
+        return type !== "import" && type !== "export";
     }
 
     private isCommentLine(line: string): boolean {

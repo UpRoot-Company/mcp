@@ -33,6 +33,7 @@ import { IFileSystem, NodeFileSystem } from "./platform/FileSystem.js";
 import { AstAwareDiff } from "./engine/AstAwareDiff.js";
 import { IndexDatabase } from "./indexing/IndexDatabase.js";
 import { IncrementalIndexer } from "./indexing/IncrementalIndexer.js";
+import { TransactionLog, TransactionLogEntry } from "./engine/TransactionLog.js";
 
 const readFileAsync = promisify(fs.readFile);
 const writeFileAsync = promisify(fs.writeFile);
@@ -64,6 +65,7 @@ export class SmartContextServer {
     private dataFlowTracer: DataFlowTracer;
     private clusterSearchEngine: ClusterSearchEngine;
     private indexDatabase: IndexDatabase;
+    private transactionLog: TransactionLog;
     private incrementalIndexer?: IncrementalIndexer;
     private sigintListener?: () => Promise<void>;
     private static hasSigintListener = false;
@@ -91,6 +93,7 @@ export class SmartContextServer {
         this.skeletonGenerator = new SkeletonGenerator();
         this.astManager = AstManager.getInstance();
         this.indexDatabase = new IndexDatabase(this.rootPath);
+        this.transactionLog = new TransactionLog(this.indexDatabase.getHandle());
         this.symbolIndex = new SymbolIndex(this.rootPath, this.skeletonGenerator, this.ignoreGlobs, this.indexDatabase);
         this.moduleResolver = new ModuleResolver(this.rootPath);
         this.dependencyGraph = new DependencyGraph(this.rootPath, this.symbolIndex, this.moduleResolver, this.indexDatabase);
@@ -102,9 +105,15 @@ export class SmartContextServer {
         this.contextEngine = new ContextEngine(this.ig, this.fileSystem);
         this.editorEngine = new EditorEngine(this.rootPath, this.fileSystem, semanticDiffProvider);
         this.historyEngine = new HistoryEngine(this.rootPath, this.fileSystem);
-        this.editCoordinator = new EditCoordinator(this.editorEngine, this.historyEngine, this.rootPath);
+        this.editCoordinator = new EditCoordinator(this.editorEngine, this.historyEngine, {
+            rootPath: this.rootPath,
+            transactionLog: this.transactionLog,
+            fileSystem: this.fileSystem
+        });
+        void this.recoverPendingTransactions();
         this.searchEngine = new SearchEngine(this.rootPath, this.fileSystem, this.ignoreGlobs, {
-            symbolMetadataProvider: this.symbolIndex
+            symbolMetadataProvider: this.symbolIndex,
+            callGraphBuilder: this.callGraphBuilder
         });
         const precomputeEnabled = process.env.SMART_CONTEXT_DISABLE_PRECOMPUTE === 'true' ? false : !isTestEnv;
         this.clusterSearchEngine = new ClusterSearchEngine({
@@ -198,6 +207,30 @@ export class SmartContextServer {
                 `SecurityViolation: File path is outside the allowed root directory.`);
         }
         return absPath;
+    }
+
+    private async recoverPendingTransactions(): Promise<void> {
+        const pending: TransactionLogEntry[] = this.transactionLog.getPendingTransactions();
+        if (pending.length === 0) {
+            return;
+        }
+
+        for (const tx of pending) {
+            console.warn(`[Recovery] Rolling back incomplete transaction ${tx.id}`);
+            for (const snapshot of tx.snapshots) {
+                try {
+                    await this.fileSystem.writeFile(snapshot.filePath, snapshot.originalContent);
+                } catch (error) {
+                    console.error(`[Recovery] Failed to restore ${snapshot.filePath}:`, error);
+                }
+            }
+            this.transactionLog.rollback(tx.id);
+            try {
+                await this.historyEngine.removeOperation(tx.id);
+            } catch (error) {
+                console.error(`[Recovery] Failed to remove history placeholder for ${tx.id}:`, error);
+            }
+        }
     }
 
     private normalizeRelativePath(absPath: string): string {

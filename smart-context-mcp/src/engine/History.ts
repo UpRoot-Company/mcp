@@ -42,7 +42,9 @@ export class HistoryEngine {
         }
 
         const json = JSON.stringify(state, null, 2);
-        await this.fileSystem.writeFile(this.historyFilePath, json);
+        const tempPath = `${this.historyFilePath}.tmp`;
+        await this.fileSystem.writeFile(tempPath, json);
+        await this.fileSystem.rename(tempPath, this.historyFilePath);
     }
 
     public async pushOperation(op: HistoryItem): Promise<void> {
@@ -54,6 +56,25 @@ export class HistoryEngine {
         }
 
         history.redoStack = [];
+        await this.writeHistory(history);
+    }
+
+    public async replaceOperation(id: string, op: HistoryItem): Promise<void> {
+        const history = await this.readHistory();
+        const index = history.undoStack.findIndex(item => (item as any).id === id);
+        if (index === -1) {
+            history.undoStack.push(op);
+        } else {
+            history.undoStack[index] = op;
+        }
+        history.redoStack = [];
+        await this.writeHistory(history);
+    }
+
+    public async removeOperation(id: string): Promise<void> {
+        const history = await this.readHistory();
+        history.undoStack = history.undoStack.filter(item => (item as any).id !== id);
+        history.redoStack = history.redoStack.filter(item => (item as any).id !== id);
         await this.writeHistory(history);
     }
 

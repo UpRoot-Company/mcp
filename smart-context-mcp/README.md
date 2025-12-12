@@ -62,6 +62,52 @@ npm install smart-context-mcp
 
 ---
 
+## 🈯 Language Configuration (`.smart-context/languages.json`)
+
+Smart Context는 파일 확장자 → Tree-sitter 언어 ID 매핑을 기본 내장하고 있습니다.  
+프로젝트에서 **새 언어를 추가하거나 확장자 매핑을 오버라이드**하려면 루트에 아래 파일을 두면 됩니다:
+
+```
+.smart-context/languages.json
+```
+
+### Schema
+
+```jsonc
+{
+  "version": 1,
+  "mappings": {
+    ".ext": {
+      "languageId": "tree-sitter-language-id",
+      "parserBackend": "web-tree-sitter",
+      "wasmPath": "/optional/custom/path/to/tree-sitter-ext.wasm"
+    }
+  }
+}
+```
+
+### Fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `version` | number | | 스키마 버전. 현재 `1` |
+| `mappings` | object | ✅ | 확장자별 매핑 테이블 |
+| `mappings[".ext"].languageId` | string | ✅ | Tree-sitter 언어 식별자 (`typescript`, `tsx`, `python`, …) |
+| `mappings[".ext"].parserBackend` | `"web-tree-sitter"` \| `"ts-compiler"` | ✅ | 파서 백엔드 선택. 대부분은 `web-tree-sitter` |
+| `mappings[".ext"].wasmPath` | string | | 커스텀 wasm 경로. 지정 없으면 `tree-sitter-wasms` 패키지에서 자동 탐색 |
+
+### Behavior
+
+- **Built-in + User merge**: 기본 매핑 위에 사용자 매핑을 덮어씁니다.
+- **Hot reload**: `prod/ci` 모드에서 파일 변경을 감지해 자동 재로딩합니다. (`test` 모드에서는 watcher 비활성)
+- **Graceful fallback**: 파일이 없거나 JSON이 깨져 있어도 기본 매핑으로 동작합니다.
+
+### Example
+
+예시 파일은 `docs/etc/languages.example.json`을 참고하세요.
+
+---
+
 ## 📚 Tool Reference
 
 Smart Context는 ADR-020 워크플로우를 커버하는 5개의 Intent 기반 도구를 제공합니다.

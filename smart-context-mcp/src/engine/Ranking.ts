@@ -1,6 +1,7 @@
 
 import * as path from "path";
 import { Document, ScoreDetails, SearchFieldType } from "../types.js";
+import { CallGraphSignals } from "./CallGraphMetricsBuilder.js";
 
 const DEFAULT_FIELD_WEIGHTS: Record<SearchFieldType, number> = {
     "symbol-definition": 10,
@@ -20,6 +21,9 @@ export class BM25FRanking {
     private readonly k1: number;
     private readonly b: number;
     private readonly fieldWeights: Record<SearchFieldType, number>;
+    private readonly callGraphWeight = 2.0;
+    private readonly referenceCountWeight = 1.5;
+    private readonly entryPointBoost = 3.0;
 
     constructor(config: BM25FConfig = {}) {
         this.k1 = config.k1 ?? 1.2;
@@ -30,7 +34,7 @@ export class BM25FRanking {
         };
     }
 
-    public rank(documents: Document[], query: string): Document[] {
+    public rank(documents: Document[], query: string, callGraphSignals?: Map<string, CallGraphSignals>): Document[] {
         if (documents.length === 0) return [];
 
         const tokenizedDocs = documents.map(doc => ({
@@ -71,7 +75,8 @@ export class BM25FRanking {
             const depthMultiplier = this.calculateDepthMultiplier(derivedFilePath);
             const fieldType = doc.fieldType ?? "code-body";
             const fieldWeight = this.fieldWeights[fieldType] ?? 1;
-            const totalScore = contentScore * filenameImpact.multiplier * depthMultiplier * fieldWeight;
+            const callGraphBoost = this.computeCallGraphBoost(doc.symbolId, callGraphSignals);
+            const totalScore = contentScore * filenameImpact.multiplier * depthMultiplier * fieldWeight * callGraphBoost;
             const details: ScoreDetails = {
                 contentScore,
                 filenameMultiplier: filenameImpact.multiplier,
@@ -79,7 +84,8 @@ export class BM25FRanking {
                 fieldWeight,
                 totalScore,
                 filenameMatchType: filenameImpact.matchType,
-                fieldType
+                fieldType,
+                callGraphBoost
             };
             doc.score = totalScore;
             doc.filePath = derivedFilePath ?? doc.filePath;
@@ -144,5 +150,19 @@ export class BM25FRanking {
         const normalizedSegments = filePath.split(/[\\/]/).filter(segment => segment.length > 0);
         const depth = Math.max(normalizedSegments.length - 1, 0);
         return 1 / (depth + 1);
+    }
+
+    private computeCallGraphBoost(symbolId: string | undefined, signals?: Map<string, CallGraphSignals>): number {
+        if (!symbolId || !signals) {
+            return 1;
+        }
+        const signal = signals.get(symbolId);
+        if (!signal) {
+            return 1;
+        }
+        const depthFactor = signal.isEntryPoint ? this.entryPointBoost : Math.max(0.5, 1 / (signal.depth + 1));
+        const popularityBoost = Math.log2(signal.inDegree + signal.outDegree + 2);
+        const pageRankBoost = signal.pageRank ? (1 + signal.pageRank * 5) : 1;
+        return (1 + (depthFactor * this.callGraphWeight) + (popularityBoost * this.referenceCountWeight)) * pageRankBoost;
     }
 }

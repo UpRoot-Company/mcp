@@ -26,6 +26,7 @@ export interface ScoreDetails {
     totalScore: number;
     filenameMatchType: "exact" | "partial" | "none";
     fieldType?: SearchFieldType;
+    callGraphBoost?: number;
 }
 
 export type CallType = "direct" | "method" | "constructor" | "callback" | "optional" | "unknown";
@@ -220,6 +221,7 @@ export interface Document {
     filePath?: string;
     scoreDetails?: ScoreDetails;
     fieldType?: SearchFieldType;
+    symbolId?: string;
 }
 
 export interface FileMatch {

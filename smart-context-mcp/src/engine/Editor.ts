@@ -7,6 +7,7 @@ import levenshtein from "fast-levenshtein";
 import { DiffMode, Edit, EditOperation, EditResult, LineRange, MatchDiagnostics, ToolSuggestion, SemanticDiffProvider, SemanticDiffSummary } from "../types.js";
 import { LineCounter } from "./LineCounter.js";
 import { IFileSystem } from "../platform/FileSystem.js";
+import { TrigramIndex } from "./TrigramIndex.js";
 const require = createRequire(import.meta.url);
 let importedXxhash: any = null;
 try {
@@ -136,6 +137,27 @@ export class EditorEngine {
         return pattern;
     }
 
+    private trigramKeys(value: string): Set<string> {
+        return new Set(TrigramIndex.extractTrigramCounts(value).keys());
+    }
+
+    private jaccardSimilarity(a: Set<string>, b: Set<string>): number {
+        if (a.size === 0 && b.size === 0) {
+            return 1;
+        }
+        let intersection = 0;
+        for (const token of a) {
+            if (b.has(token)) {
+                intersection++;
+            }
+        }
+        const union = a.size + b.size - intersection;
+        if (union === 0) {
+            return 0;
+        }
+        return intersection / union;
+    }
+
     private normalizeString(str: string, level: NormalizationLevel): string {
         if (level === "exact") return str;
         
@@ -244,9 +266,9 @@ export class EditorEngine {
     ): Match[] {
         const targetLen = target.length;
         
-        if (targetLen >= 512) {
+        if (targetLen >= 256) {
             throw new Error(
-                `Levenshtein fuzzy matching works best with strings under 512 characters.\n` +
+                `Levenshtein fuzzy matching works best with strings under 256 characters.\n` +
                 `Your target is ${targetLen} characters.\n` +
                 `Suggestions:\n` +
                 `- Break into smaller edits\n` +
@@ -255,90 +277,120 @@ export class EditorEngine {
             );
         }
 
-        // Dynamic tolerance: smaller strings need stricter matching
         const tolerance = targetLen < 10 
-            ? Math.max(1, Math.floor(targetLen * 0.2))  // 20% for short strings
-            : Math.floor(targetLen * 0.3);  // 30% for longer strings
-        
-        const windowSize = targetLen + tolerance;
-        const candidates: { start: number; end: number; distance: number; original: string }[] = [];
-        
-        // Optimize: Use lineRange to constrain search space
-        let searchStart = 0;
-        let searchEnd = content.length;
-        
-        if (lineRange) {
-            const lines = content.split('\n');
-            let charOffset = 0;
-            // Map line numbers to character offsets
-            // Note: LineCounter is 0-indexed internally? Editor usually passes 1-based lineRange.
-            // Let's assume lineRange is 1-based as per usual user input.
-            // LineCounter.getLineNumber returns 1-based.
-            
-            // We can iterate lines to find start/end indices.
-            // But getting ALL lines might be heavy. 
-            // Since we don't have a reverse LineCounter, we scan.
-            
-            for (let i = 0; i < lines.length; i++) {
-                const currentLineNum = i + 1;
-                const lineLen = lines[i].length + 1; // +1 for newline (approx, split consumes it)
-                
-                if (currentLineNum === lineRange.start) {
-                    searchStart = charOffset;
-                }
-                if (currentLineNum === lineRange.end) {
-                    searchEnd = charOffset + lines[i].length; 
-                    // We don't break immediately because we might need to finish the line?
-                    // actually if lineRange.end is the last line, searchEnd is end of that line.
-                    break; 
-                }
-                charOffset += lineLen;
+            ? Math.max(1, Math.floor(targetLen * 0.2))
+            : Math.floor(targetLen * 0.3);
+
+        const timeoutMs = 5000;
+        const deadline = Date.now() + timeoutMs;
+        const targetTrigrams = this.trigramKeys(target);
+        const { start: searchStart, end: searchEnd } = lineRange
+            ? this.getCharRangeForLineRange(lineRange, lineCounter, content.length)
+            : { start: 0, end: content.length };
+
+        const lines = content.split(/\r?\n/);
+        const strongCandidates: Array<{ lineNumber: number; similarity: number }> = [];
+        const allCandidates: Array<{ lineNumber: number; similarity: number }> = [];
+
+        for (let i = 0; i < lines.length; i++) {
+            const lineNumber = i + 1;
+            if (lineRange && (lineNumber < lineRange.start || lineNumber > lineRange.end)) {
+                continue;
+            }
+            const lineTrigrams = this.trigramKeys(lines[i]);
+            const similarity = this.jaccardSimilarity(targetTrigrams, lineTrigrams);
+            const entry = { lineNumber, similarity };
+            allCandidates.push(entry);
+            if (similarity >= 0.3) {
+                strongCandidates.push(entry);
             }
         }
-        
-        const MAX_OPS = 1000000;
+
+        if (allCandidates.length === 0) {
+            const fallbackLine = Math.min(
+                Math.max(1, lineRange?.start ?? 1),
+                Math.max(1, lineCounter.lineCount)
+            );
+            allCandidates.push({ lineNumber: fallbackLine, similarity: 0 });
+        }
+
+        let candidates = strongCandidates.length > 0 ? strongCandidates : allCandidates;
+        candidates = [...candidates]
+            .sort((a, b) => b.similarity - a.similarity)
+            .slice(0, 50);
+
+        const matches: { start: number; end: number; distance: number; original: string }[] = [];
+        const MAX_OPS = 100000;
         let ops = 0;
+        const minLen = Math.max(1, targetLen - tolerance);
+        const maxWindow = targetLen + tolerance;
 
-        for (let i = searchStart; i <= searchEnd - targetLen && i <= content.length - targetLen; i++) {
-            ops++;
-            if (ops > MAX_OPS) {
-                throw new Error(
-                    `Fuzzy search exceeded computational limit.\n` +
-                    `Suggestions:\n` +
-                    `- Add lineRange to narrow search scope\n` +
-                    `- Use more specific targetString\n` +
-                    `- Try fuzzyMode: "whitespace" instead`
-                );
+        for (const candidate of candidates) {
+            const lineStart = lineCounter.getCharIndexForLine(candidate.lineNumber);
+            const windowStart = Math.max(searchStart, Math.max(0, lineStart - maxWindow));
+            const windowEnd = Math.min(searchEnd, Math.min(content.length, lineStart + maxWindow * 2));
+
+            if (windowEnd <= windowStart) {
+                continue;
             }
 
-            if (!this.isBoundaryPosition(content, i)) continue;
+            for (let position = windowStart; position <= windowEnd - minLen; position++) {
+                if (!this.isBoundaryPosition(content, position)) continue;
 
-            const windowEnd = Math.min(i + windowSize, searchEnd);
-            const window = content.substring(i, windowEnd);
+                const maxCandidateEnd = Math.min(windowEnd, position + maxWindow);
+                const usableLength = maxCandidateEnd - position;
+                const maxLen = Math.min(usableLength, targetLen + tolerance);
 
-            const minLen = Math.max(1, targetLen - tolerance);
-            const maxLen = Math.min(window.length, targetLen + tolerance);
-            
-            for (let len = minLen; len <= maxLen; len++) {
-                const candidateStr = window.substring(0, len);
-                const distance = levenshtein.get(target, candidateStr);
+                for (let len = minLen; len <= maxLen; len++) {
+                    if (Date.now() > deadline) {
+                        throw new Error(
+                            `Fuzzy match exceeded ${timeoutMs}ms timeout.\n` +
+                            `Suggestions:\n` +
+                            `- Narrow the search scope with lineRange\n` +
+                            `- Use more specific targetString\n` +
+                            `- Try fuzzyMode: "whitespace" instead`
+                        );
+                    }
 
-                if (distance <= tolerance) {
-                    candidates.push({
-                        start: i,
-                        end: i + len,
-                        distance,
-                        original: candidateStr
-                    });
+                    ops++;
+                    if (ops > MAX_OPS) {
+                        throw new Error(
+                            `Fuzzy search exceeded computational limit.\n` +
+                            `Suggestions:\n` +
+                            `- Add lineRange to narrow search scope\n` +
+                            `- Use more specific targetString\n` +
+                            `- Try fuzzyMode: "whitespace" instead`
+                        );
+                    }
+
+                    const candidateStr = content.substring(position, position + len);
+                    if (!candidateStr) {
+                        continue;
+                    }
+
+                    const localTrigrams = this.trigramKeys(candidateStr);
+                    const similarity = this.jaccardSimilarity(targetTrigrams, localTrigrams);
+                    if (similarity < 0.2) {
+                        continue;
+                    }
+
+                    const distance = levenshtein.get(target, candidateStr);
+                    if (distance <= tolerance) {
+                        matches.push({
+                            start: position,
+                            end: position + len,
+                            distance,
+                            original: candidateStr
+                        });
+                    }
                 }
             }
         }
 
-        // Deduplicate
-        candidates.sort((a, b) => a.distance - b.distance || a.start - b.start);
+        matches.sort((a, b) => a.distance - b.distance || a.start - b.start);
         const uniqueMatches: Match[] = [];
         
-        for (const cand of candidates) {
+        for (const cand of matches) {
             const isOverlapping = uniqueMatches.some(m => 
                 (cand.start >= m.start && cand.start < m.end) || 
                 (cand.end > m.start && cand.end <= m.end)

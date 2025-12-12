@@ -17,6 +17,7 @@ export interface FileStats {
 export interface IFileSystem {
     readFile(path: string): Promise<string>;
     writeFile(path: string, content: string): Promise<void>;
+    rename(from: string, to: string): Promise<void>;
     deleteFile(path: string): Promise<void>;
     exists(path: string): Promise<boolean>;
     readDir(path: string): Promise<string[]>;
@@ -47,6 +48,12 @@ export class NodeFileSystem implements IFileSystem {
 
     async writeFile(targetPath: string, content: string): Promise<void> {
         await fsPromises.writeFile(this.resolvePath(targetPath), content, "utf-8");
+    }
+
+    async rename(from: string, to: string): Promise<void> {
+        const fromResolved = this.resolvePath(from);
+        const toResolved = this.resolvePath(to);
+        await fsPromises.rename(fromResolved, toResolved);
     }
 
     async deleteFile(targetPath: string): Promise<void> {
@@ -174,6 +181,29 @@ export class MemoryFileSystem implements IFileSystem {
             mtime: Date.now(),
         });
         this.notifyWatchers(resolved, existed ? "update" : "create");
+    }
+
+    async rename(from: string, to: string): Promise<void> {
+        const fromResolved = this.resolvePath(from);
+        const toResolved = this.resolvePath(to);
+
+        if (this.files.has(fromResolved)) {
+            const entry = this.files.get(fromResolved)!;
+            this.files.delete(fromResolved);
+            this.files.set(toResolved, { ...entry, mtime: Date.now() });
+            this.notifyWatchers(toResolved, "update");
+            return;
+        }
+
+        if (this.directories.has(fromResolved)) {
+            const entry = this.directories.get(fromResolved)!;
+            this.directories.delete(fromResolved);
+            this.directories.set(toResolved, { ...entry, mtime: Date.now() });
+            this.notifyWatchers(toResolved, "update");
+            return;
+        }
+
+        throw new Error(`ENOENT: no such file or directory, rename '${fromResolved}' -> '${toResolved}'`);
     }
 
     async deleteFile(targetPath: string): Promise<void> {
