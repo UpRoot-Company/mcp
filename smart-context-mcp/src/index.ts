@@ -697,6 +697,15 @@ export class SmartContextServer {
         if (symbolResults.length === 0) {
             symbolResults = await this.runSymbolSearchResults(args.query, maxResults);
         }
+
+        // Fallback to text search if no symbols found in auto mode
+        if (symbolResults.length === 0) {
+            const fileResults = await this.runFileSearchResults(args.query, maxResults);
+            if (fileResults.length > 0) {
+                return { results: fileResults, inferredType: "file" };
+            }
+        }
+
         return { results: symbolResults, inferredType: "symbol" };
     }
 
