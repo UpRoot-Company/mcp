@@ -18,6 +18,7 @@ import {
 } from "../types.js";
 import { IFileSystem } from "../platform/FileSystem.js";
 import { TransactionLog, TransactionSnapshot } from "./TransactionLog.js";
+import { metrics } from "../utils/MetricsCollector.js";
 
 interface EditCoordinatorInitOptions {
     rootPath?: string;
@@ -456,6 +457,7 @@ export class EditCoordinator {
                 const restoredHash = this.computeHash(restored);
                 if (restoredHash !== snapshot.originalHash) {
                     console.error(`[EditCoordinator] Hash mismatch after rollback for ${snapshot.filePath}`);
+                    metrics.inc("transactions.hash_mismatch");
                 }
             } catch (error) {
                 console.error(`[EditCoordinator] Failed to restore ${snapshot.filePath}:`, error);

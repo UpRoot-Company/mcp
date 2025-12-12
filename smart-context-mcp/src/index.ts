@@ -34,6 +34,7 @@ import { AstAwareDiff } from "./engine/AstAwareDiff.js";
 import { IndexDatabase } from "./indexing/IndexDatabase.js";
 import { IncrementalIndexer } from "./indexing/IncrementalIndexer.js";
 import { TransactionLog, TransactionLogEntry } from "./engine/TransactionLog.js";
+import { metrics } from "./utils/MetricsCollector.js";
 
 const readFileAsync = promisify(fs.readFile);
 const writeFileAsync = promisify(fs.writeFile);
@@ -1204,6 +1205,17 @@ export class SmartContextServer {
                 const status = await this.dependencyGraph.getIndexStatus();
                 return { output: "Index status retrieved.", data: status };
             }
+            case "metrics": {
+                const snapshot = metrics.snapshot();
+                const indexerStats = this.incrementalIndexer?.getQueueStats();
+                return {
+                    output: "Metrics snapshot retrieved.",
+                    data: {
+                        ...snapshot,
+                        indexer: indexerStats
+                    }
+                };
+            }
             default:
                 throw new McpError(ErrorCode.InvalidParams, `Unknown manage_project command '${args.command}'.`);
         }
@@ -1334,7 +1346,41 @@ export class SmartContextServer {
                     properties: {
                         command: { type: "string", enum: ["undo", "redo", "guidance", "status"] }
                     },
-                    required: ["command"]
+                                        required: ["command"]
+                }
+            },
+            {
+                name: "read_file",
+                description: "Reads the complete content of a file. This is a compatibility alias for 'read_code'.",
+                inputSchema: {
+                    type: "object",
+                    properties: {
+                        path: { type: "string", description: "Path to the file" }
+                    },
+                    required: ["path"]
+                }
+            },
+            {
+                name: "write_file",
+                description: "Overwrites the entire content of a file. This is a compatibility alias for simple file writing.",
+                inputSchema: {
+                    type: "object",
+                    properties: {
+                        path: { type: "string", description: "Path to the file" },
+                        content: { type: "string", description: "New content for the file" }
+                    },
+                    required: ["path", "content"]
+                }
+            },
+            {
+                name: "analyze_file",
+                description: "Generates a comprehensive profile of a file, including metadata, structure, complexity, and dependencies.",
+                inputSchema: {
+                    type: "object",
+                    properties: {
+                        path: { type: "string", description: "Path to the file" }
+                    },
+                    required: ["path"]
                 }
             }
         ];
@@ -1363,13 +1409,34 @@ export class SmartContextServer {
                     const result = await this.executeManageProject(args as ManageProjectArgs);
                     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
                 }
-                case "read_file": {
-                    const absPath = this._getAbsPathAndVerify(args.filePath);
-                    const content = await readFileAsync(absPath, 'utf-8');
-
-                    if (args?.full) {
-                        return { content: [{ type: "text", text: content }] };
+                                case "read_file": {
+	                    const filePath = args.path || args.filePath;
+	                    if (!filePath) {
+	                        return this._createErrorResponse("MissingParameter", "Provide 'path' to read_file.");
+	                    }
+	                    const absPath = this._getAbsPathAndVerify(filePath);
+	                    const content = await readFileAsync(absPath, "utf-8");
+	                    const fullMode = args.full === true || args.view === "full";
+	                    if (fullMode) {
+	                        return { content: [{ type: "text", text: content }] };
+	                    }
+	                    try {
+	                        const stats = await statAsync(absPath);
+	                        const profile = await this.buildSmartFileProfile(absPath, content, stats);
+	                        return { content: [{ type: "text", text: JSON.stringify(profile, null, 2) }] };
+	                    } catch (error: any) {
+	                        console.error(`Failed to build Smart File Profile for ${absPath}:`, error);
+	                        return this._createErrorResponse("ProfileBuildFailed", `Failed to build Smart File Profile: ${error.message}`);
+	                    }
+	                }
+                case "analyze_file": {
+                    // Logic moved from old read_file
+                    const filePath = args.path || args.filePath;
+                    if (!filePath) {
+                        return this._createErrorResponse("MissingParameter", "Provide 'path' to analyze_file.");
                     }
+                    const absPath = this._getAbsPathAndVerify(filePath);
+                    const content = await readFileAsync(absPath, 'utf-8');
 
                     try {
                         const stats = await statAsync(absPath);
@@ -1573,14 +1640,25 @@ export class SmartContextServer {
                     const result: ReadFragmentResult = await this.contextEngine.readFragment(absPath, ranges, args.contextLines);
                     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
                 }
-                case "write_file": {
-                    const absPath = this._getAbsPathAndVerify(args.filePath);
+                                case "write_file": {
+                    // Simple overwrite alias
+                    const filePath = args.path || args.filePath;
+                    if (!filePath) {
+                        return this._createErrorResponse("MissingParameter", "Provide 'path' to write_file.");
+                    }
+                    if (args.content === undefined) {
+                        return this._createErrorResponse("MissingParameter", "Provide 'content' to write_file.");
+                    }
+                    const absPath = this._getAbsPathAndVerify(filePath);
                     await writeFileAsync(absPath, args.content);
+                    
+                    // Invalidate caches
                     this.callGraphBuilder.invalidateFile(absPath);
                     this.typeDependencyTracker.invalidateFile(absPath);
                     this.clusterSearchEngine.invalidateFile(absPath);
                     await this.searchEngine.invalidateFile(absPath);
-                    return { content: [{ type: "text", text: `Successfully wrote to ${args.filePath}` }] };
+                    
+                    return { content: [{ type: "text", text: `Successfully wrote to ${filePath}` }] };
                 }
                 case "edit_file": {
                     const absPath = this._getAbsPathAndVerify(args.filePath);

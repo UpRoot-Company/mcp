@@ -556,7 +556,7 @@ export interface EditCodeResult {
     transactionId?: string;
 }
 
-export type ManageProjectCommand = "undo" | "redo" | "guidance" | "status";
+export type ManageProjectCommand = "undo" | "redo" | "guidance" | "status" | "metrics";
 
 export interface ManageProjectArgs {
     command: ManageProjectCommand;

@@ -2,6 +2,7 @@ import Database from 'better-sqlite3';
 import * as fs from 'fs';
 import * as path from 'path';
 import { SymbolInfo } from '../types.js';
+import { MigrationRunner } from "./MigrationRunner.js";
 
 export interface FileRecord {
     id: number;
@@ -52,6 +53,7 @@ export class IndexDatabase {
         const dbPath = this.ensureDataDir();
         this.db = new Database(dbPath);
         this.configure();
+        new MigrationRunner(this.db).run();
         this.statements = this.prepareStatements();
     }
 

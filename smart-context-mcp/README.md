@@ -16,6 +16,9 @@ Smart Context MCP는 AI 에이전트가 코드베이스를 효과적으로 탐�
 | `analyze_relationship` | 의존성, 콜그래프, 타입, 데이터 플로우 분석 |
 | `edit_code` | 원자적 코드 편집 (생성/삭제/교체) |
 | `manage_project` | 프로젝트 관리 (undo/redo/상태/가이던스) |
+| `read_file` | `read_code`의 별칭 (호환성 제공) |
+| `write_file` | 파일 덮어쓰기 별칭 (호환성 제공) |
+| `analyze_file` | 상세 파일 프로필 및 메타데이터 분석 |
 
 ### 핵심 기능
 
@@ -180,7 +183,10 @@ Smart Context는 ADR-020 워크플로우를 커버하는 5개의 Intent 기반 �
 }
 ```
 
+> **Note:** `type: "auto"` 모드에서는 단순 텍스트 매칭뿐만 아니라 **Cluster Search Engine**을 가동하여 문맥적으로 연관된 심볼(시드)을 찾아내고 관련성을 점수화합니다.
+
 ---
+
 
 ### `analyze_relationship`
 
@@ -211,7 +217,7 @@ Smart Context는 ADR-020 워크플로우를 커버하는 5개의 Intent 기반 �
 {
   "target": "EditorEngine",
   "contextPath": "src/engine/Editor.ts",
-  "mode": "calls",
+    "mode": "calls",
   "direction": "downstream",
   "maxDepth": 2
 }
@@ -219,7 +225,50 @@ Smart Context는 ADR-020 워크플로우를 커버하는 5개의 Intent 기반 �
 
 ---
 
+### `analyze_file`
+
+파일의 단순 내용뿐만 아니라 구조, 복잡도, 의존성 정보를 포함한 **Smart File Profile**을 생성합니다. 코드를 읽기 전 컨텍스트를 파악하는 데 유용합니다.
+
+**Parameters**
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `path` | string | ✅ | 파일 경로 |
+
+**Returns (Smart File Profile)**
+```typescript
+{
+  metadata: {
+    lineCount: number;
+    language: string;
+    lastModified: string;
+    isConfigFile: boolean;
+  };
+  structure: {
+    skeleton: string;         // 주요 심볼과 구조만 남긴 요약본
+    complexity: {
+      functionCount: number;
+      maxNestingDepth: number;
+    };
+  };
+  usage: {
+    incomingFiles: string[];  // 이 파일을 import하는 파일들
+    outgoingFiles: string[];  // 이 파일이 import하는 파일들
+    testFiles: string[];      // 관련 테스트 파일
+  };
+}
+```
+
+**Example**
+```json
+{
+  "path": "src/engine/Editor.ts"
+}
+```
+
+---
+
 ### `edit_code`
+
 
 원자적 편집 연산을 지원하는 트랜잭션 기반 에디터입니다.
 
@@ -242,12 +291,14 @@ Smart Context는 ADR-020 워크플로우를 커버하는 5개의 Intent 기반 �
   beforeContext?: string;              // 매칭 힌트
   afterContext?: string;               // 매칭 힌트
   fuzzyMode?: "whitespace" | "levenshtein";
-  normalization?: "exact" | "whitespace" | "structural";
-  expectedHash?: { algorithm: string; value: string };
+    normalization?: "exact" | "whitespace" | "structural";
+  /** 안전한 편집을 위한 원본 해시 가드 (충돌 방지) */
+  expectedHash?: { algorithm: "sha256" | "xxhash"; value: string };
 }
 ```
 
 **Example**
+
 ```json
 {
   "dryRun": true,
@@ -290,9 +341,21 @@ Smart Context는 ADR-020 워크플로우를 커버하는 5개의 Intent 기반 �
 **Example**
 ```json
 {
-  "command": "status"
+    "command": "status"
 }
 ```
+
+---
+
+## 🔌 Compatibility Tools
+
+기존 LLM(Codex, Copilot)이나 단순한 파일 조작이 필요한 에이전트를 위한 호환성 도구입니다.
+
+### `read_file`
+`read_code(view="full")`의 별칭입니다. 파일의 전체 원문을 반환합니다.
+
+### `write_file`
+파일 전체 내용을 덮어씁니다. 내부적으로 캐시 무효화를 트리거합니다.
 
 ---
 

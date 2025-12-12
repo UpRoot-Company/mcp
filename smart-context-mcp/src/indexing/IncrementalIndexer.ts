@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { SymbolIndex } from '../ast/SymbolIndex.js';
 import { DependencyGraph } from '../ast/DependencyGraph.js';
+import { metrics } from "../utils/MetricsCollector.js";
 
 export interface IncrementalIndexerOptions {
     watch?: boolean;
@@ -105,6 +106,9 @@ export class IncrementalIndexer {
         if (this.queue.size > this.maxQueueDepthSeen) {
             this.maxQueueDepthSeen = this.queue.size;
         }
+        metrics.inc("indexer.events");
+        metrics.gauge("indexer.queue_depth", this.queue.size);
+        metrics.gauge("indexer.pause_ms", this.currentPauseMs);
         if (this.queue.size >= 200 && now - this.lastDepthLogAt > 5000) {
             console.info(`[IncrementalIndexer] High queue depth: ${this.queue.size} (pause=${this.currentPauseMs}ms)`);
             this.lastDepthLogAt = now;
