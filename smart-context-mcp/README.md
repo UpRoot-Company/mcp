@@ -15,7 +15,7 @@ Smart Context MCP는 AI 에이전트가 코드베이스를 효과적으로 탐�
 | `search_project` | 파일, 심볼, 디렉토리 통합 검색 |
 | `analyze_relationship` | 의존성, 콜그래프, 타입, 데이터 플로우 분석 |
 | `edit_code` | 원자적 코드 편집 (생성/삭제/교체) |
-| `manage_project` | 프로젝트 관리 (undo/redo/상태/가이던스) |
+| `manage_project` | 프로젝트 관리 (undo/redo/상태/가이던스/메트릭) |
 | `read_file` | `read_code`의 별칭 (호환성 제공) |
 | `write_file` | 파일 덮어쓰기 별칭 (호환성 제공) |
 | `analyze_file` | 상세 파일 프로필 및 메타데이터 분석 |
@@ -60,8 +60,11 @@ npm install smart-context-mcp
 |----------|-------------|---------|
 | `SMART_CONTEXT_DEBUG` | 디버그 로그 활성화 | `false` |
 | `SMART_CONTEXT_DISABLE_PRECOMPUTE` | 클러스터 사전 계산 비활성화 | `false` |
+| `SMART_CONTEXT_DISABLE_STREAMING_INDEX` | 증분 인덱싱/스트리밍 인덱서 비활성화 | `false` |
 | `SMART_CONTEXT_ENGINE_MODE` | 엔진 모드 (`prod`/`ci`/`test`) | `prod` |
 | `SMART_CONTEXT_PARSER_BACKEND` | 파서 백엔드 (`wasm`/`js`/`snapshot`/`auto`) | `auto` |
+| `SMART_CONTEXT_SNAPSHOT_DIR` | 스냅샷 파서 백엔드가 사용할 디렉토리 | _(unset)_ |
+| `SMART_CONTEXT_ROOT_PATH` / `SMART_CONTEXT_ROOT` | 프로젝트 루트 경로 오버라이드 | _(unset)_ |
 
 ---
 
@@ -104,6 +107,16 @@ Smart Context는 파일 확장자 → Tree-sitter 언어 ID 매핑을 기본 내
 - **Built-in + User merge**: 기본 매핑 위에 사용자 매핑을 덮어씁니다.
 - **Hot reload**: `prod/ci` 모드에서 파일 변경을 감지해 자동 재로딩합니다. (`test` 모드에서는 watcher 비활성)
 - **Graceful fallback**: 파일이 없거나 JSON이 깨져 있어도 기본 매핑으로 동작합니다.
+
+### Generate Default Config (CLI)
+
+기본 언어 매핑 파일을 빠르게 생성하려면 아래 CLI를 사용할 수 있습니다:
+
+```bash
+npx smart-context-gen-languages
+```
+
+실행 시 프로젝트 루트에 `.smart-context/languages.json`이 생성되며, 이후 필요에 맞게 수정하면 됩니다.
 
 ### Example
 
@@ -328,7 +341,7 @@ Smart Context는 ADR-020 워크플로우를 커버하는 5개의 Intent 기반 �
 **Parameters**
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `command` | `"undo"` \| `"redo"` \| `"guidance"` \| `"status"` | ✅ | 실행할 명령 |
+| `command` | `"undo"` \| `"redo"` \| `"guidance"` \| `"status"` \| `"metrics"` | ✅ | 실행할 명령 |
 
 **Commands**
 | Command | Description |
@@ -337,6 +350,7 @@ Smart Context는 ADR-020 워크플로우를 커버하는 5개의 Intent 기반 �
 | `redo` | 취소한 편집 재적용 |
 | `guidance` | 에이전트 워크플로우 가이드 반환 |
 | `status` | 인덱스 상태 및 프로젝트 정보 |
+| `metrics` | 메트릭 스냅샷 및 인덱서 큐 상태 반환 |
 
 **Example**
 ```json
@@ -352,7 +366,13 @@ Smart Context는 ADR-020 워크플로우를 커버하는 5개의 Intent 기반 �
 기존 LLM(Codex, Copilot)이나 단순한 파일 조작이 필요한 에이전트를 위한 호환성 도구입니다.
 
 ### `read_file`
-`read_code(view="full")`의 별칭입니다. 파일의 전체 원문을 반환합니다.
+호환성 도구입니다. 기본 동작은 `analyze_file`과 동일하게 **Smart File Profile(JSON)**을 반환합니다.  
+원문이 필요하면 `full: true`(또는 `view: "full"`)를 지정하세요.
+
+**Example**
+```json
+{ "path": "src/index.ts", "full": true }
+```
 
 ### `write_file`
 파일 전체 내용을 덮어씁니다. 내부적으로 캐시 무효화를 트리거합니다.
