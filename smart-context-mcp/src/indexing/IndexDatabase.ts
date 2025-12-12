@@ -50,11 +50,40 @@ export class IndexDatabase {
     private readonly statements: StatementMap;
 
     constructor(private readonly rootPath: string) {
-        const dbPath = this.ensureDataDir();
-        this.db = new Database(dbPath);
-        this.configure();
-        new MigrationRunner(this.db).run();
-        this.statements = this.prepareStatements();
+        let dbPath: string = ':memory:';
+        try {
+            dbPath = this.ensureDataDir();
+            this.db = new Database(dbPath);
+        } catch (error) {
+            console.error(`[IndexDatabase] Failed to open database at ${path.join(this.rootPath, '.smart-context')}:`, error);
+            console.error('[IndexDatabase] Falling back to in-memory database. Persistence will be disabled.');
+            this.db = new Database(':memory:');
+        }
+        
+        try {
+            this.configure();
+            new MigrationRunner(this.db).run();
+            this.statements = this.prepareStatements();
+        } catch (error) {
+            console.error('[IndexDatabase] Failed to initialize database schema:', error);
+            // If schema init fails even in memory or after fallback, we might need a desperate fallback or re-throw
+            // But let's try to survive with in-memory if the first attempt was file-based and failed later? 
+            // Actually, if 'new Database' succeeded, configure/migration should mostly work unless sqlite binary is broken.
+            // If it was file-based and failed during configure (e.g. WAL lock), we should catch that too.
+            
+            if (this.db.name !== ':memory:') {
+                 console.error('[IndexDatabase] Retrying with in-memory database due to configuration failure.');
+                 try {
+                     this.db.close();
+                 } catch {}
+                 this.db = new Database(':memory:');
+                 this.configure();
+                 new MigrationRunner(this.db).run();
+                 this.statements = this.prepareStatements();
+            } else {
+                throw error; // Memory db failed? Something is very wrong.
+            }
+        }
     }
 
     public getHandle(): Database.Database {
