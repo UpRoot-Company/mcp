@@ -76,9 +76,9 @@ export class SmartContextServer {
         if (ENABLE_DEBUG_LOGS) {
             console.error("DEBUG: SmartContextServer constructor started");
         }
-        this.server = new Server({
+                this.server = new Server({
             name: "smart-context-mcp",
-            version: "3.2.0",
+            version: "4.0.0",
         }, {
             capabilities: {
                 tools: {},

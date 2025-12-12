@@ -2,7 +2,7 @@
 
 대규모 코드베이스에 LLM이 효율적이고 안전하며 지능적으로 접근할 수 있도록 설계된 MCP(Model Context Protocol) 서버입니다. "Scout → Read → Replace" 파이프라인을 기반으로, 토큰 사용량을 최소화하면서 코드 이해와 편집 안전성을 극대화합니다.
 
-[![Version](https://img.shields.io/badge/version-3.2.0-blue.svg)](package.json)
+[![Version](https://img.shields.io/badge/version-4.0.0-blue.svg)](package.json)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](../LICENSE)
 
 ## 🎯 Overview
@@ -627,5 +627,5 @@ Built with:
 
 ---
 
-**Version:** 3.2.0  
+**Version:** 4.0.0    
 **Last Updated:** December 2025
