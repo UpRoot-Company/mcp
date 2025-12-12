@@ -7,7 +7,7 @@
 
 ## 🎯 Overview
 
-Smart Context MCP는 AI 에이전트가 코드베이스를 효과적으로 탐색하고 수정할 수 있도록 **5가지 Intent 기반 도구**와 **호환성 도구**를 제공합니다:
+Smart Context MCP는 AI 에이전트가 코드베이스를 효과적으로 탐색하고 수정할 수 있도록 **5가지 Intent 기반(Stable) 도구**를 제공합니다:
 
 | Tool | Purpose |
 |------|---------|
@@ -16,9 +16,9 @@ Smart Context MCP는 AI 에이전트가 코드베이스를 효과적으로 탐�
 | `analyze_relationship` | 의존성, 콜그래프, 타입, 데이터 플로우 분석 |
 | `edit_code` | 원자적 코드 편집 (생성/삭제/교체) |
 | `manage_project` | 프로젝트 관리 (undo/redo/상태/가이던스/메트릭) |
-| `read_file` | 기본은 Smart File Profile(JSON), `full: true`면 원문 반환 (호환성 제공) |
-| `write_file` | 파일 전체 덮어쓰기 + 인덱스/캐시 무효화 (호환성 제공) |
-| `analyze_file` | 상세 파일 프로필 및 메타데이터 분석 |
+
+추가로, 기존 에이전트/워크플로우와의 **호환성 및 레거시 도구(Extended Tools)**는 기본적으로 숨겨져 있으며, `SMART_CONTEXT_EXPOSE_COMPAT_TOOLS=true`일 때만 노출됩니다.
+
 
 ### 핵심 기능
 
@@ -65,6 +65,9 @@ npm install smart-context-mcp
 | `SMART_CONTEXT_PARSER_BACKEND` | 파서 백엔드 (`wasm`/`js`/`snapshot`/`auto`) | `auto` |
 | `SMART_CONTEXT_SNAPSHOT_DIR` | 스냅샷 파서 백엔드가 사용할 디렉토리 | _(unset)_ |
 | `SMART_CONTEXT_ROOT_PATH` / `SMART_CONTEXT_ROOT` | 프로젝트 루트 경로 오버라이드 | _(unset)_ |
+| `SMART_CONTEXT_EXPOSE_COMPAT_TOOLS` | Extended Tools(호환성/레거시 도구) 노출 여부 | `false` |
+| `SMART_CONTEXT_READ_FILE_MAX_BYTES` | `read_file(full=true)` 최대 바이트 수(양의 정수). 잘못된 값은 기본값으로 폴백 | `65536` |
+
 
 ---
 
@@ -238,67 +241,6 @@ Smart Context는 ADR-020 워크플로우를 커버하는 5개의 Intent 기반 �
 
 ---
 
-### `analyze_file`
-
-파일의 단순 내용뿐만 아니라 구조, 복잡도, 의존성 정보를 포함한 **Smart File Profile**을 생성합니다. 코드를 읽기 전 컨텍스트를 파악하는 데 유용합니다.
-
-**Parameters**
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `path` | string | ✅ | 파일 경로 |
-
-**Returns (Smart File Profile)**
-```typescript
-{
-  metadata: {
-    filePath: string;
-    relativePath: string;
-    sizeBytes: number;
-    lineCount: number;
-    language: string | null;
-    lastModified?: string; // ISO date string
-    newlineStyle?: "lf" | "crlf" | "mixed";
-    encoding?: string;
-    hasBOM?: boolean;
-    usesTabs?: boolean;
-    indentSize?: number | null;
-    isConfigFile?: boolean;
-    configType?: "tsconfig" | "package.json" | "lintrc" | "editorconfig" | "other";
-    configScope?: "project" | "directory" | "file";
-  };
-  structure: {
-    skeleton: string;
-    symbols: SymbolInfo[];
-    complexity?: {
-      functionCount: number;
-      linesOfCode: number;
-      maxNestingDepth?: number;
-    };
-  };
-  usage: {
-    incomingCount: number;
-    incomingFiles: string[];
-    outgoingCount?: number;
-    outgoingFiles?: string[];
-    testFiles?: string[];
-  };
-  guidance: {
-    bodyHidden: boolean;
-    readFullHint: string;
-    readFragmentHint: string;
-  };
-}
-```
-
-**Example**
-```json
-{
-  "path": "src/engine/Editor.ts"
-}
-```
-
----
-
 ### `edit_code`
 
 
@@ -380,18 +322,96 @@ Smart Context는 ADR-020 워크플로우를 커버하는 5개의 Intent 기반 �
 
 ---
 
-## 🔌 Compatibility Tools
+## 🔌 Extended Tools (Opt-in)
 
-기존 LLM(Codex, Copilot)이나 단순한 파일 조작이 필요한 에이전트를 위한 호환성 도구입니다.
+기존 LLM(Codex, Copilot)이나 단순한 파일 조작이 필요한 에이전트를 위한 **호환성/레거시 도구**입니다.
+
+- 기본적으로는 **노출되지 않습니다**.
+- `SMART_CONTEXT_EXPOSE_COMPAT_TOOLS=true`일 때만 tool list에 포함됩니다.
+- Extended Tools는 안정 API(Intent 5개)보다 변화 가능성이 높으므로, 가능한 경우 Intent 도구 사용을 권장합니다.
+- 전체 호환/레거시 도구 목록은 `list tools`를 호출해 확인할 수 있습니다.
+
+
+### `analyze_file`
+(Extended Tool) 파일의 단순 내용뿐만 아니라 구조, 복잡도, 의존성 정보를 포함한 **Smart File Profile**을 생성합니다. 코드를 읽기 전 컨텍스트를 파악하는 데 유용합니다.
+
+**Parameters**
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `path` | string | ✅ | 파일 경로 |
+
+**Returns (Smart File Profile)**
+```typescript
+{
+  metadata: {
+    filePath: string;
+    relativePath: string;
+    sizeBytes: number;
+    lineCount: number;
+    language: string | null;
+    lastModified?: string; // ISO date string
+    newlineStyle?: "lf" | "crlf" | "mixed";
+    encoding?: string;
+    hasBOM?: boolean;
+    usesTabs?: boolean;
+    indentSize?: number | null;
+    isConfigFile?: boolean;
+    configType?: "tsconfig" | "package.json" | "lintrc" | "editorconfig" | "other";
+    configScope?: "project" | "directory" | "file";
+  };
+  structure: {
+    skeleton: string;
+    symbols: SymbolInfo[];
+    complexity?: {
+      functionCount: number;
+      linesOfCode: number;
+      maxNestingDepth?: number;
+    };
+  };
+  usage: {
+    incomingCount: number;
+    incomingFiles: string[];
+    outgoingCount?: number;
+    outgoingFiles?: string[];
+    testFiles?: string[];
+  };
+  guidance: {
+    bodyHidden: boolean;
+    readFullHint: string;
+    readFragmentHint: string;
+  };
+}
+```
+
+**Example**
+```json
+{
+  "path": "src/engine/Editor.ts"
+}
+```
+
+---
 
 ### `read_file`
-호환성 도구입니다. 기본 동작은 `analyze_file`과 동일하게 **Smart File Profile(JSON)**을 반환합니다.  
-원문이 필요하면 `full: true`(또는 `view: "full"`)를 지정하세요.
+
+호환성 도구입니다. 기본 동작은 `analyze_file`과 동일하게 **Smart File Profile(JSON)**을 반환합니다.
+
+- 원문이 필요하면 `full: true`(또는 `view: "full"`)를 지정하세요.
+- `full: true`의 반환은 **원문 문자열을 그대로 반환하지 않고**, 아래 형태의 **JSON 래핑**을 반환합니다:
+  - `content`: (부분) 원문 문자열
+  - `meta.truncated`: 잘림 여부
+  - `meta.maxBytes`: 적용된 최대 바이트
+  - `meta.bytesReturned`: 실제 반환 바이트(UTF-8)
+  - `meta.fileSizeBytes`: 파일 전체 크기
+- 기본 제한은 `65536`(64KB)이며, `SMART_CONTEXT_READ_FILE_MAX_BYTES`로 변경할 수 있습니다.
+  - 값이 비어있거나 숫자가 아니거나 0/음수이면 기본값으로 폴백합니다.
+  - 상한 클램프는 없으므로 큰 값을 주면 토큰/비용이 증가할 수 있습니다.
 
 **Example**
 ```json
 { "path": "src/index.ts", "full": true }
 ```
+
 
 ### `write_file`
 파일 전체 내용을 덮어씁니다. 내부적으로 인덱스/캐시 무효화를 트리거합니다.

@@ -32,12 +32,21 @@ const readErrorCode = (response: any): string | undefined => {
  *   (i.e. not succeed, and not `UnknownTool`).
  */
 describe("Tool surface consistency", () => {
-    it("listed tools are handled and schemas are coherent", async () => {
+    it("Intent tools are stable, handled, and schemas are coherent", async () => {
         const server = new SmartContextServer(process.cwd());
         const tools = (server as any).listIntentTools() as ListedTool[];
 
+        const expectedIntentTools = [
+            "read_code",
+            "search_project",
+            "analyze_relationship",
+            "edit_code",
+            "manage_project",
+        ].sort();
+
         expect(Array.isArray(tools)).toBe(true);
-        expect(tools.length).toBeGreaterThan(0);
+        expect(tools.map((t) => t.name).sort()).toEqual(expectedIntentTools);
+
 
         const distIndexPath = path.join(process.cwd(), "dist", "index.js");
         const compiled = fs.readFileSync(distIndexPath, "utf-8");
@@ -70,15 +79,45 @@ describe("Tool surface consistency", () => {
                 expect(Object.prototype.hasOwnProperty.call(properties, key)).toBe(true);
             }
 
-            // Only execute tools that declare required params; these should fail fast with empty args.
+                        // Only execute tools that declare required params; these should fail fast with empty args.
             if (required.length > 0) {
                 const response = await (server as any).handleCallTool(tool.name, {});
                 const errorCode = readErrorCode(response);
 
                 expect(response?.isError).toBe(true);
-                expect(errorCode).toBeDefined();
-                expect(errorCode).not.toBe("UnknownTool");
+                expect(errorCode).toBe("MissingParameter");
+            }
+
+        }
+        });
+
+    it("Opt-in tools are exposed only when enabled", () => {
+        const prev = process.env.SMART_CONTEXT_EXPOSE_COMPAT_TOOLS;
+        process.env.SMART_CONTEXT_EXPOSE_COMPAT_TOOLS = "true";
+
+        try {
+            const server = new SmartContextServer(process.cwd());
+            const tools = (server as any).listIntentTools() as ListedTool[];
+            const names = tools.map((t) => t.name);
+
+            expect(names).toEqual(expect.arrayContaining([
+                "read_code",
+                "search_project",
+                "analyze_relationship",
+                "edit_code",
+                "manage_project",
+                "read_file",
+                "write_file",
+                "analyze_file",
+            ]));
+            expect(names.length).toBeGreaterThan(5);
+        } finally {
+            if (prev === undefined) {
+                delete process.env.SMART_CONTEXT_EXPOSE_COMPAT_TOOLS;
+            } else {
+                process.env.SMART_CONTEXT_EXPOSE_COMPAT_TOOLS = prev;
             }
         }
     });
 });
+

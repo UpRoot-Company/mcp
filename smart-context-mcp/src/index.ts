@@ -66,9 +66,21 @@ export class SmartContextServer {
     private indexDatabase: IndexDatabase;
     private transactionLog: TransactionLog;
     private incrementalIndexer?: IncrementalIndexer;
-    private sigintListener?: () => Promise<void>;
+        private sigintListener?: () => Promise<void>;
     private static hasSigintListener = false;
     private static readonly READ_CODE_MAX_BYTES = 1_000_000;
+    private static readonly READ_FILE_DEFAULT_MAX_BYTES = 65_536;
+
+    private exposeCompatTools: boolean;
+    private readFileMaxBytes: number;
+
+    private static parsePositiveIntEnv(name: string, fallback: number): number {
+        const raw = process.env[name];
+        if (!raw) return fallback;
+        const parsed = Number.parseInt(raw, 10);
+        if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+        return parsed;
+    }
 
         constructor(rootPath: string, fileSystem?: IFileSystem) {
         if (ENABLE_DEBUG_LOGS) {
@@ -95,7 +107,13 @@ export class SmartContextServer {
                 this.rootRealPath = undefined;
             }
         }
-        const isTestEnv = process.env.NODE_ENV === 'test' || process.env.JEST_WORKER_ID !== undefined;
+                const isTestEnv = process.env.NODE_ENV === 'test' || process.env.JEST_WORKER_ID !== undefined;
+        this.exposeCompatTools = process.env.SMART_CONTEXT_EXPOSE_COMPAT_TOOLS === 'true';
+        this.readFileMaxBytes = SmartContextServer.parsePositiveIntEnv(
+            'SMART_CONTEXT_READ_FILE_MAX_BYTES',
+            SmartContextServer.READ_FILE_DEFAULT_MAX_BYTES
+        );
+
         this.ig = (ignore.default as any)();
         this.ignoreGlobs = this._loadIgnoreFiles();
 
@@ -1334,8 +1352,8 @@ export class SmartContextServer {
         });
     }
 
-    private listIntentTools() {
-        return [
+        private listIntentTools() {
+        const intentTools = [
             {
                 name: "read_code",
                 description: "Reads code with full, skeleton, or fragment views and standardized metadata.",
@@ -1416,7 +1434,7 @@ export class SmartContextServer {
                     required: ["edits"]
                 }
             },
-                        {
+            {
                 name: "manage_project",
                 description: "Runs project-level commands like undo, redo, workflow guidance, index status, and metrics.",
                 inputSchema: {
@@ -1426,10 +1444,17 @@ export class SmartContextServer {
                     },
                     required: ["command"]
                 }
-            },
-                        {
+            }
+        ];
+
+        if (!this.exposeCompatTools) {
+            return intentTools;
+        }
+
+        const extendedTools = [
+            {
                 name: "read_file",
-                description: "Reads a file. Returns a Smart File Profile by default; set full=true (or view=\"full\") for raw content.",
+                                description: "Reads a file. Returns a Smart File Profile by default; set full=true (or view=\"full\") for JSON-wrapped raw content (may be truncated).",
                 inputSchema: {
                     type: "object",
                     properties: {
@@ -1694,30 +1719,53 @@ export class SmartContextServer {
                     properties: { symbolName: { type: "string" }, definitionFilePath: { type: "string" }, newName: { type: "string" } },
                     required: ["symbolName", "definitionFilePath", "newName"]
                 }
-            }
+                        }
         ];
+
+        return [...intentTools, ...extendedTools];
     }
 
     private async handleCallTool(toolName: string, args: any): Promise<any> {
         try {
             switch (toolName) {
-                case "read_code": {
+                                case "read_code": {
+                    if (!args || typeof args.filePath !== "string") {
+                        return this._createErrorResponse("MissingParameter", "Provide 'filePath' to read_code.");
+                    }
+                    if (args.view === "fragment" && typeof args.lineRange !== "string") {
+                        return this._createErrorResponse("MissingParameter", "Provide 'lineRange' when view=\"fragment\".");
+                    }
                     const result = await this.executeReadCode(args as ReadCodeArgs);
                     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
                 }
-                case "search_project": {
+                                case "search_project": {
+                    if (!args || typeof args.query !== "string") {
+                        return this._createErrorResponse("MissingParameter", "Provide 'query' to search_project.");
+                    }
                     const result = await this.executeSearchProject(args as SearchProjectArgs);
                     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
                 }
-                case "analyze_relationship": {
+                                case "analyze_relationship": {
+                    if (!args || typeof args.target !== "string") {
+                        return this._createErrorResponse("MissingParameter", "Provide 'target' to analyze_relationship.");
+                    }
+                    if (typeof args.mode !== "string") {
+                        return this._createErrorResponse("MissingParameter", "Provide 'mode' to analyze_relationship.");
+                    }
                     const result = await this.executeAnalyzeRelationship(args as AnalyzeRelationshipArgs);
                     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
                 }
-                case "edit_code": {
+                                case "edit_code": {
+                    if (!args || !Array.isArray(args.edits)) {
+                        return this._createErrorResponse("MissingParameter", "Provide 'edits' to edit_code.");
+                    }
                     const result = await this.executeEditCode(args as EditCodeArgs);
                     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
                 }
-                case "manage_project": {
+                                case "manage_project": {
+                    if (!args || typeof args.command !== "string") {
+                        return this._createErrorResponse("MissingParameter", "Provide 'command' to manage_project.");
+                    }
                     const result = await this.executeManageProject(args as ManageProjectArgs);
                     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
                 }
@@ -1735,12 +1783,28 @@ export class SmartContextServer {
                             this.fileSystem.stat(absPath)
                         ]);
 
-                        if (fullMode) {
-                            // Protect against extremely large payloads.
-                            const payload = stats.size > SmartContextServer.READ_CODE_MAX_BYTES
-                                ? content.slice(0, SmartContextServer.READ_CODE_MAX_BYTES)
-                                : content;
-                            return { content: [{ type: "text", text: payload }] };
+                                                if (fullMode) {
+                            const maxBytes = this.readFileMaxBytes;
+                            const rawBytes = Buffer.from(content, 'utf8');
+                            const truncated = rawBytes.length > maxBytes;
+                            const payloadBytes = truncated ? rawBytes.subarray(0, maxBytes) : rawBytes;
+                            const payload = payloadBytes.toString('utf8');
+
+                            const result = {
+                                content: payload,
+                                meta: {
+                                    truncated,
+                                    bytesReturned: Buffer.byteLength(payload, 'utf8'),
+                                    maxBytes,
+                                    fileSizeBytes: stats.size,
+                                    nextAction: {
+                                        tool: "read_code",
+                                        args: { filePath, view: "skeleton" }
+                                    }
+                                }
+                            };
+
+                            return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
                         }
 
                         const profile = await this.buildSmartFileProfile(absPath, content, stats);

@@ -78,12 +78,45 @@ function doSomethingIsolated() {
         fs.rmSync(testRootDir, { recursive: true, force: true });
     });
 
-    it('should return raw content when full: true is provided', async () => {
+        it('should return JSON-wrapped raw content when full: true is provided', async () => {
         const args = { filePath: path.relative(testRootDir, fileA_Path), full: true };
         const response = await (server as any).handleCallTool('read_file', args);
 
-        expect(response.content[0].text).toBe(fileA_Content);
+        const payload = JSON.parse(response.content[0].text);
+        expect(payload.content).toBe(fileA_Content);
+        expect(payload.meta.truncated).toBe(false);
+        expect(typeof payload.meta.bytesReturned).toBe('number');
+        expect(typeof payload.meta.maxBytes).toBe('number');
+        expect(typeof payload.meta.fileSizeBytes).toBe('number');
+        expect(payload.meta.nextAction.tool).toBe('read_code');
+        expect(payload.meta.nextAction.args.view).toBe('skeleton');
     });
+
+    it('should truncate JSON-wrapped raw content when SMART_CONTEXT_READ_FILE_MAX_BYTES is small', async () => {
+        const prev = process.env.SMART_CONTEXT_READ_FILE_MAX_BYTES;
+        process.env.SMART_CONTEXT_READ_FILE_MAX_BYTES = '32';
+        try {
+            const smallServer = new SmartContextServer(testRootDir);
+            const args = { filePath: path.relative(testRootDir, fileA_Path), full: true };
+            const response = await (smallServer as any).handleCallTool('read_file', args);
+            const payload = JSON.parse(response.content[0].text);
+
+            expect(payload.meta.maxBytes).toBe(32);
+                        expect(payload.meta.truncated).toBe(true);
+            expect(payload.meta.bytesReturned).toBeLessThanOrEqual(32);
+            expect(typeof payload.content).toBe('string');
+            expect(payload.content.length).toBeGreaterThan(0);
+            expect(payload.content).not.toBe(fileA_Content);
+
+        } finally {
+            if (prev === undefined) {
+                delete process.env.SMART_CONTEXT_READ_FILE_MAX_BYTES;
+            } else {
+                process.env.SMART_CONTEXT_READ_FILE_MAX_BYTES = prev;
+            }
+        }
+    });
+
 
     it('should return a Smart File Profile by default (full: false)', async () => {
         const args = { filePath: path.relative(testRootDir, fileA_Path) };
