@@ -243,8 +243,7 @@ Smart Context는 ADR-020 워크플로우를 커버하는 5개의 Intent 기반 �
 
 ### `edit_code`
 
-
-원자적 편집 연산을 지원하는 트랜잭션 기반 에디터입니다.
+원자적 편집 연산을 지원하는 트랜잭션 기반 에디터입니다. **Confidence-Based Matching System(ADR-024)**을 통해 공백, 라인 엔딩, 들여쓰기 차이를 자동으로 허용하면서도 안전성을 유지합니다.
 
 **Parameters**
 | Parameter | Type | Required | Description |
@@ -253,42 +252,259 @@ Smart Context는 ADR-020 워크플로우를 커버하는 5개의 Intent 기반 �
 | `dryRun` | boolean | | 검증만 수행 (기본값: `false`) |
 | `createMissingDirectories` | boolean | | 누락된 디렉토리 생성 (기본값: `false`) |
 | `ignoreMistakes` | boolean | | 유연한 매칭 모드 활성화 (기본값: `false`) |
+| `refactoringContext` | object | | 대규모 리팩토링 컨텍스트 (편집 10개+ 시 가이던스 제공) |
 
-**Edit Operations**
+**Edit Operations Schema**
 ```typescript
 {
-  filePath: string;                    // 대상 파일 경로
-  operation: "replace" | "create" | "delete";
-  targetString?: string;               // replace 시 필수
-  replacementString?: string;          // replace/create 시 필수
-  lineRange?: { start: number; end: number };
-  beforeContext?: string;              // 매칭 힌트
-  afterContext?: string;               // 매칭 힌트
+  filePath: string;                    // 대상 파일 경로 (필수)
+  operation: "replace" | "create" | "delete"; // 연산 타입 (필수)
+
+  // replace/create 관련 필드
+  targetString?: string;               // replace 시 대상 문자열 (필수)
+  replacementString?: string;          // replace/create 시 내용 (필수)
+
+  // 매칭 정확도 개선 필드
+  lineRange?: { start: number; end: number };  // 검색 범위 제한
+  beforeContext?: string;              // 매칭 전후 컨텍스트 (ambiguity 제거)
+  afterContext?: string;               // 매칭 전후 컨텍스트 (ambiguity 제거)
+  indexRange?: { start: number; end: number }; // 정확한 위치 지정 (매우 정확)
+
+  // 유연한 매칭 설정 (ADR-024)
+  normalization?: "exact" | "line-endings" | "trailing" | "indentation" | "whitespace" | "structural";
+  normalizationConfig?: {
+    tabWidth?: number;                 // 들여쓰기 탭 크기 (기본값: 4)
+    preserveIndentation?: boolean;     // 들여쓰기 보존 (기본값: true)
+  };
+
+  // 레거시 fuzzy 모드 (normalization 권장)
   fuzzyMode?: "whitespace" | "levenshtein";
-    normalization?: "exact" | "whitespace" | "structural";
-  /** 안전한 편집을 위한 원본 해시 가드 (충돌 방지) */
-  expectedHash?: { algorithm: "sha256" | "xxhash"; value: string };
+
+  // Delete operation 안전성 (ADR-024 Phase 3)
+  confirmationHash?: string;           // 대용량 파일(>10KB/100줄) 삭제 시 필수
+  safetyLevel?: "strict" | "normal" | "force"; // 기본값: "strict"
+
+  // Replace operation 안전성
+  expectedHash?: { algorithm: "sha256" | "xxhash"; value: string }; // 충돌 방지
 }
 ```
 
-**Example**
+#### Confidence-Based Normalization (6-Level Hierarchy)
+
+`edit_code`는 매칭 강도를 6단계로 점진적으로 확대합니다. 정확한 매칭에 실패하면 자동으로 다음 수준을 시도합니다:
+
+| Level | Type | 허용되는 차이 | 적용 예시 | 신뢰도 |
+|-------|------|------------|---------|--------|
+| 1 | `exact` | 없음 (완벽한 일치) | 정확한 코드 복사본 | 100% |
+| 2 | `line-endings` | CRLF ↔ LF 만 다름 | Windows ↔ Unix 파일 | 95% |
+| 3 | `trailing` | 위 + 줄 끝 공백 무시 | 에디터 자동정리 후 코드 | 90% |
+| 4 | `indentation` | 위 + 탭 ↔ 스페이스 정규화 | 들여쓰기 설정 변경 후 코드 | 87% |
+| 5 | `whitespace` | 위 + 내부 공백 축약 | 포매팅 변경 후 코드 | 82% |
+| 6 | `structural` | 위 + 빈 줄/공백 제거 | 완전히 다시 포매팅된 코드 | 75% |
+
+**동작 예시:**
+
+```typescript
+// 파일 내용: const  x  =  1;  (공백 2개씩)
+// 다음 코드는 모두 성공함
+
+// ✅ exact 매칭 실패 → line-endings 시도 (성공)
+{ normalization: "line-endings", targetString: "const  x  =  1;" }
+
+// ✅ whitespace 정규화로 공백 축약
+{ normalization: "whitespace", targetString: "const x = 1;" }
+
+// ✅ 명시적 구조 정규화
+{ normalization: "structural", targetString: "const x = 1;" }
+```
+
+**Normalization 선택 가이드:**
+
+- **`exact`**: 신뢰도가 최우선인 경우 (코드 생성 후 즉시 편집)
+- **`line-endings`**: Windows ↔ Unix 환경 차이만 우려되는 경우
+- **`trailing`**: 에디터 자동정리가 가능한 파일
+- **`indentation`**: 들여쓰기 설정이 변경된 파일
+- **`whitespace`**: 코드 포매터(Prettier 등) 실행 후의 코드
+- **`structural`**: 큰 리팩토링에서 구조는 같지만 형식이 완전히 다를 때 (위험 ⚠️ - 명시적 확인 필수)
+
+#### Safe Delete Operations (ADR-024 Phase 3)
+
+**대용량 파일 삭제는 2단계 확인 프로세스입니다:**
+
+**Step 1: 드라이런으로 대상 파일 정보 확인**
 
 ```json
 {
   "dryRun": true,
+  "edits": [{
+    "filePath": "src/legacy/old-api.ts",
+    "operation": "delete"
+  }]
+}
+```
+
+**응답 (파일이 10KB 초과 또는 100줄 초과인 경우):**
+
+```json
+{
+  "success": true,
+  "results": [{
+    "filePath": "src/legacy/old-api.ts",
+    "applied": false,
+    "fileSize": 15234,
+    "lineCount": 456,
+    "contentPreview": "import express from 'express';\n\nexport class OldAPI {\n  ...[truncated]",
+    "diff": "📋 Dry Run: Would delete file\n  Size: 15234 bytes (456 lines)\n  Hash: a3f5e9d8c7b6..."
+  }]
+}
+```
+
+**Step 2: 확인 해시 제공**
+
+응답에서 받은 `Hash` 값을 `confirmationHash`로 제공하세요:
+
+```json
+{
+  "edits": [{
+    "filePath": "src/legacy/old-api.ts",
+    "operation": "delete",
+    "confirmationHash": "a3f5e9d8c7b6a5f4e3d2c1b0a9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c3b2a1"
+  }]
+}
+```
+
+**응답:**
+
+```json
+{
+  "success": true,
+  "results": [{
+    "filePath": "src/legacy/old-api.ts",
+    "applied": true,
+    "fileSize": 15234,
+    "lineCount": 456,
+    "diff": "Deleted file (15234 bytes, 456 lines, hash a3f5e9...)."
+  }]
+}
+```
+
+**안전 설정:**
+
+| Level | 동작 | 사용 예시 |
+|-------|------|---------|
+| `strict` (기본값) | 대용량 파일은 `confirmationHash` 필수 | 실수 방지 필수 |
+| `normal` | 대용량 파일도 `confirmationHash` 없이 삭제 가능 | (권장 아님) |
+| `force` | 모든 파일 즉시 삭제 | 테스트/자동화만 사용 |
+
+⚠️ **주의:** 파일이 삭제되면 **롤백은 불가능합니다**. 드라이런으로 항상 먼저 확인하세요!
+
+#### Large Refactoring Context Guidance (ADR-024 Phase 4)
+
+10개 이상의 편집이 포함되면 자동으로 최적화 제안을 받습니다:
+
+```json
+{
+  "refactoringContext": {
+    "pattern": "rename-symbol",
+    "scope": "project",
+    "estimatedEdits": 25
+  },
+  "edits": [
+    { "filePath": "src/auth.ts", "operation": "replace", "targetString": "authenticate", "replacementString": "auth" },
+    { "filePath": "src/api.ts", "operation": "replace", "targetString": "authenticate", "replacementString": "auth" },
+    // ... 25개 편집
+  ]
+}
+```
+
+**응답에 포함된 가이던스:**
+
+```
+⚠️  Large rename-symbol refactoring detected (25 planned edits, scope: project).
+
+💡 Consider:
+  1. Using analyze_relationship to enumerate all affected references.
+  2. Splitting the work into smaller batches (5-10 edits each).
+  3. Leveraging write_file for sweeping structural rewrites.
+
+Proceeding with current batch...
+```
+
+**전략별 추천:**
+
+| 전략 | 적합한 경우 | 예시 |
+|-----|----------|------|
+| 배치 처리 (5-10 편집) | 각 변경이 독립적 | 여러 파일의 import 변경 |
+| `analyze_relationship` + 배치 | 변경 범위 불명확 | 심볼 이름 변경 (참조 찾기 필요) |
+| `write_file` + 전체 재작성 | 파일 구조 대폭 변경 | 컴포넌트 리팩토링 (내용 85% 이상 변경) |
+
+---
+
+#### 실전 예제
+
+**예제 1: Whitespace 정규화를 활용한 유연한 매칭**
+
+```json
+{
+  "edits": [{
+    "filePath": "src/config.ts",
+    "operation": "replace",
+    "targetString": "const DEFAULT_TIMEOUT = 5000;",
+    "replacementString": "const DEFAULT_TIMEOUT = 10000;",
+    "normalization": "whitespace"
+  }]
+}
+```
+
+**예제 2: 대용량 파일 삭제 (2단계 프로세스)**
+
+```json
+// Step 1: 드라이런
+{
+  "dryRun": true,
+  "edits": [{
+    "filePath": "legacy/deprecated.ts",
+    "operation": "delete"
+  }]
+}
+
+// Step 2: 해시 포함하여 실제 삭제
+{
+  "edits": [{
+    "filePath": "legacy/deprecated.ts",
+    "operation": "delete",
+    "confirmationHash": "a3f5e9d8c7b6a5f4e3d2c1b0a9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c3b2a1"
+  }]
+}
+```
+
+**예제 3: 다중 파일 기호 이름 변경**
+
+```json
+{
+  "dryRun": true,
+  "refactoringContext": {
+    "pattern": "rename-symbol",
+    "scope": "project",
+    "estimatedEdits": 12
+  },
   "edits": [
     {
-      "filePath": "src/engine/Search.ts",
+      "filePath": "src/auth.ts",
       "operation": "replace",
-      "targetString": "const DEFAULT_LIMIT = 50;",
-      "replacementString": "const DEFAULT_LIMIT = 100;",
-      "fuzzyMode": "whitespace"
+      "targetString": "validateUser",
+      "replacementString": "authenticateUser",
+      "normalization": "exact"
     },
     {
-      "filePath": "src/utils/helper.ts",
-      "operation": "create",
-      "replacementString": "export function helper() {\n  return true;\n}"
+      "filePath": "src/api.ts",
+      "operation": "replace",
+      "targetString": "validateUser",
+      "replacementString": "authenticateUser",
+      "beforeContext": "import { validateUser } from",
+      "normalization": "whitespace"
     }
+    // ... 추가 파일들
   ]
 }
 ```
