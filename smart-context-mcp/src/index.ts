@@ -37,6 +37,8 @@ import { IndexDatabase } from "./indexing/IndexDatabase.js";
 import { IncrementalIndexer } from "./indexing/IncrementalIndexer.js";
 import { TransactionLog, TransactionLogEntry } from "./engine/TransactionLog.js";
 import { metrics } from "./utils/MetricsCollector.js";
+import { PathNormalizer } from "./utils/PathNormalizer.js";
+import { RootDetector } from "./utils/RootDetector.js";
 
 
 const ENABLE_DEBUG_LOGS = process.env.SMART_CONTEXT_DEBUG === 'true';
@@ -76,6 +78,7 @@ export class SmartContextServer {
 
     private exposeCompatTools: boolean;
     private readFileMaxBytes: number;
+    private pathNormalizer: PathNormalizer;
 
     private static parsePositiveIntEnv(name: string, fallback: number): number {
         const raw = process.env[name];
@@ -119,6 +122,9 @@ export class SmartContextServer {
 
         this.ig = (ignore.default as any)();
         this.ignoreGlobs = this._loadIgnoreFiles();
+
+        // 경로 정규화 초기화 (절대경로 ↔ 상대경로 자동 변환)
+        this.pathNormalizer = new PathNormalizer(this.rootPath);
 
         this.skeletonGenerator = new SkeletonGenerator();
         this.astManager = AstManager.getInstance();
@@ -1100,6 +1106,21 @@ export class SmartContextServer {
         if (!args || !Array.isArray(args.edits) || args.edits.length === 0) {
             throw new McpError(ErrorCode.InvalidParams, "Provide at least one edit in 'edits'.");
         }
+
+        // 🔄 경로 정규화: 절대경로를 상대경로로 자동 변환
+        // IDE 플러그인(VSCode)은 절대경로를 전송하고, CLI는 상대경로를 전송합니다.
+        // 여기서 자동으로 정규화하므로 두 형태 모두 지원됩니다.
+        args.edits = args.edits.map(edit => {
+            try {
+                const normalizedPath = this.pathNormalizer.normalize(edit.filePath);
+                return { ...edit, filePath: normalizedPath };
+            } catch (error: any) {
+                // 경로 정규화 실패 시 원본 경로 사용하고 나중에 에러 처리
+                console.warn(`[PathNormalizer] Failed to normalize path "${edit.filePath}": ${error.message}`);
+                return edit;
+            }
+        });
+
         const dryRun = Boolean(args.dryRun);
         const createDirs = Boolean(args.createMissingDirectories);
         const ignoreMistakes = Boolean(args.ignoreMistakes);
