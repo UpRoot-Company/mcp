@@ -4,6 +4,13 @@ import * as fs from 'fs';
 import * as os from 'os';
 import { RootDetector } from '../../utils/RootDetector.js';
 
+// Helper function to compare paths by resolving symlinks
+function expectSamePath(received: string, expected: string) {
+    const realReceived = fs.realpathSync(received);
+    const realExpected = fs.realpathSync(expected);
+    expect(realReceived).toBe(realExpected);
+}
+
 describe('RootDetector', () => {
     let testDir: string;
     let projectRoot: string;
@@ -64,7 +71,8 @@ describe('RootDetector', () => {
             try {
                 process.chdir(deeplyNestedDir);
                 const root = await RootDetector.detectRoot('.');
-                expect(root).toBe(projectRoot);
+                // Compare by resolving symlinks (handles macOS /var symlink issue)
+                expectSamePath(root, projectRoot);
             } finally {
                 process.chdir(cwd);
             }
@@ -118,7 +126,8 @@ describe('RootDetector', () => {
             try {
                 process.chdir(deeplyNestedDir);
                 const root = RootDetector.detectRootSync('.');
-                expect(root).toBe(projectRoot);
+                // Compare by resolving symlinks (handles macOS /var symlink issue)
+                expectSamePath(root, projectRoot);
             } finally {
                 process.chdir(cwd);
             }
@@ -260,7 +269,8 @@ describe('RootDetector', () => {
             try {
                 process.chdir(deeplyNestedDir);
                 const root = await RootDetector.detectCurrentProjectRoot();
-                expect(root).toBe(projectRoot);
+                // Compare by resolving symlinks (handles macOS /var symlink issue)
+                expectSamePath(root, projectRoot);
             } finally {
                 process.chdir(cwd);
             }
@@ -276,7 +286,8 @@ describe('RootDetector', () => {
             try {
                 process.chdir(customDir);
                 const root = await RootDetector.detectCurrentProjectRoot(['.custom-root']);
-                expect(root).toBe(customRoot);
+                // Compare by resolving symlinks (handles macOS /var symlink issue)
+                expectSamePath(root, customRoot);
             } finally {
                 process.chdir(cwd);
                 fs.rmSync(customRoot, { recursive: true, force: true });
