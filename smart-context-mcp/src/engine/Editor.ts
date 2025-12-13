@@ -236,8 +236,9 @@ export class EditorEngine {
             "structural"
         ];
 
+        // If no level specified, try all levels in hierarchy
         if (!level) {
-            return ["exact"];
+            return hierarchy;
         }
 
         const maxIndex = hierarchy.indexOf(level);
@@ -258,13 +259,16 @@ export class EditorEngine {
             case "exact":
                 return new RegExp(this.escapeRegExp(normalizedTarget), "g");
             case "line-endings": {
-                const escaped = this.escapeRegExp(normalizedTarget);
-                return new RegExp(escaped.replace(/\\n/g, "\\r?\\n"), "g");
+                // Split by newlines, escape each part, then rejoin with flexible line ending pattern
+                const parts = normalizedTarget.split("\n").map(part => this.escapeRegExp(part));
+                const pattern = parts.join("\\r?\\n");
+                return new RegExp(pattern, "g");
             }
             case "trailing": {
-                const escaped = this.escapeRegExp(normalizedTarget);
-                const withFlexibleEnds = escaped.replace(/\\n/g, "\\s*\\r?\\n");
-                return new RegExp(`${withFlexibleEnds}\\s*`, "g");
+                // Split by newlines, escape each part, allow trailing whitespace after each line
+                const parts = normalizedTarget.split("\n").map(part => this.escapeRegExp(part));
+                const pattern = parts.join("\\s*\\r?\\n\\s*");
+                return new RegExp(`${pattern}\\s*`, "g");
             }
             case "indentation": {
                 const lines = normalizedTarget.split("\n");
@@ -283,7 +287,12 @@ export class EditorEngine {
             case "whitespace": {
                 const parts = normalizedTarget
                     .split("\n")
-                    .map(line => this.escapeRegExp(line.trim()));
+                    .map(line => {
+                        // Escape the line, then convert spaces to flexible whitespace pattern
+                        const escaped = this.escapeRegExp(line.trim());
+                        // Replace single spaces with \s+ to match one or more spaces
+                        return escaped.replace(/ /g, "\\s+");
+                    });
                 const pattern = parts.join("\\s*\\r?\\n\\s*");
                 return new RegExp(pattern, "g");
             }
