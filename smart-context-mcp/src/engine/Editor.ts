@@ -4,7 +4,20 @@ import { createRequire } from "module";
 import { MyersDiff } from "./Diff.js";
 import { PatienceDiff } from "./PatienceDiff.js";
 import levenshtein from "fast-levenshtein";
-import { DiffMode, Edit, EditOperation, EditResult, LineRange, MatchDiagnostics, ToolSuggestion, SemanticDiffProvider, SemanticDiffSummary } from "../types.js";
+import {
+    DiffMode,
+    Edit,
+    EditOperation,
+    EditResult,
+    LineRange,
+    MatchConfidence,
+    MatchDiagnostics,
+    NormalizationConfig,
+    NormalizationLevel,
+    ToolSuggestion,
+    SemanticDiffProvider,
+    SemanticDiffSummary
+} from "../types.js";
 import { LineCounter } from "./LineCounter.js";
 import { IFileSystem } from "../platform/FileSystem.js";
 import { TrigramIndex } from "./TrigramIndex.js";
@@ -23,11 +36,10 @@ interface Match {
     replacement: string;
     original: string;
     lineNumber: number;
-    confidence?: number;
-    matchType?: 'exact' | 'whitespace-fuzzy' | 'levenshtein' | 'normalization';
+    matchType: 'exact' | 'whitespace-fuzzy' | 'levenshtein' | 'normalization';
+    normalizationLevel?: NormalizationLevel;
+    confidence?: MatchConfidence;
 }
-
-type NormalizationLevel = "exact" | "whitespace" | "structural";
 
 export class AmbiguousMatchError extends Error {
     public conflictingLines: number[];
@@ -158,55 +170,128 @@ export class EditorEngine {
         return intersection / union;
     }
 
-    private normalizeString(str: string, level: NormalizationLevel): string {
+    private normalizeString(str: string, level: NormalizationLevel, config?: NormalizationConfig): string {
         if (level === "exact") return str;
-        
-        let normalized = str;
-        
-        // Whitespace level: CRLF -> LF, trim trailing lines
-        if (level === "whitespace" || level === "structural") {
-            normalized = normalized.replace(/\r\n/g, '\n');
-            normalized = normalized.split('\n').map(line => line.trimEnd()).join('\n');
-        }
 
-        // Structural level: Normalize indentation to single spaces, collapse internal spacing
-        if (level === "structural") {
-            normalized = normalized.split('\n')
-                .map(line => line.trim()) // Ignore indentation completely
-                .filter(line => line.length > 0) // Ignore empty lines
-                .join('\n');
-            // Collapse internal whitespace sequences to single space
-            normalized = normalized.replace(/\s+/g, ' ');
-        }
+        const tabWidth = Math.max(1, config?.tabWidth ?? 4);
+        const preserveIndentation = config?.preserveIndentation ?? true;
 
-        return normalized;
+        switch (level) {
+            case "line-endings":
+                return str.replace(/\r\n/g, "\n");
+            case "trailing":
+                return str
+                    .replace(/\r\n/g, "\n")
+                    .split("\n")
+                    .map(line => line.replace(/\s+$/g, ""))
+                    .join("\n");
+            case "indentation":
+                return str
+                    .replace(/\r\n/g, "\n")
+                    .split("\n")
+                    .map(line => {
+                        const match = line.match(/^(\s*)(.*)$/);
+                        if (!match) return line;
+                        const [, indent, content] = match;
+                        const normalizedIndent = indent.replace(/\t/g, " ".repeat(tabWidth));
+                        return normalizedIndent + content.replace(/\s+$/g, "");
+                    })
+                    .join("\n");
+            case "whitespace":
+                return str
+                    .replace(/\r\n/g, "\n")
+                    .split("\n")
+                    .map(line => {
+                        const match = line.match(/^(\s*)(.*)$/);
+                        if (!match) return line.trim();
+                        const [, indent, content] = match;
+                        const normalizedIndent = preserveIndentation
+                            ? indent.replace(/\t/g, " ".repeat(tabWidth))
+                            : "";
+                        const normalizedContent = content.replace(/\s+/g, " ").trim();
+                        const combined = `${normalizedIndent}${normalizedContent}`;
+                        return combined.trimEnd();
+                    })
+                    .join("\n");
+            case "structural":
+                return str
+                    .replace(/\r\n/g, "\n")
+                    .split("\n")
+                    .map(line => line.trim())
+                    .filter(line => line.length > 0)
+                    .join("\n")
+                    .replace(/\s+/g, " ");
+            default:
+                return str;
+        }
     }
 
     private getNormalizationAttempts(level?: NormalizationLevel): NormalizationLevel[] {
-        if (!level || level === "exact") {
+        const hierarchy: NormalizationLevel[] = [
+            "exact",
+            "line-endings",
+            "trailing",
+            "indentation",
+            "whitespace",
+            "structural"
+        ];
+
+        if (!level) {
             return ["exact"];
         }
-        if (level === "whitespace") {
-            return ["exact", "whitespace"];
+
+        const maxIndex = hierarchy.indexOf(level);
+        if (maxIndex === -1) {
+            return ["exact"];
         }
-        return ["exact", "whitespace", "structural"];
+        return hierarchy.slice(0, maxIndex + 1);
     }
 
-    private createExactRegex(target: string, normalization: NormalizationLevel = "exact"): RegExp {
-        const normalizedTarget = this.normalizeString(target, normalization);
-        const escaped = this.escapeRegExp(normalizedTarget);
-        
-        if (normalization === "exact") {
-            return new RegExp(escaped, 'g');
-        } else if (normalization === "whitespace") {
-            // Flexible whitespace regex logic
-            // Replace \n with pattern that matches \r?\n and optional surrounding whitespace
-            const parts = escaped.split('\\n');
-            // Allow for varying indentation and line endings between lines
-            return new RegExp(parts.join('\\s*\\r?\\n\\s*'), 'g');
-        } else {
-            // Structural fallback
-            return new RegExp(escaped.replace(/\s+/g, '\\s+'), 'g');
+    private createExactRegex(
+        target: string,
+        normalization: NormalizationLevel = "exact",
+        config?: NormalizationConfig
+    ): RegExp {
+        const normalizedTarget = this.normalizeString(target, normalization, config);
+
+        switch (normalization) {
+            case "exact":
+                return new RegExp(this.escapeRegExp(normalizedTarget), "g");
+            case "line-endings": {
+                const escaped = this.escapeRegExp(normalizedTarget);
+                return new RegExp(escaped.replace(/\\n/g, "\\r?\\n"), "g");
+            }
+            case "trailing": {
+                const escaped = this.escapeRegExp(normalizedTarget);
+                const withFlexibleEnds = escaped.replace(/\\n/g, "\\s*\\r?\\n");
+                return new RegExp(`${withFlexibleEnds}\\s*`, "g");
+            }
+            case "indentation": {
+                const lines = normalizedTarget.split("\n");
+                const pattern = lines
+                    .map(line => {
+                        if (!line.length) return "";
+                        const match = line.match(/^(\s*)(.*)$/);
+                        const content = match ? match[2] : line;
+                        const escapedContent = this.escapeRegExp(content);
+                        const indentPattern = match && match[1].length > 0 ? "\\s*" : "";
+                        return `${indentPattern}${escapedContent}`;
+                    })
+                    .join("\\s*\\r?\\n");
+                return new RegExp(pattern, "g");
+            }
+            case "whitespace": {
+                const parts = normalizedTarget
+                    .split("\n")
+                    .map(line => this.escapeRegExp(line.trim()));
+                const pattern = parts.join("\\s*\\r?\\n\\s*");
+                return new RegExp(pattern, "g");
+            }
+            case "structural":
+            default: {
+                const escaped = this.escapeRegExp(normalizedTarget);
+                return new RegExp(escaped.replace(/\\s+/g, "\\s+"), "g");
+            }
         }
     }
 
@@ -404,7 +489,8 @@ export class EditorEngine {
                     replacement,
                     original: cand.original,
                     lineNumber,
-                    matchType: 'levenshtein'
+                    matchType: 'levenshtein',
+                    normalizationLevel: 'exact' as NormalizationLevel
                 });
             }
         }
@@ -412,39 +498,73 @@ export class EditorEngine {
         return uniqueMatches;
     }
 
-    private scoreMatchConfidence(
+    private computeMatchConfidence(
         match: Match,
         edit: Edit,
-        content: string
-    ): number {
-        let score = 0.5;  // Base score
-        
-        // Exact match = highest confidence
-        if (match.original === edit.targetString) {
-            score = 1.0;
+        normalizationLevel: NormalizationLevel = 'exact'
+    ): MatchConfidence {
+        let baseScore = 0.5;
+
+        switch (match.matchType) {
+            case 'exact':
+                baseScore = 1.0;
+                break;
+            case 'normalization': {
+                const levelWeights: Record<NormalizationLevel, number> = {
+                    exact: 1.0,
+                    "line-endings": 0.95,
+                    trailing: 0.9,
+                    indentation: 0.87,
+                    whitespace: 0.82,
+                    structural: 0.75
+                };
+                baseScore = levelWeights[normalizationLevel] ?? 0.7;
+                break;
+            }
+            case 'whitespace-fuzzy':
+                baseScore = 0.8;
+                break;
+            case 'levenshtein': {
+                const distance = levenshtein.get(edit.targetString, match.original);
+                const maxAllowed = Math.floor(edit.targetString.length * 0.3) || 1;
+                baseScore = 0.5 + 0.5 * Math.max(0, 1 - distance / maxAllowed);
+                break;
+            }
         }
-        // Levenshtein = lower confidence based on distance
-        else if (edit.fuzzyMode === 'levenshtein') {
-            const distance = levenshtein.get(edit.targetString, match.original);
-            const maxDistance = Math.floor(edit.targetString.length * 0.3);
-            score = 0.5 + (0.5 * (1 - distance / (maxDistance || 1)));
+
+        let contextBoost = 0;
+        if (edit.beforeContext) contextBoost += 0.1;
+        if (edit.afterContext) contextBoost += 0.1;
+        const lineRangeBoost = edit.lineRange ? 0.1 : 0;
+        const indexRangeBoost = edit.indexRange ? 0.15 : 0;
+
+        const finalScore = Math.min(1, baseScore + contextBoost + lineRangeBoost + indexRangeBoost);
+
+        return {
+            score: finalScore,
+            matchType: match.matchType,
+            normalizationLevel: normalizationLevel,
+            contextBoost,
+            lineRangeBoost,
+            indexRangeBoost,
+            reason: this.getConfidenceReason(finalScore, match.matchType)
+        };
+    }
+
+    private getConfidenceReason(score: number, matchType: Match['matchType']): string {
+        if (score >= 0.95 && matchType === 'exact') {
+            return 'Exact match with high certainty';
         }
-        // Whitespace fuzzy = medium confidence
-        else if (edit.fuzzyMode === 'whitespace') {
-            score = 0.8;
+        if (score >= 0.85) {
+            return 'High confidence after constraints';
         }
-        
-        // Boost score if context matches
-        if (edit.beforeContext || edit.afterContext) {
-            score = Math.min(1.0, score + 0.15);
+        if (score >= 0.7) {
+            return 'Likely match after normalization';
         }
-        
-        // Boost score if lineRange constrains search
-        if (edit.lineRange) {
-            score = Math.min(1.0, score + 0.1);
+        if (score >= 0.5) {
+            return 'Possible match, review suggested';
         }
-        
-        return score;
+        return 'Low confidence match';
     }
 
     private generateMatchFailureDiagnostics(
@@ -455,110 +575,42 @@ export class EditorEngine {
         options?: { normalizationAttempts?: { level: NormalizationLevel; matchCount: number; }[] }
     ): string {
         const diagnostics: string[] = [];
-        
         diagnostics.push(`Target not found: "${edit.targetString}"`);
         diagnostics.push(`\nDiagnostics:`);
-        
-        const mode = edit.fuzzyMode || 'exact';
-        diagnostics.push(`- Matching mode: ${mode}`);
-        
-        if (options?.normalizationAttempts && options.normalizationAttempts.length > 0) {
-            const attemptSummary = options.normalizationAttempts
-                .map((attempt) => `${attempt.level}(${attempt.matchCount})`)
-                .join(', ');
-            diagnostics.push(`- Normalization attempts: ${attemptSummary}`);
+        diagnostics.push(`- Matching mode: ${edit.fuzzyMode ?? 'exact'}`);
+
+        if (options?.normalizationAttempts?.length) {
+            diagnostics.push(`- Normalization attempts:`);
+            for (const attempt of options.normalizationAttempts) {
+                diagnostics.push(`  • ${attempt.level}: ${attempt.matchCount} candidate(s)`);
+            }
         }
 
         if (matches.length === 0) {
-            diagnostics.push(`- Initial search found 0 matches`);
-            diagnostics.push(`- Tip: Try fuzzyMode: "whitespace" or "levenshtein"`);
-            
-            // Suggest similar strings using Levenshtein (simple line scan)
-            const lines = content.split('\n');
-            const targetWords = edit.targetString.toLowerCase().split(/\s+/);
-            const potentialMatches: Array<{line: number, text: string, score: number}> = [];
-            
-            lines.forEach((line, idx) => {
-                const lineWords = line.toLowerCase().split(/\s+/);
-                const commonWords = targetWords.filter(w => lineWords.includes(w));
-                if (commonWords.length > 0 && targetWords.length > 0) {
-                    potentialMatches.push({
-                        line: idx + 1,
-                        text: line.trim().substring(0, 80),
-                        score: commonWords.length / targetWords.length
-                    });
-                }
-            });
-            
-            if (potentialMatches.length > 0) {
-                potentialMatches.sort((a, b) => b.score - a.score);
-                diagnostics.push(`\n- Potential similar lines found:`);
-                potentialMatches.slice(0, 3).forEach(m => {
-                    diagnostics.push(`  Line ${m.line}: "${m.text}"`);
-                });
-            }
+            diagnostics.push(`- No candidates found at any normalization level.`);
         } else {
-            diagnostics.push(`- Initial search found ${matches.length} match(es)`);
-            diagnostics.push(`- After filtering: ${filteredMatches.length} match(es)`);
-            
-            if (edit.lineRange) {
-                const lineFiltered = matches.filter(m => 
-                    m.lineNumber < edit.lineRange!.start || m.lineNumber > edit.lineRange!.end
+            diagnostics.push(`- Found ${matches.length} candidate(s) before filtering.`);
+            diagnostics.push(`- Candidates after context filters: ${filteredMatches.length}`);
+
+            const scored = matches.map(match => ({
+                match,
+                confidence: this.computeMatchConfidence(match, edit, match.normalizationLevel ?? 'exact')
+            })).sort((a, b) => b.confidence.score - a.confidence.score);
+
+            diagnostics.push(`\nTop candidates:`);
+            for (const entry of scored.slice(0, 3)) {
+                const line = entry.match.lineNumber;
+                diagnostics.push(
+                    `  • Line ${line}: ${(entry.confidence.score * 100).toFixed(0)}% (${entry.confidence.reason})`
                 );
-                if (lineFiltered.length > 0) {
-                    diagnostics.push(`- ${lineFiltered.length} match(es) outside lineRange [${edit.lineRange.start}, ${edit.lineRange.end}]:`);
-                    lineFiltered.forEach(m => {
-                        diagnostics.push(`  Line ${m.lineNumber}: "${m.original.substring(0, 50)}..."`);
-                    });
-                }
-            }
-            
-            if (edit.beforeContext) {
-                const contextFailed = matches.filter(m => {
-                    const searchStart = edit.anchorSearchRange?.chars
-                        ? Math.max(0, m.start - edit.anchorSearchRange.chars)
-                        : 0;
-                    const preceding = content.substring(searchStart, m.start);
-                    if (edit.fuzzyMode === "whitespace") {
-                        return !preceding.replace(/\s+/g, " ").includes(edit.beforeContext!.replace(/\s+/g, " "));
-                    }
-                    return !preceding.includes(edit.beforeContext!);
-                });
-                
-                if (contextFailed.length > 0) {
-                    diagnostics.push(`- ${contextFailed.length} match(es) failed beforeContext: "${edit.beforeContext}"`);
-                }
-            }
-            
-            if (edit.afterContext) {
-                const contextFailed = matches.filter(m => {
-                    const searchEnd = edit.anchorSearchRange?.chars
-                        ? Math.min(content.length, m.end + edit.anchorSearchRange.chars)
-                        : content.length;
-                    const following = content.substring(m.end, searchEnd);
-                    if (edit.fuzzyMode === "whitespace") {
-                        return !following.replace(/\s+/g, " ").includes(edit.afterContext!.replace(/\s+/g, " "));
-                    }
-                    return !following.includes(edit.afterContext!);
-                });
-                
-                if (contextFailed.length > 0) {
-                    diagnostics.push(`- ${contextFailed.length} match(es) failed afterContext: "${edit.afterContext}"`);
-                }
             }
         }
-        
+
         diagnostics.push(`\nSuggestions:`);
-        if (matches.length === 0) {
-            diagnostics.push(`- Verify the target string exists in the file`);
-            diagnostics.push(`- Check for typos or whitespace differences`);
-            diagnostics.push(`- Try: fuzzyMode: "whitespace" for flexible whitespace`);
-            diagnostics.push(`- Try: fuzzyMode: "levenshtein" for typo tolerance`);
-        } else {
-            diagnostics.push(`- Remove or adjust lineRange`);
-            diagnostics.push(`- Adjust beforeContext/afterContext`);
-        }
-        
+        diagnostics.push(`- Add beforeContext/afterContext to disambiguate.`);
+        diagnostics.push(`- Provide lineRange or indexRange if you know the region.`);
+        diagnostics.push(`- Relax normalization (e.g., normalization: "whitespace") or enable fuzzy modes.`);
+
         return diagnostics.join('\n');
     }
 
@@ -569,14 +621,15 @@ export class EditorEngine {
     ): AmbiguousMatchError {
         const scoredMatches = matches.map(m => ({
             ...m,
-            confidence: this.scoreMatchConfidence(m, edit, content)
-        })).sort((a, b) => b.confidence! - a.confidence!);
+            confidence: this.computeMatchConfidence(m, edit, m.normalizationLevel ?? 'exact')
+        })).sort((a, b) => (b.confidence?.score ?? 0) - (a.confidence?.score ?? 0));
         
         const lines = content.split('\n');
         
         const contextSnippets = scoredMatches.map(m => {
             const line = lines[m.lineNumber - 1];
-            return `Line ${m.lineNumber} (confidence: ${(m.confidence! * 100).toFixed(0)}%): "${line.trim().substring(0, 80)}..."`;
+            const confidencePct = m.confidence ? (m.confidence.score * 100).toFixed(0) : '??';
+            return `Line ${m.lineNumber} (confidence: ${confidencePct}%): "${line.trim().substring(0, 80)}..."`;
         });
         
         const message = [
@@ -602,14 +655,15 @@ export class EditorEngine {
 
         if (edit.fuzzyMode === "levenshtein") {
             // Try exact match first
-            const exactRegex = this.createExactRegex(edit.targetString);
+            const exactRegex = this.createExactRegex(edit.targetString, "exact", edit.normalizationConfig);
             const exactMatches = [...content.matchAll(exactRegex)].map(m => ({
                 start: m.index!,
                 end: m.index! + m[0].length,
                 replacement: edit.replacementString,
                 original: m[0],
                 lineNumber: lineCounter.getLineNumber(m.index!),
-                matchType: 'exact' as const
+                matchType: 'exact' as const,
+                normalizationLevel: 'exact' as NormalizationLevel
             }));
 
             if (exactMatches.length > 0) {
@@ -625,12 +679,13 @@ export class EditorEngine {
                 replacement: edit.replacementString,
                 original: m[0],
                 lineNumber: lineCounter.getLineNumber(m.index!),
-                matchType: 'whitespace-fuzzy' as const
+                matchType: 'whitespace-fuzzy' as const,
+                normalizationLevel: 'whitespace' as NormalizationLevel
             }));
         } else {
             const attempts = this.getNormalizationAttempts(edit.normalization);
             for (const level of attempts) {
-                const regex = this.createExactRegex(edit.targetString, level);
+                const regex = this.createExactRegex(edit.targetString, level, edit.normalizationConfig);
                 const matchType: Match['matchType'] = level === 'exact' ? 'exact' : 'normalization';
                 const attemptMatches = [...content.matchAll(regex)].map(m => ({
                     start: m.index!,
@@ -638,7 +693,8 @@ export class EditorEngine {
                     replacement: edit.replacementString,
                     original: m[0],
                     lineNumber: lineCounter.getLineNumber(m.index!),
-                    matchType
+                    matchType,
+                    normalizationLevel: level
                 }));
                 normalizationDiagnostics.push({ level, matchCount: attemptMatches.length });
                 if (attemptMatches.length > 0) {
@@ -682,6 +738,14 @@ export class EditorEngine {
             }
             return true;
         });
+
+        for (const match of filteredMatches) {
+            match.confidence = this.computeMatchConfidence(
+                match,
+                edit,
+                match.normalizationLevel ?? 'exact'
+            );
+        }
 
         if (filteredMatches.length === 0) {
             throw new MatchNotFoundError(
@@ -854,7 +918,7 @@ export class EditorEngine {
         });
 
         // Attempt 2: Whitespace
-        const wsRegex = this.createExactRegex(edit.targetString, "whitespace");
+        const wsRegex = this.createExactRegex(edit.targetString, "whitespace", edit.normalizationConfig);
         const wsCandidates: { line: number; snippet: string }[] = [];
         let match;
         while ((match = wsRegex.exec(content)) !== null) {
@@ -869,7 +933,7 @@ export class EditorEngine {
             failureReason: wsCandidates.length === 0 ? "No whitespace-tolerant matches found" : "Matches found but not selected (ambiguous?)"
         });
 
-        const structuralRegex = this.createExactRegex(edit.targetString, "structural");
+        const structuralRegex = this.createExactRegex(edit.targetString, "structural", edit.normalizationConfig);
         const structuralCandidates: { line: number; snippet: string }[] = [];
         let structuralMatch;
         while ((structuralMatch = structuralRegex.exec(content)) !== null) {

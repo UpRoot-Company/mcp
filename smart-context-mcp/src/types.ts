@@ -60,6 +60,40 @@ export interface IndexRange {
     end: number;
 }
 
+export type NormalizationLevel =
+    | "exact"
+    | "line-endings"
+    | "trailing"
+    | "indentation"
+    | "whitespace"
+    | "structural";
+
+export interface NormalizationConfig {
+    /** Number of spaces that represent a tab when normalizing indentation. */
+    tabWidth?: number;
+    /** Whether to preserve indentation when collapsing whitespace. Defaults to true. */
+    preserveIndentation?: boolean;
+}
+
+export type SafetyLevel = "strict" | "normal" | "force";
+
+export interface MatchConfidence {
+    /** Confidence score between 0 (no confidence) and 1 (perfect confidence). */
+    score: number;
+    /** Strategy that produced the match. */
+    matchType: 'exact' | 'normalization' | 'whitespace-fuzzy' | 'levenshtein';
+    /** Normalization level that was active when the match was found. */
+    normalizationLevel: NormalizationLevel;
+    /** Boost applied when before/after context matched. */
+    contextBoost: number;
+    /** Boost applied when a lineRange constrained the search. */
+    lineRangeBoost: number;
+    /** Boost applied when indexRange constrained the search. */
+    indexRangeBoost?: number;
+    /** Textual explanation that can be surfaced to users. */
+    reason?: string;
+}
+
 export interface Edit {
     targetString: string;
     replacementString: string;
@@ -75,7 +109,9 @@ export interface Edit {
     fuzzyMode?: "whitespace" | "levenshtein";
     anchorSearchRange?: { lines: number, chars: number };
     /** Highest normalization tier the editor should consider. Defaults to "exact". */
-    normalization?: "exact" | "whitespace" | "structural";
+    normalization?: NormalizationLevel;
+    /** Fine-grained options for normalization attempts (tab width, indentation preservation, etc.) */
+    normalizationConfig?: NormalizationConfig;
     /** Optional hash guard for the original content to catch drift before editing. */
     expectedHash?: {
         algorithm: 'sha256' | 'xxhash';
@@ -531,8 +567,17 @@ export interface EditCodeEdit {
     fuzzyMode?: "whitespace" | "levenshtein";
     anchorSearchRange?: { lines: number; chars: number };
     indexRange?: IndexRange;
-    normalization?: "exact" | "whitespace" | "structural";
+    normalization?: NormalizationLevel;
+    normalizationConfig?: NormalizationConfig;
     expectedHash?: Edit["expectedHash"];
+    confirmationHash?: string;
+    safetyLevel?: SafetyLevel;
+}
+
+export interface RefactoringContext {
+    pattern?: "rename-symbol" | "move-function" | "extract-component" | "inline-variable";
+    scope?: "file" | "directory" | "project";
+    estimatedEdits?: number;
 }
 
 export interface EditCodeArgs {
@@ -541,6 +586,7 @@ export interface EditCodeArgs {
     createMissingDirectories?: boolean;
     ignoreMistakes?: boolean;
     diffMode?: DiffMode;
+    refactoringContext?: RefactoringContext;
 }
 
 export interface EditCodeResultEntry {
@@ -548,12 +594,19 @@ export interface EditCodeResultEntry {
     applied: boolean;
     error?: string;
     diff?: string;
+    requiresConfirmation?: boolean;
+    fileSize?: number;
+    lineCount?: number;
+    contentPreview?: string;
+    hashMismatch?: boolean;
 }
 
 export interface EditCodeResult {
     success: boolean;
     results: EditCodeResultEntry[];
     transactionId?: string;
+    warnings?: string[];
+    message?: string;
 }
 
 export type ManageProjectCommand = "undo" | "redo" | "guidance" | "status" | "metrics";

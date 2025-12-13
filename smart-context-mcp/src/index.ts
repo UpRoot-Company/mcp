@@ -30,7 +30,7 @@ import { FileProfiler, FileMetadataAnalysis } from "./engine/FileProfiler.js";
 import { AgentWorkflowGuidance } from "./engine/AgentPlaybook.js";
 import { ClusterSearchEngine, ClusterSearchOptions, ClusterExpansionOptions } from "./engine/ClusterSearch/index.js";
 import { BuildClusterOptions, ExpandableRelationship } from "./engine/ClusterSearch/ClusterBuilder.js";
-import { FileSearchResult, ReadFragmentResult, EditResult, DirectoryTree, Edit, EngineConfig, SmartFileProfile, SymbolInfo, ToolSuggestion, ImpactPreview, BatchEditGuidance, ReadCodeResult, ReadCodeArgs, SearchProjectResult, SearchProjectArgs, AnalyzeRelationshipResult, EditCodeArgs, EditCodeResult, EditCodeEdit, ManageProjectResult, ManageProjectArgs, AnalyzeRelationshipArgs, ReadCodeView, SearchProjectType, ResolvedRelationshipTarget, AnalyzeRelationshipDirection, AnalyzeRelationshipNode, AnalyzeRelationshipEdge, LineRange, DiffMode } from "./types.js";
+import { FileSearchResult, ReadFragmentResult, EditResult, DirectoryTree, Edit, EngineConfig, SmartFileProfile, SymbolInfo, ToolSuggestion, ImpactPreview, BatchEditGuidance, ReadCodeResult, ReadCodeArgs, SearchProjectResult, SearchProjectArgs, AnalyzeRelationshipResult, EditCodeArgs, EditCodeResult, EditCodeEdit, ManageProjectResult, ManageProjectArgs, AnalyzeRelationshipArgs, ReadCodeView, SearchProjectType, ResolvedRelationshipTarget, AnalyzeRelationshipDirection, AnalyzeRelationshipNode, AnalyzeRelationshipEdge, LineRange, DiffMode, SafetyLevel, RefactoringContext } from "./types.js";
 import { FileStats, IFileSystem, NodeFileSystem } from "./platform/FileSystem.js";
 import { AstAwareDiff } from "./engine/AstAwareDiff.js";
 import { IndexDatabase } from "./indexing/IndexDatabase.js";
@@ -70,6 +70,9 @@ export class SmartContextServer {
     private static hasSigintListener = false;
     private static readonly READ_CODE_MAX_BYTES = 1_000_000;
     private static readonly READ_FILE_DEFAULT_MAX_BYTES = 65_536;
+    private static readonly DELETE_LARGE_FILE_BYTES = 10_000;
+    private static readonly DELETE_LARGE_FILE_LINES = 100;
+    private static readonly DELETE_PREVIEW_CHARS = 200;
 
     private exposeCompatTools: boolean;
     private readFileMaxBytes: number;
@@ -691,6 +694,37 @@ export class SmartContextServer {
         }
     }
 
+    private hashContent(content: string): string {
+        return crypto.createHash("sha256").update(content).digest("hex");
+    }
+
+    private buildContentPreview(content: string, limit: number = SmartContextServer.DELETE_PREVIEW_CHARS): string {
+        if (content.length <= limit) {
+            return content;
+        }
+        return `${content.substring(0, limit)}\n...[truncated]`;
+    }
+
+    private buildRefactoringGuidance(context?: RefactoringContext, batchSize?: number): string | undefined {
+        if (!context) {
+            return undefined;
+        }
+        const estimated = context.estimatedEdits ?? batchSize;
+        if (estimated && estimated > 10) {
+            const scope = context.scope ?? "project";
+            const pattern = context.pattern ?? "refactor";
+            const intro = `⚠️  Large ${pattern} refactoring detected (${estimated} planned edits, scope: ${scope}).`;
+            const suggestions = [
+                "💡 Consider:",
+                "  1. Using analyze_relationship to enumerate all affected references.",
+                "  2. Splitting the work into smaller batches (5-10 edits each).",
+                "  3. Leveraging write_file for sweeping structural rewrites."
+            ].join("\n");
+            return `${intro}\n\n${suggestions}\n\nProceeding with current batch...`;
+        }
+        return undefined;
+    }
+
         private async executeReadCode(args: ReadCodeArgs): Promise<ReadCodeResult> {
         if (!args || typeof args.filePath !== "string" || !args.filePath.trim()) {
             throw new McpError(ErrorCode.InvalidParams, "Provide 'filePath' to read_code.");
@@ -1076,6 +1110,11 @@ export class SmartContextServer {
         const results: EditCodeResult["results"] = [];
         const rollbackActions: Array<() => Promise<void>> = [];
         const touchedFiles = new Set<string>();
+        const warnings: string[] = [];
+        const refactorGuidance = this.buildRefactoringGuidance(args.refactoringContext, args.edits.length);
+        if (refactorGuidance) {
+            warnings.push(refactorGuidance);
+        }
 
         try {
             await this.handleCreateOperations(args.edits, dryRun, createDirs, results, rollbackActions, touchedFiles);
@@ -1085,14 +1124,26 @@ export class SmartContextServer {
             await this.rollbackActions(rollbackActions);
             const message = error instanceof McpError ? error.message : (error?.message ?? "edit_code failed");
             results.push({ filePath: error?.filePath ?? args.edits[0]?.filePath ?? "", applied: false, error: message });
-            return { success: false, results, transactionId };
+            return {
+                success: false,
+                results,
+                transactionId,
+                warnings: warnings.length ? warnings : undefined,
+                message: refactorGuidance
+            };
         }
 
         if (!dryRun && touchedFiles.size > 0) {
             await this.invalidateTouchedFiles(touchedFiles);
         }
 
-        return { success: true, results, transactionId };
+        return {
+            success: true,
+            results,
+            transactionId,
+            warnings: warnings.length ? warnings : undefined,
+            message: refactorGuidance
+        };
     }
 
     private async handleCreateOperations(
@@ -1150,24 +1201,100 @@ export class SmartContextServer {
             if (!await this.pathExists(absPath)) {
                 throw new McpError(ErrorCode.InvalidParams, `File '${edit.filePath}' does not exist.`);
             }
-            let previousContent = "";
-                        if (!dryRun) {
-                previousContent = await this.fileSystem.readFile(absPath);
-                await this.fileSystem.deleteFile(absPath);
-                touchedFiles.add(absPath);
-                const backup = previousContent;
-                rollback.push(async () => {
-                    const parentDir = path.dirname(absPath);
-                    if (!await this.pathExists(parentDir)) {
-                        await this.fileSystem.createDir(parentDir);
-                    }
-                    await this.fileSystem.writeFile(absPath, backup);
+            const [content, stats] = await Promise.all([
+                this.fileSystem.readFile(absPath),
+                this.fileSystem.stat(absPath)
+            ]);
+            const lineCount = content.split(/\r?\n/).length;
+            const fileSize = stats.size;
+            const contentHash = this.hashContent(content);
+            const preview = this.buildContentPreview(content);
+            const safetyLevel: SafetyLevel = edit.safetyLevel ?? "strict";
+            const isLargeFile = fileSize > SmartContextServer.DELETE_LARGE_FILE_BYTES ||
+                lineCount > SmartContextServer.DELETE_LARGE_FILE_LINES;
+            const requiresConfirmation = safetyLevel === "strict" && isLargeFile;
+            const relativePath = this.normalizeRelativePath(absPath);
+
+            if (edit.confirmationHash && edit.confirmationHash !== contentHash) {
+                results.push({
+                    filePath: relativePath,
+                    applied: false,
+                    hashMismatch: true,
+                    fileSize,
+                    lineCount,
+                    contentPreview: preview,
+                    error: [
+                        "Hash mismatch: File content changed since confirmation.",
+                        `Expected: ${edit.confirmationHash}`,
+                        `Actual:   ${contentHash}`,
+                        "Re-run a dry run to fetch the latest hash before deleting."
+                    ].join("\n")
                 });
+                continue;
             }
+
+            if (requiresConfirmation && !dryRun && !edit.confirmationHash) {
+                results.push({
+                    filePath: relativePath,
+                    applied: false,
+                    requiresConfirmation: true,
+                    fileSize,
+                    lineCount,
+                    contentPreview: preview,
+                    error: [
+                        "⚠️  Large file deletion requires confirmation.",
+                        `File: ${edit.filePath} (${fileSize} bytes, ${lineCount} lines)`,
+                        "",
+                        "Add confirmationHash to your delete operation:",
+                        `  confirmationHash: \"${contentHash}\"`,
+                        "",
+                        "Or set safetyLevel: \"force\" to bypass (not recommended)."
+                    ].join("\n")
+                });
+                continue;
+            }
+
+            if (dryRun) {
+                results.push({
+                    filePath: relativePath,
+                    applied: false,
+                    fileSize,
+                    lineCount,
+                    contentPreview: preview,
+                    diff: [
+                        "📋 Dry Run: Would delete file",
+                        `  Size: ${fileSize} bytes (${lineCount} lines)`,
+                        `  Hash: ${contentHash}`,
+                        "",
+                        "Preview:",
+                        preview
+                    ].join("\n")
+                });
+                continue;
+            }
+
+            await this.fileSystem.deleteFile(absPath);
+            touchedFiles.add(absPath);
+            const backup = content;
+            rollback.push(async () => {
+                const parentDir = path.dirname(absPath);
+                if (!await this.pathExists(parentDir)) {
+                    await this.fileSystem.createDir(parentDir);
+                }
+                await this.fileSystem.writeFile(absPath, backup);
+                const restored = await this.fileSystem.readFile(absPath);
+                const restoredHash = this.hashContent(restored);
+                if (restoredHash !== contentHash) {
+                    throw new Error(`Rollback verification failed for ${absPath}`);
+                }
+            });
+
             results.push({
-                filePath: this.normalizeRelativePath(absPath),
-                applied: !dryRun,
-                diff: dryRun ? "Dry run: would delete file." : "Deleted file."
+                filePath: relativePath,
+                applied: true,
+                fileSize,
+                lineCount,
+                diff: `Deleted file (${fileSize} bytes, ${lineCount} lines, hash ${contentHash}).`
             });
         }
     }
@@ -1202,6 +1329,7 @@ export class SmartContextServer {
                 anchorSearchRange: edit.anchorSearchRange,
                 indexRange: edit.indexRange,
                 normalization: edit.normalization,
+                normalizationConfig: edit.normalizationConfig,
                 expectedHash: edit.expectedHash
             };
             fileMap.get(absPath)!.push(normalizedEdit);
