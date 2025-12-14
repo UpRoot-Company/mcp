@@ -27,6 +27,10 @@ export class SymbolIndex {
     private readonly db: IndexDatabase;
     private initialScanCompleted = false;
     private baselinePromise?: Promise<void>;
+    private editTracker: Map<string, number> = new Map();
+    private pendingUpdates: Set<string> = new Set();
+    private updateDebounceTimer?: NodeJS.Timeout;
+
 
     constructor(rootPath: string, skeletonGenerator: SkeletonGenerator, ignorePatterns: string[], db?: IndexDatabase) {
         this.rootPath = rootPath;
@@ -91,7 +95,12 @@ export class SymbolIndex {
                 }
             }
         }
-        return results.slice(0, 100);
+        
+        if (results.length > 0) {
+            return results.slice(0, 100);
+        }
+
+        return this.fuzzySearch(query, { maxEditDistance: 2 });
     }
 
     public async getAllSymbols(): Promise<Map<string, SymbolInfo[]>> {
@@ -250,4 +259,142 @@ export class SymbolIndex {
         }
         return results;
     }
+
+    public fuzzySearch(
+        query: string,
+        options: { maxEditDistance: number; scoreThreshold?: number }
+    ): SymbolSearchResult[] {
+        const symbolMap = this.db.streamAllSymbols();
+        const candidates: { result: SymbolSearchResult; distance: number; score: number }[] = [];
+
+        for (const [filePath, symbols] of symbolMap) {
+            for (const symbol of symbols) {
+                const distance = this.levenshteinDistance(query.toLowerCase(), symbol.name.toLowerCase());
+                const score = this.calculateFuzzyScore(query, symbol.name);
+                
+                if (distance <= options.maxEditDistance && (!options.scoreThreshold || score >= options.scoreThreshold)) {
+                    candidates.push({
+                        result: { filePath, symbol },
+                        distance,
+                        score
+                    });
+                }
+            }
+        }
+
+        return candidates
+            .sort((a, b) => b.score - a.score)
+            .slice(0, 100)
+            .map(c => c.result);
+    }
+
+    private calculateFuzzyScore(query: string, symbolName: string): number {
+        const distance = this.levenshteinDistance(
+            query.toLowerCase(),
+            symbolName.toLowerCase()
+        );
+        const maxLength = Math.max(query.length, symbolName.length);
+        const similarity = 1 - (distance / maxLength);
+
+        // Boost score for prefix matches
+        const prefixBoost = symbolName.toLowerCase().startsWith(query.toLowerCase()) ? 0.2 : 0;
+
+        // Boost score for case-insensitive exact matches
+        const exactBoost = query.toLowerCase() === symbolName.toLowerCase() ? 0.3 : 0;
+
+        return Math.min(1.0, similarity + prefixBoost + exactBoost);
+    }
+
+    private levenshteinDistance(a: string, b: string): number {
+        const matrix: number[][] = [];
+
+        for (let i = 0; i <= b.length; i++) {
+            matrix[i] = [i];
+        }
+
+        for (let j = 0; j <= a.length; j++) {
+            matrix[0][j] = j;
+        }
+
+        for (let i = 1; i <= b.length; i++) {
+            for (let j = 1; j <= a.length; j++) {
+                if (b.charAt(i - 1) === a.charAt(j - 1)) {
+                    matrix[i][j] = matrix[i - 1][j - 1];
+                } else {
+                    matrix[i][j] = Math.min(
+                        matrix[i - 1][j - 1] + 1, // substitution
+                        matrix[i][j - 1] + 1,     // insertion
+                        matrix[i - 1][j] + 1      // deletion
+                    );
+                }
+            }
+        }
+
+        return matrix[b.length][a.length];
+    }
+
+    public markFileModified(filepath: string): void {
+        this.editTracker.set(filepath, Date.now());
+        this.pendingUpdates.add(filepath);
+        this.scheduleIncrementalUpdate();
+    }
+
+    private scheduleIncrementalUpdate(): void {
+        if (this.updateDebounceTimer) {
+            clearTimeout(this.updateDebounceTimer);
+        }
+
+        this.updateDebounceTimer = setTimeout(() => {
+            void this.incrementalUpdate();
+        }, 500);
+    }
+
+    private async incrementalUpdate(): Promise<void> {
+        if (this.pendingUpdates.size === 0) return;
+
+        const filesToUpdate = Array.from(this.pendingUpdates);
+        this.pendingUpdates.clear();
+
+        for (const relativePath of filesToUpdate) {
+            try {
+                // Check if file still exists
+                const fullPath = path.join(this.rootPath, relativePath);
+                if (!fs.existsSync(fullPath)) {
+                    this.db.deleteFile(relativePath);
+                    this.cache.delete(relativePath);
+                    continue;
+                }
+
+                // Re-index this file only
+                const content = fs.readFileSync(fullPath, 'utf-8');
+                const symbols = await this.extractSymbols(fullPath, content);
+                this.cache.set(relativePath, { mtime: Date.now(), symbols });
+                this.db.replaceSymbols({
+                    relativePath,
+                    lastModified: Date.now(),
+                    language: null,
+                    symbols
+                });
+            } catch (error) {
+                console.error(`Failed to incrementally update ${relativePath}:`, error);
+            }
+        }
+    }
+
+    public getRecentlyModified(timeWindowMs: number): string[] {
+        const cutoff = Date.now() - timeWindowMs;
+        const result: string[] = [];
+        for (const [filepath, timestamp] of this.editTracker.entries()) {
+            if (timestamp > cutoff) {
+                result.push(path.join(this.rootPath, filepath));
+            }
+        }
+        return result;
+    }
+
+    public findSimilar(query: string, limit: number = 5): SymbolInfo[] {
+        const results = this.fuzzySearch(query, { maxEditDistance: 2 });
+        return results.slice(0, limit).map(r => r.symbol);
+    }
 }
+

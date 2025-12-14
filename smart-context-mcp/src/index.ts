@@ -18,6 +18,7 @@ import { EditorEngine, AmbiguousMatchError } from "./engine/Editor.js";
 import { HistoryEngine } from "./engine/History.js";
 import { EditCoordinator } from "./engine/EditCoordinator.js";
 import { SkeletonGenerator } from "./ast/SkeletonGenerator.js";
+import { FallbackResolver } from "./resolution/FallbackResolver.js";
 import { AstManager } from "./ast/AstManager.js";
 import { SymbolIndex } from "./ast/SymbolIndex.js";
 import { ModuleResolver } from "./ast/ModuleResolver.js";
@@ -56,6 +57,7 @@ export class SmartContextServer {
     private historyEngine: HistoryEngine;
     private editCoordinator: EditCoordinator;
     private skeletonGenerator: SkeletonGenerator;
+    private fallbackResolver: FallbackResolver;
     private astManager: AstManager;
     private symbolIndex: SymbolIndex;
     private moduleResolver: ModuleResolver;
@@ -131,6 +133,7 @@ export class SmartContextServer {
         this.indexDatabase = new IndexDatabase(this.rootPath);
         this.transactionLog = new TransactionLog(this.indexDatabase.getHandle());
         this.symbolIndex = new SymbolIndex(this.rootPath, this.skeletonGenerator, this.ignoreGlobs, this.indexDatabase);
+        this.fallbackResolver = new FallbackResolver(this.symbolIndex, this.skeletonGenerator);
         this.moduleResolver = new ModuleResolver(this.rootPath);
         this.dependencyGraph = new DependencyGraph(this.rootPath, this.symbolIndex, this.moduleResolver, this.indexDatabase);
         this.referenceFinder = new ReferenceFinder(this.rootPath, this.dependencyGraph, this.symbolIndex, this.skeletonGenerator, this.moduleResolver);
@@ -1297,17 +1300,44 @@ export class SmartContextServer {
             }
         }
 
+        // Tier 1: Symbol Index (includes fuzzy search)
         const matches = await this.symbolIndex.search(args.target);
-        if (!matches.length) {
-            throw new McpError(ErrorCode.InvalidParams, `Unable to resolve symbol '${args.target}'. Provide 'contextPath' to disambiguate.`);
+        
+        if (matches.length > 0) {
+            const first = matches[0];
+            const absPath = this._getAbsPathAndVerify(first.filePath);
+            return {
+                type: "symbol",
+                path: this.normalizeRelativePath(absPath),
+                symbolName: first.symbol.name
+            };
         }
-        const first = matches[0];
-        const absPath = this._getAbsPathAndVerify(first.filePath);
-        return {
-            type: "symbol",
-            path: this.normalizeRelativePath(absPath),
-            symbolName: first.symbol.name
-        };
+
+        // Tier 2: AST Direct Parsing
+        const astMatches = await this.fallbackResolver.parseFileForSymbol(args.target);
+        if (astMatches.length > 0) {
+             const first = astMatches[0];
+             const absPath = this._getAbsPathAndVerify(first.filePath);
+             return {
+                 type: "symbol",
+                 path: this.normalizeRelativePath(absPath),
+                 symbolName: first.symbol.name
+             };
+        }
+
+        // Tier 3: Regex Heuristic
+        const regexMatches = await this.fallbackResolver.regexSymbolSearch(args.target);
+        if (regexMatches.length > 0) {
+             const first = regexMatches[0];
+             const absPath = this._getAbsPathAndVerify(first.filePath);
+             return {
+                 type: "symbol",
+                 path: this.normalizeRelativePath(absPath),
+                 symbolName: first.symbol.name
+             };
+        }
+
+        throw new McpError(ErrorCode.InvalidParams, `Unable to resolve symbol '${args.target}'. Provide 'contextPath' to disambiguate.`);
     }
 
     private async executeEditCode(args: EditCodeArgs): Promise<EditCodeResult> {
@@ -1364,6 +1394,9 @@ export class SmartContextServer {
 
         if (!dryRun && touchedFiles.size > 0) {
             await this.invalidateTouchedFiles(touchedFiles);
+            for (const file of touchedFiles) {
+                this.symbolIndex.markFileModified(file);
+            }
         }
 
         return {

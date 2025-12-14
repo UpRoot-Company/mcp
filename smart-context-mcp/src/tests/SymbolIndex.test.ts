@@ -81,6 +81,20 @@ describe('SymbolIndex', () => {
             warnSpy.mockRestore();
         }
     });
+
+    it('should support fuzzy matching', async () => {
+        const results = index.fuzzySearch('TstClass', { maxEditDistance: 2 });
+        expect(results.length).toBeGreaterThan(0);
+        expect(results[0].symbol.name).toBe('TestClass');
+    });
+
+    it('should track modified files', () => {
+        const file = 'test.ts';
+        index.markFileModified(file);
+        const recent = index.getRecentlyModified(1000);
+        expect(recent).toContain(path.join(testDir, file));
+    });
+
 });
 
 describe('SymbolIndex persistence (disk-backed)', () => {
