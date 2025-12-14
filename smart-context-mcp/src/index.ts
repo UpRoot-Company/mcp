@@ -71,7 +71,7 @@ export class SmartContextServer {
     private indexDatabase: IndexDatabase;
     private transactionLog: TransactionLog;
     private incrementalIndexer?: IncrementalIndexer;
-        private sigintListener?: () => Promise<void>;
+    private sigintListener?: () => Promise<void>;
     private static hasSigintListener = false;
     private static readonly READ_CODE_MAX_BYTES = 1_000_000;
     private static readonly READ_FILE_DEFAULT_MAX_BYTES = 65_536;
@@ -91,11 +91,11 @@ export class SmartContextServer {
         return parsed;
     }
 
-        constructor(rootPath: string, fileSystem?: IFileSystem) {
+    constructor(rootPath: string, fileSystem?: IFileSystem) {
         if (ENABLE_DEBUG_LOGS) {
             console.error("DEBUG: SmartContextServer constructor started");
         }
-                this.server = new Server({
+        this.server = new Server({
             name: "smart-context-mcp",
             version: "4.0.0",
         }, {
@@ -104,7 +104,7 @@ export class SmartContextServer {
             },
         });
 
-                this.rootPath = path.resolve(rootPath);
+        this.rootPath = path.resolve(rootPath);
         this.fileSystem = fileSystem ?? new NodeFileSystem(this.rootPath);
         if (this.fileSystem instanceof NodeFileSystem) {
             try {
@@ -116,7 +116,7 @@ export class SmartContextServer {
                 this.rootRealPath = undefined;
             }
         }
-                const isTestEnv = process.env.NODE_ENV === 'test' || process.env.JEST_WORKER_ID !== undefined;
+        const isTestEnv = process.env.NODE_ENV === 'test' || process.env.JEST_WORKER_ID !== undefined;
         this.exposeCompatTools = process.env.SMART_CONTEXT_EXPOSE_COMPAT_TOOLS === 'true';
         this.readFileMaxBytes = SmartContextServer.parsePositiveIntEnv(
             'SMART_CONTEXT_READ_FILE_MAX_BYTES',
@@ -237,7 +237,7 @@ export class SmartContextServer {
         return patterns;
     }
 
-        private _getAbsPathAndVerify(filePath: string): string {
+    private _getAbsPathAndVerify(filePath: string): string {
         const absPath = path.isAbsolute(filePath)
             ? path.normalize(filePath)
             : path.join(this.rootPath, filePath);
@@ -317,7 +317,7 @@ export class SmartContextServer {
         return relative.replace(/\\/g, '/');
     }
 
-        private async buildSmartFileProfile(absPath: string, content: string, stats: FileStats | fs.Stats): Promise<SmartFileProfile> {
+    private async buildSmartFileProfile(absPath: string, content: string, stats: FileStats | fs.Stats): Promise<SmartFileProfile> {
         await this.dependencyGraph.ensureBuilt();
         const relativePath = path.relative(this.rootPath, absPath) || path.basename(absPath);
         const [outgoingDeps, incomingRefs] = await Promise.all([
@@ -344,7 +344,7 @@ export class SmartContextServer {
             console.error(`Structure extraction failed for ${absPath}:`, error);
         }
 
-                const metaAnalysis = FileProfiler.analyzeMetadata(content, absPath);
+        const metaAnalysis = FileProfiler.analyzeMetadata(content, absPath);
         const lineCount = content.length === 0 ? 0 : content.split(/\r?\n/).length;
 
         const mtimeMs = typeof (stats as any).mtimeMs === "number"
@@ -851,7 +851,15 @@ export class SmartContextServer {
         return Math.max(0, Math.min(1, value));
     }
 
-        private async pathExists(absPath: string): Promise<boolean> {
+    private looksLikeFilename(query: string): boolean {
+        return (
+            /^[A-Z0-9-_]+\.(ts|js|tsx|jsx|md|json|yaml|yml)$/i.test(query) ||
+            /^ADR-\d+/.test(query) ||
+            (query.includes('.') && !query.includes(' '))
+        );
+    }
+
+    private async pathExists(absPath: string): Promise<boolean> {
         try {
             return await this.fileSystem.exists(absPath);
         } catch {
@@ -936,7 +944,7 @@ export class SmartContextServer {
         return undefined;
     }
 
-        private async executeReadCode(args: ReadCodeArgs): Promise<ReadCodeResult> {
+    private async executeReadCode(args: ReadCodeArgs): Promise<ReadCodeResult> {
         if (!args || typeof args.filePath !== "string" || !args.filePath.trim()) {
             throw new McpError(ErrorCode.InvalidParams, "Provide 'filePath' to read_code.");
         }
@@ -1003,6 +1011,15 @@ export class SmartContextServer {
             searchResult = { results: await this.runSymbolSearchResults(args.query, maxResults) };
         } else if (requestedType === "file") {
             searchResult = { results: await this.runFileSearchResults(args.query, maxResults, args) };
+        } else if (requestedType === "filename") {
+            searchResult = {
+                results: await this.searchEngine.searchFilenames(
+                    args.query,
+                    { fuzzyFilename: true, filenameOnly: false, maxResults }
+                ),
+                inferredType: "filename"
+            };
+
         } else {
             // Auto mode
             const inferred = this.inferSearchProjectType(args.query);
@@ -1129,7 +1146,7 @@ export class SmartContextServer {
         return `${prefix}:${identifier}`;
     }
 
-        private async executeAnalyzeRelationship(args: AnalyzeRelationshipArgs): Promise<AnalyzeRelationshipResult> {
+    private async executeAnalyzeRelationship(args: AnalyzeRelationshipArgs): Promise<AnalyzeRelationshipResult> {
         if (!args || typeof args.target !== "string" || !args.target.trim()) {
             throw new McpError(ErrorCode.InvalidParams, "Provide 'target' to analyze_relationship.");
         }
@@ -1317,7 +1334,7 @@ export class SmartContextServer {
 
         // Tier 1: Symbol Index (includes fuzzy search)
         const matches = await this.symbolIndex.search(args.target);
-        
+
         if (matches.length > 0) {
             const first = matches[0];
             const absPath = this._getAbsPathAndVerify(first.filePath);
@@ -1331,25 +1348,25 @@ export class SmartContextServer {
         // Tier 2: AST Direct Parsing
         const astMatches = await this.fallbackResolver.parseFileForSymbol(args.target);
         if (astMatches.length > 0) {
-             const first = astMatches[0];
-             const absPath = this._getAbsPathAndVerify(first.filePath);
-             return {
-                 type: "symbol",
-                 path: this.normalizeRelativePath(absPath),
-                 symbolName: first.symbol.name
-             };
+            const first = astMatches[0];
+            const absPath = this._getAbsPathAndVerify(first.filePath);
+            return {
+                type: "symbol",
+                path: this.normalizeRelativePath(absPath),
+                symbolName: first.symbol.name
+            };
         }
 
         // Tier 3: Regex Heuristic
         const regexMatches = await this.fallbackResolver.regexSymbolSearch(args.target);
         if (regexMatches.length > 0) {
-             const first = regexMatches[0];
-             const absPath = this._getAbsPathAndVerify(first.filePath);
-             return {
-                 type: "symbol",
-                 path: this.normalizeRelativePath(absPath),
-                 symbolName: first.symbol.name
-             };
+            const first = regexMatches[0];
+            const absPath = this._getAbsPathAndVerify(first.filePath);
+            return {
+                type: "symbol",
+                path: this.normalizeRelativePath(absPath),
+                symbolName: first.symbol.name
+            };
         }
 
         // Enhanced error with suggestions
@@ -1455,7 +1472,7 @@ export class SmartContextServer {
             if (!parentExists && !createDirs) {
                 throw new McpError(ErrorCode.InvalidParams, `Missing directory '${this.normalizeRelativePath(parentDir)}'. Set createMissingDirectories=true.`);
             }
-                        if (!dryRun) {
+            if (!dryRun) {
                 if (!parentExists && createDirs) {
                     await this.fileSystem.createDir(parentDir);
                 }
@@ -1685,7 +1702,7 @@ export class SmartContextServer {
         }
     }
 
-        private async invalidateTouchedFiles(touchedFiles: Set<string>): Promise<void> {
+    private async invalidateTouchedFiles(touchedFiles: Set<string>): Promise<void> {
         for (const absPath of touchedFiles) {
             await this.dependencyGraph.invalidateFile(absPath);
             this.callGraphBuilder.invalidateFile(absPath);
@@ -1720,7 +1737,7 @@ export class SmartContextServer {
             case "guidance": {
                 const playbookPath = path.join(this.rootPath, 'docs', 'agent-playbook.md');
                 let markdown: string | undefined;
-                                try {
+                try {
                     markdown = await this.fileSystem.readFile(playbookPath);
                 } catch {
                     markdown = undefined;
@@ -1733,7 +1750,7 @@ export class SmartContextServer {
                     }
                 };
             }
-                        case "status": {
+            case "status": {
                 await this.dependencyGraph.ensureBuilt();
                 const status = await this.dependencyGraph.getIndexStatus();
                 return { output: "Index status retrieved.", data: status };
@@ -1789,7 +1806,7 @@ export class SmartContextServer {
         });
     }
 
-        private listIntentTools() {
+    private listIntentTools() {
         const intentTools = [
             {
                 name: "read_code",
@@ -1943,7 +1960,7 @@ export class SmartContextServer {
         const extendedTools = [
             {
                 name: "read_file",
-                                description: "Reads a file. Returns a Smart File Profile by default; set full=true (or view=\"full\") for JSON-wrapped raw content (may be truncated).",
+                description: "Reads a file. Returns a Smart File Profile by default; set full=true (or view=\"full\") for JSON-wrapped raw content (may be truncated).",
                 inputSchema: {
                     type: "object",
                     properties: {
@@ -2208,7 +2225,7 @@ export class SmartContextServer {
                     properties: { symbolName: { type: "string" }, definitionFilePath: { type: "string" }, newName: { type: "string" } },
                     required: ["symbolName", "definitionFilePath", "newName"]
                 }
-                        }
+            }
         ];
 
         return [...intentTools, ...extendedTools];
@@ -2217,7 +2234,7 @@ export class SmartContextServer {
     private async handleCallTool(toolName: string, args: any): Promise<any> {
         try {
             switch (toolName) {
-                                case "read_code": {
+                case "read_code": {
                     if (!args || typeof args.filePath !== "string") {
                         return this._createErrorResponse("MissingParameter", "Provide 'filePath' to read_code.");
                     }
@@ -2227,14 +2244,14 @@ export class SmartContextServer {
                     const result = await this.executeReadCode(args as ReadCodeArgs);
                     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
                 }
-                                case "search_project": {
+                case "search_project": {
                     if (!args || typeof args.query !== "string") {
                         return this._createErrorResponse("MissingParameter", "Provide 'query' to search_project.");
                     }
                     const result = await this.executeSearchProject(args as SearchProjectArgs);
                     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
                 }
-                                case "analyze_relationship": {
+                case "analyze_relationship": {
                     if (!args || typeof args.target !== "string") {
                         return this._createErrorResponse("MissingParameter", "Provide 'target' to analyze_relationship.");
                     }
@@ -2270,7 +2287,7 @@ export class SmartContextServer {
                     const result = await this.executeManageProject(args as ManageProjectArgs);
                     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
                 }
-                                                case "read_file": {
+                case "read_file": {
                     const filePath = args.path || args.filePath;
                     if (!filePath) {
                         return this._createErrorResponse("MissingParameter", "Provide 'path' to read_file.");
@@ -2284,7 +2301,7 @@ export class SmartContextServer {
                             this.fileSystem.stat(absPath)
                         ]);
 
-                                                if (fullMode) {
+                        if (fullMode) {
                             const maxBytes = this.readFileMaxBytes;
                             const rawBytes = Buffer.from(content, 'utf8');
                             const truncated = rawBytes.length > maxBytes;
@@ -2315,7 +2332,7 @@ export class SmartContextServer {
                         return this._createErrorResponse("InternalError", error.message);
                     }
                 }
-                                case "analyze_file": {
+                case "analyze_file": {
                     // Logic moved from old read_file
                     const filePath = args.path || args.filePath;
                     if (!filePath) {
@@ -2335,13 +2352,13 @@ export class SmartContextServer {
                         return this._createErrorResponse("InternalError", error.message);
                     }
                 }
-                                case "read_file_skeleton": {
+                case "read_file_skeleton": {
                     const absPath = this._getAbsPathAndVerify(args.filePath);
                     const content = await this.fileSystem.readFile(absPath);
                     const format = args.format || 'text'; // Default to text
 
                     if (format === 'json') {
-                        const structure = await this.skeletonGenerator.generateStructureJson(absPath, content); 
+                        const structure = await this.skeletonGenerator.generateStructureJson(absPath, content);
                         return { content: [{ type: "text", text: JSON.stringify(structure, null, 2) }] };
                     } else {
                         const skeleton = await this.skeletonGenerator.generateSkeleton(absPath, content);
@@ -2353,14 +2370,14 @@ export class SmartContextServer {
                     const results = await this.symbolIndex.search(query);
                     return { content: [{ type: "text", text: JSON.stringify(results, null, 2) }] };
                 }
-                                case "get_file_dependencies": {
+                case "get_file_dependencies": {
                     await this.dependencyGraph.ensureBuilt();
                     const absPath = this._getAbsPathAndVerify(args.filePath);
                     const direction = args.direction || 'outgoing';
                     const deps = await this.dependencyGraph.getDependencies(absPath, direction);
                     return { content: [{ type: "text", text: JSON.stringify(deps, null, 2) }] };
                 }
-                                case "analyze_impact": {
+                case "analyze_impact": {
                     await this.dependencyGraph.ensureBuilt();
                     const absPath = this._getAbsPathAndVerify(args.filePath);
                     const direction = args.direction || 'incoming';
@@ -2448,7 +2465,7 @@ export class SmartContextServer {
                 case "preview_rename": {
                     const defPath = this._getAbsPathAndVerify(args.definitionFilePath);
                     const refs = await this.referenceFinder.findReferences(args.symbolName, defPath);
-                    
+
                     const editsByFile = new Map<string, Edit[]>();
                     for (const ref of refs) {
                         const refAbsPath = path.resolve(this.rootPath, ref.filePath);
@@ -2464,16 +2481,16 @@ export class SmartContextServer {
                     // Use batch_edit logic but forcing dryRun=true via EditCoordinator directly?
                     // handleCallTool calls EditCoordinator.applyBatchEdits.
                     // We can call it directly.
-                    
-                                        const result = await this.editCoordinator.applyBatchEdits(fileEdits, true);
+
+                    const result = await this.editCoordinator.applyBatchEdits(fileEdits, true);
                     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
                 }
-                                case "get_index_status": {
+                case "get_index_status": {
                     await this.dependencyGraph.ensureBuilt();
                     const status = await this.dependencyGraph.getIndexStatus();
                     return { content: [{ type: "text", text: JSON.stringify(status, null, 2) }] };
                 }
-                                case "rebuild_index": {
+                case "rebuild_index": {
                     this.moduleResolver.clearCache();
                     await this.dependencyGraph.build();
                     this.callGraphBuilder.clearCaches();
@@ -2530,7 +2547,7 @@ export class SmartContextServer {
                     const result: ReadFragmentResult = await this.contextEngine.readFragment(absPath, ranges, args.contextLines);
                     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
                 }
-                                                case "write_file": {
+                case "write_file": {
                     // Simple overwrite alias
                     const filePath = args.path || args.filePath;
                     if (!filePath) {
@@ -2563,9 +2580,9 @@ export class SmartContextServer {
                     });
 
                     const impactPreview = await this.previewEditImpact(absPath, adaptedEdits.length);
-                    
+
                     const result: EditResult = await this.editCoordinator.applyEdits(absPath, adaptedEdits as Edit[], args.dryRun);
-                    
+
                     if (!result.success) {
                         const errorCode = result.errorCode || "EditFailed";
                         const details = {
@@ -2608,8 +2625,8 @@ export class SmartContextServer {
                 }
                 case "batch_edit": {
                     const fileEdits: { filePath: string; edits: Edit[] }[] = args.fileEdits.map((fileEdit: any) => {
-                         const absPath = this._getAbsPathAndVerify(fileEdit.filePath);
-                         const adaptedEdits = fileEdit.edits.map((edit: any) => {
+                        const absPath = this._getAbsPathAndVerify(fileEdit.filePath);
+                        const adaptedEdits = fileEdit.edits.map((edit: any) => {
                             if (edit.fuzzyMatch === true) {
                                 edit.fuzzyMode = "whitespace";
                             }
@@ -2623,10 +2640,10 @@ export class SmartContextServer {
                         Promise.all(fileEdits.map(entry => this.previewEditImpact(entry.filePath, entry.edits.length))),
                         this.buildBatchEditGuidance(fileEdits)
                     ]);
-                    
+
                     const result: EditResult = await this.editCoordinator.applyBatchEdits(fileEdits, args.dryRun);
 
-                     if (!result.success) {
+                    if (!result.success) {
                         const errorCode = result.errorCode || "BatchEditFailed";
                         const details = {
                             ...result.details,
@@ -2720,7 +2737,7 @@ export class SmartContextServer {
                 case "get_workflow_guidance": {
                     const playbookPath = path.join(this.rootPath, 'docs', 'agent-playbook.md');
                     let markdown: string | undefined;
-                                        try {
+                    try {
                         markdown = await this.fileSystem.readFile(playbookPath);
                     } catch (error) {
                         console.warn(`Agent playbook markdown missing:`, error);
@@ -2735,7 +2752,7 @@ export class SmartContextServer {
                     const tree: string = await this.contextEngine.listDirectoryTree(absPath, args.depth, this.rootPath);
                     return { content: [{ type: "text", text: tree }] };
                 }
-                                case "debug_edit_match": {
+                case "debug_edit_match": {
                     const absPath = this._getAbsPathAndVerify(args.filePath);
                     const content = await this.fileSystem.readFile(absPath);
                     const edit: Edit = {
@@ -2801,9 +2818,9 @@ export class SmartContextServer {
                 return this._createErrorResponse(
                     "AmbiguousMatch",
                     ambiguousError.message,
-                    `Ambiguity detected. Refine your request by adding a 'lineRange' parameter to specify which occurrence to target. Conflicting lines are: ${ambiguousError.conflictingLines.join(', ')}.`,{
-                        conflictingLines: ambiguousError.conflictingLines
-                    }
+                    `Ambiguity detected. Refine your request by adding a 'lineRange' parameter to specify which occurrence to target. Conflicting lines are: ${ambiguousError.conflictingLines.join(', ')}.`, {
+                    conflictingLines: ambiguousError.conflictingLines
+                }
                 );
             }
             return this._createErrorResponse("InternalError", error.message, "Check server logs for details.");

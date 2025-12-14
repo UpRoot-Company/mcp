@@ -552,7 +552,7 @@ export interface ReadCodeResult {
     truncated: boolean;
 }
 
-export type SearchProjectType = "auto" | "file" | "symbol" | "directory";
+export type SearchProjectType = "auto" | "file" | "symbol" | "directory" | "filename";
 
 export interface SearchProjectArgs {
     query: string;
