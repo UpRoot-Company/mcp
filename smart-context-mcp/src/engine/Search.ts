@@ -1,6 +1,6 @@
 import path from "path";
 import { BM25FRanking, BM25FConfig } from "./Ranking.js";
-import { FileSearchResult, Document, SearchOptions, SearchFieldType, SymbolInfo } from "../types.js";
+import { FileSearchResult, Document, SearchOptions, SearchFieldType, SymbolInfo, SearchProjectResultEntry } from "../types.js";
 import { TrigramIndex, TrigramIndexOptions } from "./TrigramIndex.js";
 import { IFileSystem } from "../platform/FileSystem.js";
 import { CallGraphMetricsBuilder, CallGraphSignals } from "./CallGraphMetricsBuilder.js";
@@ -703,5 +703,103 @@ export class SearchEngine {
         const filePath = docId.slice(0, separatorIndex);
         const line = parseInt(docId.slice(separatorIndex + 1), 10);
         return [filePath, Number.isFinite(line) ? line : 0];
+    }
+
+    public async searchFilenames(
+        query: string,
+        options: {
+            fuzzyFilename?: boolean;
+            filenameOnly?: boolean;
+            maxResults?: number;
+        } = {}
+    ): Promise<SearchProjectResultEntry[]> {
+        const allFiles = await this.fileSystem.listFiles(this.rootPath);
+        const { fuzzyFilename = true, filenameOnly = false, maxResults = 20 } = options;
+
+        const matches = allFiles
+            .map((filepath: string) => ({
+                filepath,
+                filename: path.basename(filepath),
+                score: this.calculateFilenameScore(
+                    filepath,
+                    query,
+                    { fuzzy: fuzzyFilename, basenameOnly: filenameOnly }
+                )
+            }))
+            .filter((match: { score: number }) => match.score > 0)
+            .sort((a: { score: number }, b: { score: number }) => b.score - a.score)
+            .slice(0, maxResults);
+
+        return matches.map((match: { filepath: string, filename: string, score: number }) => ({
+            type: "filename",
+            path: match.filepath,
+            score: match.score / 100,
+            context: `File: ${match.filename}`,
+            line: undefined
+        }));
+    }
+
+    private calculateFilenameScore(
+        filepath: string,
+        query: string,
+        options: { fuzzy: boolean; basenameOnly: boolean }
+    ): number {
+        const target = options.basenameOnly
+            ? path.basename(filepath)
+            : filepath;
+
+        const lowerTarget = target.toLowerCase();
+        const lowerQuery = query.toLowerCase();
+
+        // Exact match: highest score
+        if (lowerTarget === lowerQuery) return 100;
+
+        // Basename exact match
+        if (path.basename(filepath).toLowerCase() === lowerQuery) return 90;
+
+        // Starts with query
+        if (lowerTarget.startsWith(lowerQuery)) return 80;
+
+        // Contains query
+        if (lowerTarget.includes(lowerQuery)) return 60;
+
+        // Fuzzy matching (if enabled)
+        if (options.fuzzy) {
+            const distance = this.levenshteinDistance(lowerQuery, path.basename(filepath).toLowerCase());
+            const maxLength = Math.max(lowerQuery.length, path.basename(filepath).length);
+            const similarity = 1 - (distance / maxLength);
+
+            if (similarity > 0.7) return similarity * 50;
+        }
+
+        return 0;
+    }
+
+    private levenshteinDistance(a: string, b: string): number {
+        const matrix: number[][] = [];
+
+        for (let i = 0; i <= b.length; i++) {
+            matrix[i] = [i];
+        }
+
+        for (let j = 0; j <= a.length; j++) {
+            matrix[0][j] = j;
+        }
+
+        for (let i = 1; i <= b.length; i++) {
+            for (let j = 1; j <= a.length; j++) {
+                if (b.charAt(i - 1) === a.charAt(j - 1)) {
+                    matrix[i][j] = matrix[i - 1][j - 1];
+                } else {
+                    matrix[i][j] = Math.min(
+                        matrix[i - 1][j - 1] + 1, // substitution
+                        matrix[i][j - 1] + 1,     // insertion
+                        matrix[i - 1][j] + 1      // deletion
+                    );
+                }
+            }
+        }
+
+        return matrix[b.length][a.length];
     }
 }

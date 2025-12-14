@@ -566,7 +566,7 @@ export interface SearchProjectArgs {
 }
 
 export interface SearchProjectResultEntry {
-    type: "file" | "symbol" | "directory";
+    type: "file" | "symbol" | "directory" | "filename";
     path: string;
     score: number;
     context?: string;

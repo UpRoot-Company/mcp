@@ -24,7 +24,8 @@ export interface IFileSystem {
     createDir(path: string): Promise<void>;
     stat(path: string): Promise<FileStats>;
     watch?(path: string, onChange: (event: FileChangeEvent) => void): () => void;
-}
+
+    listFiles(basePath: string): Promise<string[]>;}
 
 export class NodeFileSystem implements IFileSystem {
     private readonly rootPath: string;
@@ -103,6 +104,29 @@ export class NodeFileSystem implements IFileSystem {
             onChange({ path: affected, type: change });
         });
         return () => watcher.close();
+    }
+
+    async listFiles(basePath: string): Promise<string[]> {
+        let results: string[] = [];
+        const resolvedBasePath = this.resolvePath(basePath); // Use resolvePath for safety
+        const filesAndDirs = await this.readDir(resolvedBasePath);
+
+        for (const entry of filesAndDirs) {
+            const entryPath = path.join(resolvedBasePath, entry);
+            let stats: FileStats;
+            try {
+                stats = await this.stat(entryPath);
+            } catch {
+                continue;
+            }
+
+            if (stats.isDirectory()) {
+                results = results.concat(await this.listFiles(entryPath)); // Recursive call
+            } else {
+                results.push(entryPath);
+            }
+        }
+        return results;
     }
 }
 
@@ -275,5 +299,29 @@ export class MemoryFileSystem implements IFileSystem {
         return () => {
             this.watchers.delete(id);
         };
+    }
+
+    async listFiles(basePath: string): Promise<string[]> {
+        const resolvedBasePath = this.resolvePath(basePath);
+        const results: string[] = [];
+
+        // Collect files
+        for (const filePath of this.files.keys()) {
+            if (filePath.startsWith(resolvedBasePath) && !this.directories.has(filePath)) {
+                results.push(filePath);
+            }
+        }
+
+        // Recursively collect from subdirectories
+        for (const dirPath of this.directories.keys()) {
+            if (dirPath.startsWith(resolvedBasePath) && dirPath !== resolvedBasePath) {
+                // Check if dirPath is a direct child of resolvedBasePath
+                const relativePath = path.relative(resolvedBasePath, dirPath);
+                if (!relativePath.includes(path.sep)) { // Direct child directory
+                    results.push(...await this.listFiles(dirPath));
+                }
+            }
+        }
+        return results;
     }
 }
