@@ -10,20 +10,20 @@ Smart Context implements a three-stage pipeline optimized for AI agents working 
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│                   Scout → Read → Edit Pipeline              │
+│                   Scout → Read → Edit Pipeline               │
 ├──────────────────────────────────────────────────────────────┤
 │                                                              │
-│  SCOUT                   READ                      EDIT      │
-│  (locate)               (understand)            (modify)     │
+│  SCOUT                 READ                EDIT              │
+│  (locate)              (understand)        (modify)          │
 │                                                              │
-│  • BM25F ranking        • Skeleton view        • Normalization
-│  • Trigram filtering    • Full content        • Fuzzy matching
-│  • Type-aware search    • AST analysis        • Transactions
-│                         • Metadata            • Safety verify
-│                         • Dependencies        • Rollback
+│  • BM25F ranking       • Skeleton view     • Normalization   │
+│  • Trigram filtering   • Full content      • Fuzzy matching  │
+│  • Type-aware search   • AST analysis      • Transactions    │
+│                        • Metadata          • Safety verify   │
+│                        • Dependencie       • Rollback        │
 │                                                              │
-│  P50: 200ms            P50: 100-300ms        P50: 100-500ms │
-│  Token: 800-2K         Token: 200-5K         Token: 500-2K  │
+│  P50: 200ms            P50: 100-300ms      P50: 100-500ms    │
+│  Token: 800-2K         Token: 200-5K       Token: 500-2K     │
 │                                                              │
 └──────────────────────────────────────────────────────────────┘
 ```
@@ -96,10 +96,10 @@ When searching for a symbol name, tries progressively looser matching:
 
 ```
 ┌─────────────────────────────────────────────┐
-│  Tier 1: EXACT MATCH (Highest Confidence)  │
-│  symbolName === "MyClass"                  │
-│  Confidence: 1.0                           │
-│  Result: Exact type checking available     │
+│  Tier 1: EXACT MATCH (Highest Confidence)   │
+│  symbolName === "MyClass"                   │
+│  Confidence: 1.0                            │
+│  Result: Exact type checking available      │
 └─────────────────────────────────────────────┘
                     ↓
         (If no exact match found)

@@ -218,17 +218,17 @@ Server crashes during STATE 4 (after writing file 3 of 5):
 
 ```
 Transaction Log (in SQLite):
-┌─────────────────────────────────────────┐
-│ id: "txn-abc123"                        │
-│ status: "pending"                       │
-│ snapshots: [                            │
-│   { path: "a.ts", originalContent: "..." },
-│   { path: "b.ts", originalContent: "..." },
-│   { path: "c.ts", originalContent: "..." },
-│   { path: "d.ts", originalContent: "..." },
-│   { path: "e.ts", originalContent: "..." }
-│ ]                                       │
-└─────────────────────────────────────────┘
+┌────────────────────────────────────────────┐
+│ id: "txn-abc123"                           │
+│ status: "pending"                          │
+│ snapshots: [                               │
+│   { path: "a.ts", originalContent: "..." },│
+│   { path: "b.ts", originalContent: "..." },│
+│   { path: "c.ts", originalContent: "..." },│
+│   { path: "d.ts", originalContent: "..." },│
+│   { path: "e.ts", originalContent: "..." } │
+│ ]                                          │
+└────────────────────────────────────────────┘
 ```
 
 ### Recovery Procedure
