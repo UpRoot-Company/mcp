@@ -127,3 +127,68 @@ export const AgentWorkflowGuidance: {
         version: "2025-12-10"
     }
 };
+
+export const AGENT_WORKFLOW_PATTERNS = {
+    "finding-files": {
+        name: "Finding Files by Name",
+        scenario: "User wants to find a specific file by name (e.g., 'find config.json')",
+        bestApproach: [
+            {
+                step: 1,
+                tool: "search_project",
+                params: { query: "config.json", type: "filename" },
+                reason: "Primary method for filename searches"
+            },
+            {
+                step: 2,
+                tool: "search_project",
+                params: { query: "config", type: "file" },
+                reason: "Fallback: search file contents",
+                when: "No results from step 1"
+            }
+        ],
+        commonMistakes: [
+            "Using search_project with type='file' (searches content, not names)",
+            "Using Glob without trying search_project first"
+        ]
+    },
+
+    "finding-symbols": {
+        name: "Finding Symbols (Functions, Classes, etc.)",
+        scenario: "User wants to find where a symbol is defined",
+        bestApproach: [
+            {
+                step: 1,
+                tool: "analyze_relationship",
+                params: { target: "MyClass", mode: "dependencies" },
+                reason: "Fastest if symbol is indexed"
+            },
+            {
+                step: 2,
+                tool: "search_project",
+                params: { query: "class MyClass", type: "symbol" },
+                reason: "Fallback: content search",
+                when: "analyze_relationship fails"
+            }
+        ]
+    },
+
+    "recovering-from-failures": {
+        name: "Recovering from Tool Failures",
+        scenario: "A tool call failed - what to do next?",
+        bestApproach: [
+            {
+                condition: "analyze_relationship failed with 'Symbol not found'",
+                nextAction: "Check error.details.similarSymbols for typos, or use search_project"
+            },
+            {
+                condition: "search_project returned 0 results with type='file'",
+                nextAction: "Try type='filename' if searching for a filename"
+            },
+            {
+                condition: "edit_code failed with 'Target not found'",
+                nextAction: "Use read_code to verify exact content, then retry"
+            }
+        ]
+    }
+};

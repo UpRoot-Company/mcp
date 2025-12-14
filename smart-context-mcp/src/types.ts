@@ -172,6 +172,15 @@ export interface ToolSuggestion {
     toolName: string;
     rationale: string;
     exampleArgs?: Record<string, unknown>;
+    priority?: "high" | "medium" | "low";
+}
+
+export interface EnhancedErrorDetails {
+    similarSymbols?: string[];
+    similarFiles?: string[];
+    nextActionHint?: string;
+    toolSuggestions?: ToolSuggestion[];
+    context?: Record<string, any>;
 }
 
 export type ImpactRiskLevel = 'low' | 'medium' | 'high';
@@ -568,7 +577,10 @@ export interface SearchProjectResultEntry {
 
 export interface SearchProjectResult {
     results: SearchProjectResultEntry[];
-    inferredType?: "file" | "symbol" | "directory";
+    inferredType?: "file" | "symbol" | "directory" | "filename";
+    message?: string;
+    suggestions?: ToolSuggestion[];
+    nextActionHint?: string;
 }
 
 export type AnalyzeRelationshipMode = "impact" | "dependencies" | "calls" | "data_flow" | "types";

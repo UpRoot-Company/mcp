@@ -19,6 +19,7 @@ import { HistoryEngine } from "./engine/History.js";
 import { EditCoordinator } from "./engine/EditCoordinator.js";
 import { SkeletonGenerator } from "./ast/SkeletonGenerator.js";
 import { FallbackResolver } from "./resolution/FallbackResolver.js";
+import { ErrorEnhancer } from "./errors/ErrorEnhancer.js";
 import { AstManager } from "./ast/AstManager.js";
 import { SymbolIndex } from "./ast/SymbolIndex.js";
 import { ModuleResolver } from "./ast/ModuleResolver.js";
@@ -994,38 +995,52 @@ export class SmartContextServer {
         const requestedType = (args.type ?? "auto") as SearchProjectType;
         const maxResults = this.normalizeMaxResults(args.maxResults);
 
+        let searchResult: SearchProjectResult = { results: [] };
+
         if (requestedType === "directory") {
-            return { results: await this.runDirectorySearchResults(args.query, maxResults) };
-        }
-        if (requestedType === "symbol") {
-            return { results: await this.runSymbolSearchResults(args.query, maxResults) };
-        }
-        if (requestedType === "file") {
-            return { results: await this.runFileSearchResults(args.query, maxResults, args) };
-        }
+            searchResult = { results: await this.runDirectorySearchResults(args.query, maxResults) };
+        } else if (requestedType === "symbol") {
+            searchResult = { results: await this.runSymbolSearchResults(args.query, maxResults) };
+        } else if (requestedType === "file") {
+            searchResult = { results: await this.runFileSearchResults(args.query, maxResults, args) };
+        } else {
+            // Auto mode
+            const inferred = this.inferSearchProjectType(args.query);
+            if (inferred === "directory") {
+                searchResult = { results: await this.runDirectorySearchResults(args.query, maxResults), inferredType: inferred };
+            } else if (inferred === "file") {
+                searchResult = { results: await this.runFileSearchResults(args.query, maxResults, args), inferredType: inferred };
+            } else {
+                let symbolResults = await this.runClusterSearchResults(args.query, maxResults);
+                if (symbolResults.length === 0) {
+                    symbolResults = await this.runSymbolSearchResults(args.query, maxResults);
+                }
 
-        const inferred = this.inferSearchProjectType(args.query);
-        if (inferred === "directory") {
-            return { results: await this.runDirectorySearchResults(args.query, maxResults), inferredType: inferred };
-        }
-        if (inferred === "file") {
-            return { results: await this.runFileSearchResults(args.query, maxResults, args), inferredType: inferred };
-        }
-
-        let symbolResults = await this.runClusterSearchResults(args.query, maxResults);
-        if (symbolResults.length === 0) {
-            symbolResults = await this.runSymbolSearchResults(args.query, maxResults);
-        }
-
-        // Fallback to text search if no symbols found in auto mode
-        if (symbolResults.length === 0) {
-            const fileResults = await this.runFileSearchResults(args.query, maxResults, args);
-            if (fileResults.length > 0) {
-                return { results: fileResults, inferredType: "file" };
+                // Fallback to text search if no symbols found in auto mode
+                if (symbolResults.length === 0) {
+                    const fileResults = await this.runFileSearchResults(args.query, maxResults, args);
+                    if (fileResults.length > 0) {
+                        searchResult = { results: fileResults, inferredType: "file" };
+                    } else {
+                        searchResult = { results: [], inferredType: "symbol" };
+                    }
+                } else {
+                    searchResult = { results: symbolResults, inferredType: "symbol" };
+                }
             }
         }
 
-        return { results: symbolResults, inferredType: "symbol" };
+        if (searchResult.results.length === 0) {
+            const enhancedDetails = ErrorEnhancer.enhanceSearchNotFound(args.query, args.type);
+            return {
+                ...searchResult,
+                message: "No results found",
+                suggestions: enhancedDetails.toolSuggestions,
+                nextActionHint: enhancedDetails.nextActionHint
+            };
+        }
+
+        return searchResult;
     }
 
     private async runClusterSearchResults(query: string, maxResults: number): Promise<SearchProjectResult["results"]> {
@@ -1337,7 +1352,17 @@ export class SmartContextServer {
              };
         }
 
-        throw new McpError(ErrorCode.InvalidParams, `Unable to resolve symbol '${args.target}'. Provide 'contextPath' to disambiguate.`);
+        // Enhanced error with suggestions
+        const enhancedDetails = ErrorEnhancer.enhanceSymbolNotFound(
+            args.target,
+            this.symbolIndex
+        );
+
+        throw new McpError(
+            ErrorCode.InvalidParams,
+            `Unable to resolve symbol '${args.target}'. Provide 'contextPath' to disambiguate.`,
+            enhancedDetails
+        );
     }
 
     private async executeEditCode(args: EditCodeArgs): Promise<EditCodeResult> {
