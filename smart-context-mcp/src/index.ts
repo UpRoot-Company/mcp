@@ -30,7 +30,7 @@ import { FileProfiler, FileMetadataAnalysis } from "./engine/FileProfiler.js";
 import { AgentWorkflowGuidance } from "./engine/AgentPlaybook.js";
 import { ClusterSearchEngine, ClusterSearchOptions, ClusterExpansionOptions } from "./engine/ClusterSearch/index.js";
 import { BuildClusterOptions, ExpandableRelationship } from "./engine/ClusterSearch/ClusterBuilder.js";
-import { FileSearchResult, ReadFragmentResult, EditResult, DirectoryTree, Edit, EngineConfig, SmartFileProfile, SymbolInfo, ToolSuggestion, ImpactPreview, BatchEditGuidance, ReadCodeResult, ReadCodeArgs, SearchProjectResult, SearchProjectArgs, AnalyzeRelationshipResult, EditCodeArgs, EditCodeResult, EditCodeEdit, ManageProjectResult, ManageProjectArgs, AnalyzeRelationshipArgs, ReadCodeView, SearchProjectType, ResolvedRelationshipTarget, AnalyzeRelationshipDirection, AnalyzeRelationshipNode, AnalyzeRelationshipEdge, LineRange, DiffMode, SafetyLevel, RefactoringContext } from "./types.js";
+import { FileSearchResult, ReadFragmentResult, EditResult, DirectoryTree, Edit, EngineConfig, SmartFileProfile, SymbolInfo, ToolSuggestion, ImpactPreview, BatchEditGuidance, ReadCodeResult, ReadCodeArgs, SearchProjectResult, SearchProjectArgs, AnalyzeRelationshipResult, EditCodeArgs, EditCodeResult, EditCodeEdit, ManageProjectResult, ManageProjectArgs, AnalyzeRelationshipArgs, ReadCodeView, SearchProjectType, ResolvedRelationshipTarget, AnalyzeRelationshipDirection, AnalyzeRelationshipNode, AnalyzeRelationshipEdge, LineRange, DiffMode, SafetyLevel, RefactoringContext, NextActionHint, BatchOpportunity, GetBatchGuidanceArgs, SuggestedBatchEdit } from "./types.js";
 import { FileStats, IFileSystem, NodeFileSystem } from "./platform/FileSystem.js";
 import { AstAwareDiff } from "./engine/AstAwareDiff.js";
 import { IndexDatabase } from "./indexing/IndexDatabase.js";
@@ -510,14 +510,45 @@ export class SmartContextServer {
     }
 
     private async buildBatchEditGuidance(fileEdits: { filePath: string }[]): Promise<BatchEditGuidance | null> {
-        if (!fileEdits || fileEdits.length <= 1) {
+        if (!fileEdits || fileEdits.length === 0) {
+            return null;
+        }
+        const absPaths = fileEdits.map(entry => entry.filePath);
+        return this.generateBatchGuidance(absPaths);
+    }
+
+    private async generateBatchGuidance(filePaths: string[], pattern?: string): Promise<BatchEditGuidance | null> {
+        if (!filePaths || filePaths.length <= 1) {
+            return null;
+        }
+        const unique = new Map<string, string>();
+        for (const abs of filePaths) {
+            const rel = this.normalizeRelativePath(abs);
+            unique.set(rel, abs);
+        }
+        const normalized = Array.from(unique.entries()).map(([rel, abs]) => ({ rel, abs }));
+        if (normalized.length <= 1) {
             return null;
         }
 
-        const normalized = fileEdits.map(entry => ({
-            abs: entry.filePath,
-            rel: this.normalizeRelativePath(entry.filePath)
-        }));
+        const { clusters, companionSuggestions } = await this.computeBatchClusters(normalized);
+        const opportunities = await this.detectBatchOpportunities(normalized, pattern);
+
+        if (clusters.length === 0 && companionSuggestions.length === 0 && opportunities.length === 0) {
+            return null;
+        }
+
+        return {
+            clusters,
+            companionSuggestions,
+            opportunities: opportunities.length ? opportunities : undefined
+        };
+    }
+
+    private async computeBatchClusters(normalized: { abs: string; rel: string }[]): Promise<{
+        clusters: BatchEditGuidance['clusters'];
+        companionSuggestions: BatchEditGuidance['companionSuggestions'];
+    }> {
         const editSet = new Set(normalized.map(entry => entry.rel));
         const adjacency = new Map<string, Set<string>>();
         const dependencyCache = new Map<string, { incoming: string[]; outgoing: string[] }>();
@@ -584,11 +615,135 @@ export class SmartContextServer {
             }
         }
 
-        if (clusters.length === 0 && companionSuggestions.length === 0) {
-            return null;
+        return { clusters, companionSuggestions };
+    }
+
+    private async detectBatchOpportunities(
+        normalized: { abs: string; rel: string }[],
+        pattern?: string
+    ): Promise<BatchOpportunity[]> {
+        if (normalized.length <= 1) {
+            return [];
         }
 
-        return { clusters, companionSuggestions };
+        const importUsage = new Map<string, Set<string>>();
+        const traitUsage = new Map<string, Set<string>>();
+
+        for (const entry of normalized) {
+            try {
+                const content = await this.fileSystem.readFile(entry.abs);
+                this.collectImportUsage(content, entry.rel, importUsage);
+                this.collectTraitUsage(content, entry.rel, traitUsage);
+            } catch (error) {
+                if (ENABLE_DEBUG_LOGS) {
+                    console.error(`[batch_guidance] Failed to analyze ${entry.abs}`, error);
+                }
+            }
+        }
+
+        let opportunities: BatchOpportunity[] = [];
+        opportunities = opportunities.concat(this.createPatternOpportunities(normalized, importUsage, "add_import"));
+        opportunities = opportunities.concat(this.createPatternOpportunities(normalized, traitUsage, "add_trait"));
+
+        if (pattern && pattern.trim().length > 0) {
+            const needle = pattern.trim().toLowerCase();
+            opportunities = opportunities.filter(op =>
+                op.type.includes(needle) ||
+                op.description.toLowerCase().includes(needle) ||
+                (op.notes?.some(note => note.toLowerCase().includes(needle)) ?? false)
+            );
+        }
+
+        return opportunities;
+    }
+
+    private collectImportUsage(content: string, relPath: string, usage: Map<string, Set<string>>): void {
+        const jsImportRegex = /import\s+(?:[\w*\s{},]+from\s+)?['"]([^'"]+)['"]/g;
+        const requireRegex = /require\(\s*['"]([^'"]+)['"]\s*\)/g;
+        const phpUseRegex = /^use\s+([^;]+);/gm;
+
+        const record = (key: string) => {
+            if (!key) return;
+            const normalizedKey = key.trim();
+            if (!normalizedKey) return;
+            if (!usage.has(normalizedKey)) {
+                usage.set(normalizedKey, new Set());
+            }
+            usage.get(normalizedKey)!.add(relPath);
+        };
+
+        let match;
+        while ((match = jsImportRegex.exec(content)) !== null) {
+            record(match[1]);
+        }
+        while ((match = requireRegex.exec(content)) !== null) {
+            record(match[1]);
+        }
+        while ((match = phpUseRegex.exec(content)) !== null) {
+            record(match[1]);
+        }
+    }
+
+    private collectTraitUsage(content: string, relPath: string, usage: Map<string, Set<string>>): void {
+        const traitRegex = /^\s+use\s+([A-Z][\w\\]+);/gm;
+        let match;
+        while ((match = traitRegex.exec(content)) !== null) {
+            const trait = match[1];
+            if (!usage.has(trait)) {
+                usage.set(trait, new Set());
+            }
+            usage.get(trait)!.add(relPath);
+        }
+    }
+
+    private createPatternOpportunities(
+        normalized: { abs: string; rel: string }[],
+        usage: Map<string, Set<string>>,
+        type: "add_import" | "add_trait"
+    ): BatchOpportunity[] {
+        const totalFiles = normalized.length;
+        const opportunities: BatchOpportunity[] = [];
+        for (const [symbol, files] of usage) {
+            const supportingFiles = Array.from(files);
+            if (supportingFiles.length === 0 || supportingFiles.length === totalFiles) {
+                continue;
+            }
+            if (supportingFiles.length < Math.max(2, Math.ceil(totalFiles * 0.5))) {
+                continue;
+            }
+            const affectedFiles = normalized
+                .filter(entry => !files.has(entry.rel))
+                .map(entry => entry.rel);
+            if (affectedFiles.length === 0) continue;
+            const coverage = supportingFiles.length / totalFiles;
+            const confidence = Number(Math.min(0.95, 0.4 + coverage * 0.5).toFixed(2));
+            const description = type === "add_import"
+                ? `Import "${symbol}" appears in ${supportingFiles.length}/${totalFiles} files; consider adding it to ${affectedFiles.length} file(s).`
+                : `Trait "${symbol}" is used in ${supportingFiles.length}/${totalFiles} files; consider adding it to ${affectedFiles.length} file(s).`;
+            const suggestedEdit: SuggestedBatchEdit = type === "add_import"
+                ? {
+                    operation: "insert",
+                    insertMode: "before",
+                    targetHint: "module import block",
+                    replacementTemplate: `import { /* members */ } from "${symbol}";`
+                }
+                : {
+                    operation: "insert",
+                    insertMode: "after",
+                    targetHint: "inside class body after opening brace",
+                    replacementTemplate: `    use ${symbol};`
+                };
+            opportunities.push({
+                type,
+                description,
+                affectedFiles,
+                supportingFiles,
+                confidence,
+                suggestedEdit,
+                notes: [`Currently in: ${supportingFiles.join(", ")}`]
+            });
+        }
+        return opportunities;
     }
 
     private _createErrorResponse(code: string, message: string, suggestion?: string | ToolSuggestion | ToolSuggestion[], details?: any): { isError: true; content: { type: "text"; text: string; }[] } {
@@ -711,6 +866,52 @@ export class SmartContextServer {
         return `${content.substring(0, limit)}\n...[truncated]`;
     }
 
+    private async buildNextActionHintForFile(filePath: string, edits: Edit[], dryRun: boolean): Promise<NextActionHint | undefined> {
+        if (dryRun) {
+            return undefined;
+        }
+        try {
+            const content = await this.fileSystem.readFile(filePath);
+            const lines = content.split(/\r?\n/);
+            const lineCount = lines.length;
+            return {
+                suggestReRead: true,
+                modifiedContent: lineCount <= 100 ? content : undefined,
+                affectedLineRange: this.deriveAffectedLineRange(edits)
+            };
+        } catch (error) {
+            if (ENABLE_DEBUG_LOGS) {
+                console.error(`[edit_code] Failed to build nextActionHint for ${filePath}`, error);
+            }
+            return {
+                suggestReRead: true
+            };
+        }
+    }
+
+    private deriveAffectedLineRange(edits: Edit[]): LineRange | undefined {
+        let minLine: number | undefined;
+        let maxLine: number | undefined;
+
+        for (const edit of edits) {
+            if (edit.lineRange) {
+                minLine = minLine === undefined ? edit.lineRange.start : Math.min(minLine, edit.lineRange.start);
+                maxLine = maxLine === undefined ? edit.lineRange.end : Math.max(maxLine, edit.lineRange.end);
+                continue;
+            }
+            if (edit.insertLineRange?.start) {
+                const line = edit.insertLineRange.start;
+                minLine = minLine === undefined ? line : Math.min(minLine, line);
+                maxLine = maxLine === undefined ? line : Math.max(maxLine, line);
+            }
+        }
+
+        if (minLine === undefined || maxLine === undefined) {
+            return undefined;
+        }
+        return { start: minLine, end: maxLine };
+    }
+
     private buildRefactoringGuidance(context?: RefactoringContext, batchSize?: number): string | undefined {
         if (!context) {
             return undefined;
@@ -764,7 +965,7 @@ export class SmartContextServer {
                 break;
             }
             case "skeleton": {
-                payload = await this.skeletonGenerator.generateSkeleton(absPath, content);
+                payload = await this.skeletonGenerator.generateSkeleton(absPath, content, args.skeletonOptions);
                 break;
             }
             case "fragment": {
@@ -797,7 +998,7 @@ export class SmartContextServer {
             return { results: await this.runSymbolSearchResults(args.query, maxResults) };
         }
         if (requestedType === "file") {
-            return { results: await this.runFileSearchResults(args.query, maxResults) };
+            return { results: await this.runFileSearchResults(args.query, maxResults, args) };
         }
 
         const inferred = this.inferSearchProjectType(args.query);
@@ -805,7 +1006,7 @@ export class SmartContextServer {
             return { results: await this.runDirectorySearchResults(args.query, maxResults), inferredType: inferred };
         }
         if (inferred === "file") {
-            return { results: await this.runFileSearchResults(args.query, maxResults), inferredType: inferred };
+            return { results: await this.runFileSearchResults(args.query, maxResults, args), inferredType: inferred };
         }
 
         let symbolResults = await this.runClusterSearchResults(args.query, maxResults);
@@ -815,7 +1016,7 @@ export class SmartContextServer {
 
         // Fallback to text search if no symbols found in auto mode
         if (symbolResults.length === 0) {
-            const fileResults = await this.runFileSearchResults(args.query, maxResults);
+            const fileResults = await this.runFileSearchResults(args.query, maxResults, args);
             if (fileResults.length > 0) {
                 return { results: fileResults, inferredType: "file" };
             }
@@ -873,17 +1074,24 @@ export class SmartContextServer {
         });
     }
 
-    private async runFileSearchResults(query: string, maxResults: number): Promise<SearchProjectResult["results"]> {
+    private async runFileSearchResults(query: string, maxResults: number, args?: SearchProjectArgs): Promise<SearchProjectResult["results"]> {
         const matches = await this.searchEngine.scout({
             keywords: [query],
-            basePath: this.rootPath
+            basePath: this.rootPath,
+            fileTypes: args?.fileTypes,
+            snippetLength: args?.snippetLength,
+            matchesPerFile: args?.matchesPerFile,
+            groupByFile: args?.groupByFile,
+            deduplicateByContent: args?.deduplicateByContent
         });
         return matches.slice(0, maxResults).map(match => ({
             type: "file",
             path: match.filePath,
             score: this.clampScore(match.score ?? 0),
             context: match.preview,
-            line: match.lineNumber
+            line: match.lineNumber,
+            groupedMatches: match.groupedMatches,
+            matchCount: match.matchCount
         }));
     }
 
@@ -1332,8 +1540,24 @@ export class SmartContextServer {
         const fileOrder: string[] = [];
         for (const edit of edits) {
             if (edit.operation !== "replace") continue;
-            if (typeof edit.targetString !== "string") {
-                throw new McpError(ErrorCode.InvalidParams, "replace operation requires 'targetString'.");
+            const insertMode = edit.insertMode;
+            const requiresTargetString = !insertMode || insertMode === "before" || insertMode === "after";
+            if (requiresTargetString && typeof edit.targetString !== "string") {
+                throw new McpError(
+                    ErrorCode.InvalidParams,
+                    insertMode
+                        ? `insertMode "${insertMode}" requires 'targetString'.`
+                        : "replace operation requires 'targetString'."
+                );
+            }
+            if (insertMode === "at") {
+                const lineStart = edit.insertLineRange?.start;
+                if (typeof lineStart !== "number" || !Number.isFinite(lineStart)) {
+                    throw new McpError(
+                        ErrorCode.InvalidParams,
+                        'insertMode "at" requires insertLineRange.start (1-based line number).'
+                    );
+                }
             }
             const absPath = this._getAbsPathAndVerify(edit.filePath);
             if (!fileMap.has(absPath)) {
@@ -1341,7 +1565,7 @@ export class SmartContextServer {
                 fileOrder.push(absPath);
             }
             const normalizedEdit: Edit = {
-                targetString: edit.targetString,
+                targetString: typeof edit.targetString === "string" ? edit.targetString : "",
                 replacementString: edit.replacementString ?? "",
                 lineRange: edit.lineRange,
                 beforeContext: edit.beforeContext,
@@ -1351,7 +1575,10 @@ export class SmartContextServer {
                 indexRange: edit.indexRange,
                 normalization: edit.normalization,
                 normalizationConfig: edit.normalizationConfig,
-                expectedHash: edit.expectedHash
+                expectedHash: edit.expectedHash,
+                contextFuzziness: edit.contextFuzziness,
+                insertMode,
+                insertLineRange: edit.insertLineRange
             };
             fileMap.get(absPath)!.push(normalizedEdit);
         }
@@ -1376,11 +1603,14 @@ export class SmartContextServer {
             }
         }
 
-        for (const { filePath } of fileEdits) {
+        for (const { filePath, edits: fileSpecificEdits } of fileEdits) {
+            const relativePath = this.normalizeRelativePath(filePath);
+            const nextActionHint = await this.buildNextActionHintForFile(filePath, fileSpecificEdits, dryRun);
             results.push({
-                filePath: this.normalizeRelativePath(filePath),
+                filePath: relativePath,
                 applied: !dryRun,
-                diff: result.message ?? (dryRun ? "Dry run: edits validated." : "Edits applied.")
+                diff: result.message ?? (dryRun ? "Dry run: edits validated." : "Edits applied."),
+                nextActionHint
             });
         }
     }
@@ -1511,7 +1741,16 @@ export class SmartContextServer {
                     properties: {
                         filePath: { type: "string" },
                         view: { type: "string", enum: ["full", "skeleton", "fragment"], default: "full" },
-                        lineRange: { type: "string", description: "Required when view=\"fragment\". Format: start-end." }
+                        lineRange: { type: "string", description: "Required when view=\"fragment\". Format: start-end." },
+                        skeletonOptions: {
+                            type: "object",
+                            properties: {
+                                includeMemberVars: { type: "boolean", description: "Show member variables and attributes in skeleton output.", default: true },
+                                includeComments: { type: "boolean", description: "Include comments and doc blocks.", default: false },
+                                detailLevel: { type: "string", enum: ["minimal", "standard", "detailed"], default: "standard" },
+                                maxMemberPreview: { type: "number", description: "Number of array/object entries to preview for member declarations.", default: 3 }
+                            }
+                        }
                     },
                     required: ["filePath"]
                 }
@@ -1524,7 +1763,28 @@ export class SmartContextServer {
                     properties: {
                         query: { type: "string" },
                         type: { type: "string", enum: ["auto", "file", "symbol", "directory"], default: "auto" },
-                        maxResults: { type: "number", default: 20 }
+                        maxResults: { type: "number", default: 20 },
+                        fileTypes: {
+                            type: "array",
+                            items: { type: "string" },
+                            description: "Limit file-based search results to specific extensions (e.g., [\"ts\",\"tsx\"])."
+                        },
+                        snippetLength: {
+                            type: "number",
+                            description: "Override preview length (characters). Set to 0 to omit previews."
+                        },
+                        matchesPerFile: {
+                            type: "number",
+                            description: "Maximum matches to collect per file before ranking."
+                        },
+                        groupByFile: {
+                            type: "boolean",
+                            description: "Group multiple matches from the same file into a single entry."
+                        },
+                        deduplicateByContent: {
+                            type: "boolean",
+                            description: "Collapse identical previews that appear across multiple files."
+                        }
                     },
                     required: ["query"]
                 }
@@ -1566,7 +1826,10 @@ export class SmartContextServer {
                                     afterContext: { type: "string" },
                                     fuzzyMode: { type: "string", enum: ["whitespace", "levenshtein"] },
                                     anchorSearchRange: { type: "object", properties: { lines: { type: "number" }, chars: { type: "number" } } },
-                                    normalization: { type: "string", enum: ["exact", "whitespace", "structural"] }
+                                    normalization: { type: "string", enum: ["exact", "whitespace", "structural"] },
+                                    contextFuzziness: { type: "string", enum: ["strict", "normal", "loose"] },
+                                    insertMode: { type: "string", enum: ["before", "after", "at"] },
+                                    insertLineRange: { type: "object", properties: { start: { type: "number" } } }
                                 },
                                 required: ["filePath", "operation"]
                             }
@@ -1581,6 +1844,25 @@ export class SmartContextServer {
                         }
                     },
                     required: ["edits"]
+                }
+            },
+            {
+                name: "get_batch_guidance",
+                description: "Analyzes multiple files to suggest related batch edits (shared imports, traits, companions).",
+                inputSchema: {
+                    type: "object",
+                    properties: {
+                        filePaths: {
+                            type: "array",
+                            items: { type: "string" },
+                            description: "List of file paths (relative or absolute) to analyze."
+                        },
+                        pattern: {
+                            type: "string",
+                            description: "Optional keyword to filter opportunities (e.g., 'trait', 'import')."
+                        }
+                    },
+                    required: ["filePaths"]
                 }
             },
             {
@@ -1904,14 +2186,26 @@ export class SmartContextServer {
                     const result = await this.executeAnalyzeRelationship(args as AnalyzeRelationshipArgs);
                     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
                 }
-                                case "edit_code": {
+                case "edit_code": {
                     if (!args || !Array.isArray(args.edits)) {
                         return this._createErrorResponse("MissingParameter", "Provide 'edits' to edit_code.");
                     }
                     const result = await this.executeEditCode(args as EditCodeArgs);
                     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
                 }
-                                case "manage_project": {
+                case "get_batch_guidance": {
+                    if (!args || !Array.isArray(args.filePaths) || args.filePaths.length === 0) {
+                        return this._createErrorResponse("MissingParameter", "Provide 'filePaths' to get_batch_guidance.");
+                    }
+                    const absPaths = args.filePaths.map((filePath: string) => this._getAbsPathAndVerify(filePath));
+                    const pattern = typeof args.pattern === "string" ? args.pattern : undefined;
+                    const guidance = await this.generateBatchGuidance(absPaths, pattern);
+                    if (!guidance) {
+                        return { content: [{ type: "text", text: JSON.stringify({ message: "No batch opportunities detected." }, null, 2) }] };
+                    }
+                    return { content: [{ type: "text", text: JSON.stringify(guidance, null, 2) }] };
+                }
+                case "manage_project": {
                     if (!args || typeof args.command !== "string") {
                         return this._createErrorResponse("MissingParameter", "Provide 'command' to manage_project.");
                     }

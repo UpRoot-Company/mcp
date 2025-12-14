@@ -5,6 +5,13 @@ export interface FileSearchResult {
     preview: string;
     score?: number;
     scoreDetails?: ScoreDetails;
+    groupedMatches?: Array<{
+        lineNumber: number;
+        preview: string;
+        score?: number;
+        scoreDetails?: ScoreDetails;
+    }>;
+    matchCount?: number;
 }
 
 export interface SearchOptions {
@@ -75,6 +82,8 @@ export interface NormalizationConfig {
     preserveIndentation?: boolean;
 }
 
+export type ContextFuzziness = "strict" | "normal" | "loose";
+
 export type SafetyLevel = "strict" | "normal" | "force";
 
 export interface MatchConfidence {
@@ -117,6 +126,12 @@ export interface Edit {
         algorithm: 'sha256' | 'xxhash';
         value: string;
     };
+    /** Controls normalization strictness for context matching. Defaults to "normal". */
+    contextFuzziness?: ContextFuzziness;
+    /** Optional insert semantics for smarter placement-based edits. */
+    insertMode?: "before" | "after" | "at";
+    /** Line hint for insertMode === "at" (uses start as the target line). */
+    insertLineRange?: { start: number };
 }
 
 export type DiffMode = "myers" | "semantic";
@@ -177,6 +192,7 @@ export interface ImpactPreview {
 export interface BatchEditGuidance {
     clusters: Array<{ files: string[]; reason: string }>;
     companionSuggestions: Array<{ filePath: string; reason: string }>;
+    opportunities?: BatchOpportunity[];
 }
 
 export interface MatchDiagnostics {
@@ -207,6 +223,23 @@ export interface EditResult {
      * Metadata about the edit operation, including inverse edits for undo.
      */
     operation?: EditOperation;
+}
+
+export interface SuggestedBatchEdit {
+    operation: "insert" | "replace" | "delete";
+    insertMode?: "before" | "after" | "at";
+    targetHint?: string;
+    replacementTemplate?: string;
+}
+
+export interface BatchOpportunity {
+    type: "add_import" | "add_trait" | "other";
+    description: string;
+    affectedFiles: string[];
+    supportingFiles?: string[];
+    confidence: number;
+    suggestedEdit?: SuggestedBatchEdit;
+    notes?: string[];
 }
 
 export interface EditOperation {
@@ -480,10 +513,24 @@ export interface EngineConfig {
 
 export type ReadCodeView = "full" | "skeleton" | "fragment";
 
+export type SkeletonDetailLevel = "minimal" | "standard" | "detailed";
+
+export interface SkeletonOptions {
+    /** Include member variables and class attributes when true. Defaults to true. */
+    includeMemberVars?: boolean;
+    /** Include line/comment blocks when true. Defaults to false. */
+    includeComments?: boolean;
+    /** Controls folding strictness for method bodies and large regions. */
+    detailLevel?: SkeletonDetailLevel;
+    /** Maximum literal entries to show when previewing member arrays. Defaults to 3. */
+    maxMemberPreview?: number;
+}
+
 export interface ReadCodeArgs {
     filePath: string;
     view?: ReadCodeView;
     lineRange?: string;
+    skeletonOptions?: SkeletonOptions;
 }
 
 export interface ReadCodeResult {
@@ -502,6 +549,11 @@ export interface SearchProjectArgs {
     query: string;
     type?: SearchProjectType;
     maxResults?: number;
+    fileTypes?: string[];
+    snippetLength?: number;
+    matchesPerFile?: number;
+    groupByFile?: boolean;
+    deduplicateByContent?: boolean;
 }
 
 export interface SearchProjectResultEntry {
@@ -510,6 +562,8 @@ export interface SearchProjectResultEntry {
     score: number;
     context?: string;
     line?: number;
+    groupedMatches?: FileSearchResult["groupedMatches"];
+    matchCount?: number;
 }
 
 export interface SearchProjectResult {
@@ -572,6 +626,9 @@ export interface EditCodeEdit {
     expectedHash?: Edit["expectedHash"];
     confirmationHash?: string;
     safetyLevel?: SafetyLevel;
+    contextFuzziness?: ContextFuzziness;
+    insertMode?: "before" | "after" | "at";
+    insertLineRange?: { start: number };
 }
 
 export interface RefactoringContext {
@@ -599,6 +656,7 @@ export interface EditCodeResultEntry {
     lineCount?: number;
     contentPreview?: string;
     hashMismatch?: boolean;
+    nextActionHint?: NextActionHint;
 }
 
 export interface EditCodeResult {
@@ -608,6 +666,18 @@ export interface EditCodeResult {
     warnings?: string[];
     message?: string;
 }
+
+export interface NextActionHint {
+    suggestReRead: boolean;
+    modifiedContent?: string;
+    affectedLineRange?: LineRange;
+}
+
+export interface GetBatchGuidanceArgs {
+    filePaths: string[];
+    pattern?: string;
+}
+
 
 export type ManageProjectCommand = "undo" | "redo" | "guidance" | "status" | "metrics";
 

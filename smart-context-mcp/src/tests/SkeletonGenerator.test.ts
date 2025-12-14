@@ -79,6 +79,73 @@ def global_func():
         expect(skeleton).not.toContain('return 1');
     });
 
+    it('includes comments when requested', async () => {
+        const code = `
+        // headline
+        function demo() {
+            return true;
+        }
+        `;
+        const withoutComments = await generator.generateSkeleton('test.ts', code);
+        expect(withoutComments).not.toContain('// headline');
+        const withComments = await generator.generateSkeleton('test.ts', code, { includeComments: true });
+        expect(withComments).toContain('// headline');
+    });
+
+    it('omits member variables when includeMemberVars is false', async () => {
+        const code = `
+        class User {
+            public id: number;
+            public name: string;
+            getId() {
+                return this.id;
+            }
+        }
+        `;
+        const skeleton = await generator.generateSkeleton('test.ts', code, { includeMemberVars: false });
+        expect(skeleton).not.toMatch(/public id/);
+        expect(skeleton).toContain('getId()');
+    });
+
+    it('expands short bodies in detailed detailLevel', async () => {
+        const code = `
+        function sum(a: number, b: number): number {
+            return a + b;
+        }
+        `;
+        const detailed = await generator.generateSkeleton('test.ts', code, { detailLevel: "detailed" });
+        expect(detailed).toContain('return a + b');
+        const standard = await generator.generateSkeleton('test.ts', code);
+        expect(standard).not.toContain('return a + b');
+    });
+
+    it('respects maxMemberPreview when showing arrays', async () => {
+        const code = `
+        class User {
+            public fields = ['id', 'name', 'email', 'status'];
+        }
+        `;
+        const skeleton = await generator.generateSkeleton('test.ts', code, { maxMemberPreview: 2 });
+        expect(skeleton).toContain("['id', 'name', ...2 more]");
+    });
+
+    it('produces minimal summaries when detailLevel is minimal', async () => {
+        const code = `
+        class User {
+            public id: number;
+            constructor() {
+                this.id = 0;
+            }
+            greet() {
+                return 'hello';
+            }
+        }
+        `;
+        const skeleton = await generator.generateSkeleton('test.ts', code, { detailLevel: "minimal", includeMemberVars: false });
+        const lines = skeleton.split('\n').map(line => line.trim()).filter(Boolean);
+        expect(lines.every(line => /(class|constructor|greet)/.test(line))).toBe(true);
+    });
+
     describe('generateStructureJson', () => {
         it('should extract TypeScript class and method symbols correctly', async () => {
             const code = `

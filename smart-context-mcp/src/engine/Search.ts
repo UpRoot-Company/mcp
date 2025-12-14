@@ -27,6 +27,11 @@ export interface ScoutArgs extends SearchOptions {
     excludeGlobs?: string[];
     gitDiffMode?: boolean;
     basePath?: string;
+    fileTypes?: string[];
+    snippetLength?: number;
+    matchesPerFile?: number;
+    groupByFile?: boolean;
+    deduplicateByContent?: boolean;
 }
 
 interface SearchQuery {
@@ -152,6 +157,8 @@ export class SearchEngine {
             ? includeGlobs.map(glob => this.globToRegExp(glob))
             : undefined;
         const excludeRegexes = combinedExcludeGlobs.map(glob => this.globToRegExp(glob));
+        const previewLength = this.normalizeSnippetLength(args.snippetLength);
+        const matchesPerFile = this.normalizeMatchesPerFile(args.matchesPerFile);
 
         const candidateScores = await this.collectCandidateFiles(queries);
         const matchesById = new Map<string, FileSearchResult>();
@@ -168,7 +175,7 @@ export class SearchEngine {
             } catch {
                 continue;
             }
-            const fileMatches = this.collectMatchesFromFile(normalizedRelative, content, queries);
+            const fileMatches = this.collectMatchesFromFile(normalizedRelative, content, queries, previewLength, matchesPerFile);
             for (const match of fileMatches) {
                 const absMatchPath = path.join(this.rootPath, match.filePath);
                 const relativeToBase = this.normalizeRelativePath(absMatchPath, normalizedBase);
@@ -210,8 +217,7 @@ export class SearchEngine {
         const queryText = queries.map(q => q.raw).join(" ");
         const callGraphSignals = await this.getCallGraphSignals();
         const rankedDocuments = this.bm25Ranking.rank(documents, queryText, callGraphSignals);
-
-        return rankedDocuments.map(doc => {
+        const rankedResults = rankedDocuments.map(doc => {
             const match = matchesById.get(doc.id);
             if (!match) {
                 const [filePath, line] = this.splitDocId(doc.id);
@@ -228,6 +234,121 @@ export class SearchEngine {
                 score: doc.score,
                 scoreDetails: doc.scoreDetails
             };
+        });
+        return this.postProcessResults(rankedResults, {
+            fileTypes: args.fileTypes,
+            snippetLength: previewLength,
+            groupByFile: args.groupByFile,
+            deduplicateByContent: args.deduplicateByContent
+        });
+    }
+
+    private normalizeMatchesPerFile(requested?: number): number {
+        if (typeof requested === "number" && Number.isFinite(requested)) {
+            return Math.max(1, Math.floor(requested));
+        }
+        return this.maxMatchesPerFile;
+    }
+
+    private normalizeSnippetLength(requested?: number): number {
+        if (typeof requested === "number" && Number.isFinite(requested)) {
+            if (requested <= 0) {
+                return 0;
+            }
+            return Math.min(2000, Math.max(16, Math.floor(requested)));
+        }
+        return this.maxPreviewLength;
+    }
+
+    private postProcessResults(
+        results: FileSearchResult[],
+        options: {
+            fileTypes?: string[];
+            snippetLength: number;
+            groupByFile?: boolean;
+            deduplicateByContent?: boolean;
+        }
+    ): FileSearchResult[] {
+        let processed = this.filterByFileType(results, options.fileTypes);
+
+        if (options.deduplicateByContent) {
+            processed = this.deduplicateByContent(processed);
+        }
+
+        processed = this.applySnippetLength(processed, options.snippetLength);
+
+        if (options.groupByFile) {
+            processed = this.groupResultsByFile(processed);
+        }
+
+        return processed;
+    }
+
+    private filterByFileType(results: FileSearchResult[], fileTypes?: string[]): FileSearchResult[] {
+        if (!fileTypes || fileTypes.length === 0) {
+            return results;
+        }
+        const normalized = new Set(fileTypes.map(ext => ext.replace(/^\./, "").toLowerCase()));
+        return results.filter(result => {
+            const fileExt = path.extname(result.filePath).replace(".", "").toLowerCase();
+            return fileExt ? normalized.has(fileExt) : false;
+        });
+    }
+
+    private applySnippetLength(results: FileSearchResult[], snippetLength: number): FileSearchResult[] {
+        if (snippetLength <= 0) {
+            return results.map(result => ({ ...result, preview: "" }));
+        }
+        return results.map(result => {
+            if (!result.preview || result.preview.length <= snippetLength) {
+                return result;
+            }
+            const sliceLength = Math.max(1, snippetLength - 1);
+            return {
+                ...result,
+                preview: `${result.preview.slice(0, sliceLength)}…`
+            };
+        });
+    }
+
+    private deduplicateByContent(results: FileSearchResult[]): FileSearchResult[] {
+        const seen = new Set<string>();
+        const deduped: FileSearchResult[] = [];
+        for (const result of results) {
+            const fallback = `${result.filePath}:${result.lineNumber}`;
+            const key = result.preview?.length ? result.preview : fallback;
+            if (seen.has(key)) {
+                continue;
+            }
+            seen.add(key);
+            deduped.push(result);
+        }
+        return deduped;
+    }
+
+    private groupResultsByFile(results: FileSearchResult[]): FileSearchResult[] {
+        const grouped = new Map<string, FileSearchResult[]>();
+        const order: string[] = [];
+        for (const result of results) {
+            if (!grouped.has(result.filePath)) {
+                grouped.set(result.filePath, []);
+                order.push(result.filePath);
+            }
+            grouped.get(result.filePath)!.push(result);
+        }
+
+        return order.map(filePath => {
+            const matches = grouped.get(filePath)!;
+            const sorted = matches.slice().sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+            const primary = { ...sorted[0] };
+            primary.groupedMatches = sorted.map(match => ({
+                lineNumber: match.lineNumber,
+                preview: match.preview,
+                score: match.score,
+                scoreDetails: match.scoreDetails
+            }));
+            primary.matchCount = sorted.length;
+            return primary;
         });
     }
 
@@ -318,7 +439,13 @@ export class SearchEngine {
         return candidates;
     }
 
-    private collectMatchesFromFile(relativePath: string, content: string, queries: SearchQuery[]): FileSearchResult[] {
+    private collectMatchesFromFile(
+        relativePath: string,
+        content: string,
+        queries: SearchQuery[],
+        previewLength: number,
+        matchesPerFile: number
+    ): FileSearchResult[] {
         const matches: FileSearchResult[] = [];
         const lines = content.split(/\r?\n/);
         for (let index = 0; index < lines.length; index++) {
@@ -329,24 +456,28 @@ export class SearchEngine {
                     matches.push({
                         filePath: relativePath,
                         lineNumber: index + 1,
-                        preview: this.formatPreview(line)
+                        preview: this.formatPreview(line, previewLength)
                     });
                     break;
                 }
             }
-            if (matches.length >= this.maxMatchesPerFile) {
+            if (matches.length >= matchesPerFile) {
                 break;
             }
         }
         return matches;
     }
 
-    private formatPreview(line: string): string {
+    private formatPreview(line: string, previewLength: number): string {
+        if (previewLength <= 0) {
+            return "";
+        }
         const trimmed = line.trim();
-        if (trimmed.length <= this.maxPreviewLength) {
+        if (trimmed.length <= previewLength) {
             return trimmed;
         }
-        return `${trimmed.slice(0, this.maxPreviewLength - 1)}…`;
+        const sliceLength = Math.max(1, previewLength - 1);
+        return `${trimmed.slice(0, sliceLength)}…`;
     }
 
     private async assignFieldTypes(matches: Map<string, FileSearchResult>): Promise<Map<string, { fieldType: SearchFieldType; symbolId?: string }>> {

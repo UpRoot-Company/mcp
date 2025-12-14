@@ -41,6 +41,7 @@ describe("Tool surface consistency", () => {
             "search_project",
             "analyze_relationship",
             "edit_code",
+            "get_batch_guidance",
             "manage_project",
         ].sort();
 
@@ -105,6 +106,7 @@ describe("Tool surface consistency", () => {
                 "search_project",
                 "analyze_relationship",
                 "edit_code",
+                "get_batch_guidance",
                 "manage_project",
                 "read_file",
                 "write_file",
@@ -120,4 +122,3 @@ describe("Tool surface consistency", () => {
         }
     });
 });
-

@@ -16,7 +16,8 @@ import {
     NormalizationLevel,
     ToolSuggestion,
     SemanticDiffProvider,
-    SemanticDiffSummary
+    SemanticDiffSummary,
+    ContextFuzziness
 } from "../types.js";
 import { LineCounter } from "./LineCounter.js";
 import { IFileSystem } from "../platform/FileSystem.js";
@@ -723,12 +724,9 @@ export class EditorEngine {
                     ? Math.max(0, match.start - edit.anchorSearchRange.chars)
                     : 0;
                 const preceding = content.substring(searchStart, match.start);
-                if (edit.fuzzyMode === "whitespace") {
-                    if (!preceding.replace(/\s+/g, " ").includes(edit.beforeContext.replace(/\s+/g, " "))) {
-                        return false;
-                    }
-                } else {
-                    if (!preceding.includes(edit.beforeContext)) return false;
+                const contextFuzziness = edit.contextFuzziness ?? "normal";
+                if (!this.matchesContext(edit.beforeContext, preceding, contextFuzziness, edit.normalizationConfig)) {
+                    return false;
                 }
             }
 
@@ -737,12 +735,9 @@ export class EditorEngine {
                     ? Math.min(content.length, match.end + edit.anchorSearchRange.chars)
                     : content.length;
                 const following = content.substring(match.end, searchEnd);
-                if (edit.fuzzyMode === "whitespace") {
-                    if (!following.replace(/\s+/g, " ").includes(edit.afterContext.replace(/\s+/g, " "))) {
-                        return false;
-                    }
-                } else {
-                    if (!following.includes(edit.afterContext)) return false;
+                const contextFuzziness = edit.contextFuzziness ?? "normal";
+                if (!this.matchesContext(edit.afterContext, following, contextFuzziness, edit.normalizationConfig)) {
+                    return false;
                 }
             }
             return true;
@@ -764,10 +759,138 @@ export class EditorEngine {
             );
         }
         if (filteredMatches.length > 1) {
-            throw this.generateAmbiguousMatchError(content, edit, filteredMatches);
+            const resolved = this.resolveAmbiguousMatches(filteredMatches, edit);
+            if (!resolved) {
+                throw this.generateAmbiguousMatchError(content, edit, filteredMatches);
+            }
+            return resolved;
         }
 
         return filteredMatches[0];
+    }
+
+    private matchesContext(
+        expectedContext: string,
+        actualContext: string,
+        fuzziness: ContextFuzziness,
+        normalizationConfig?: NormalizationConfig
+    ): boolean {
+        switch (fuzziness) {
+            case "strict":
+                return actualContext.includes(expectedContext);
+            case "normal": {
+                const normalizeWhitespace = (value: string) =>
+                    value.replace(/\s+/g, " ").trim();
+                return normalizeWhitespace(actualContext).includes(normalizeWhitespace(expectedContext));
+            }
+            case "loose": {
+                const normalizedActual = this.normalizeString(actualContext, "structural", normalizationConfig);
+                const normalizedExpected = this.normalizeString(expectedContext, "structural", normalizationConfig);
+                return normalizedActual.includes(normalizedExpected);
+            }
+            default:
+                return actualContext.includes(expectedContext);
+        }
+    }
+
+    private resolveAmbiguousMatches(matches: Match[], edit: Edit): Match | undefined {
+        const scoredMatches = matches.map(match => ({
+            match,
+            confidence: this.computeMatchConfidence(match, edit, match.normalizationLevel ?? 'exact')
+        })).sort((a, b) => b.confidence.score - a.confidence.score);
+
+        if (scoredMatches.length < 2) {
+            return scoredMatches[0]?.match;
+        }
+
+        const best = scoredMatches[0];
+        const second = scoredMatches[1];
+
+        if (best.confidence.score >= 0.85 && (best.confidence.score - second.confidence.score) >= 0.15) {
+            if (process.env.SMART_CONTEXT_DEBUG === 'true') {
+                console.debug(
+                    `[EditorEngine] Auto-selected ambiguous match at line ${best.match.lineNumber} ` +
+                    `(score ${(best.confidence.score * 100).toFixed(1)}%, second ${(second.confidence.score * 100).toFixed(1)}%)`
+                );
+            }
+            return best.match;
+        }
+
+        return undefined;
+    }
+
+    private planInsertOperation(content: string, edit: Edit, lineCounter: LineCounter): Match {
+        const replacement = edit.replacementString ?? "";
+        if (edit.insertMode === "at") {
+            const lineNumber = edit.insertLineRange?.start ?? 1;
+            if (lineNumber < 1 || lineNumber > lineCounter.lineCount + 1) {
+                throw new Error(
+                    `insertMode "at" requires insertLineRange.start between 1 and ${lineCounter.lineCount + 1}.`
+                );
+            }
+            const insertIndex = lineNumber > lineCounter.lineCount
+                ? content.length
+                : lineCounter.getCharIndexForLine(lineNumber);
+            return {
+                start: insertIndex,
+                end: insertIndex,
+                replacement,
+                original: "",
+                lineNumber,
+                matchType: 'exact'
+            };
+        }
+
+        if (!edit.targetString) {
+            throw new Error(`insertMode "${edit.insertMode}" requires 'targetString' as an anchor.`);
+        }
+
+        const anchorEdit: Edit = {
+            targetString: edit.targetString,
+            replacementString: edit.targetString,
+            lineRange: edit.lineRange,
+            beforeContext: edit.beforeContext,
+            afterContext: edit.afterContext,
+            fuzzyMode: edit.fuzzyMode,
+            anchorSearchRange: edit.anchorSearchRange,
+            indexRange: edit.indexRange,
+            normalization: edit.normalization,
+            normalizationConfig: edit.normalizationConfig,
+            expectedHash: edit.expectedHash,
+            contextFuzziness: edit.contextFuzziness
+        };
+
+        const anchorMatch = this.findMatch(content, anchorEdit, lineCounter);
+        const anchorLine = anchorMatch.lineNumber;
+        let insertIndex: number;
+        let lineNumber = anchorLine;
+
+        if (edit.insertMode === "before") {
+            insertIndex = lineCounter.getCharIndexForLine(anchorLine);
+        } else {
+            insertIndex = this.getLineEndIndex(anchorLine, content.length, lineCounter);
+            lineNumber = Math.min(lineCounter.lineCount + 1, anchorLine + 1);
+        }
+
+        return {
+            start: insertIndex,
+            end: insertIndex,
+            replacement,
+            original: "",
+            lineNumber,
+            matchType: 'exact'
+        };
+    }
+
+    private getLineEndIndex(lineNumber: number, contentLength: number, lineCounter: LineCounter): number {
+        if (lineNumber >= lineCounter.lineCount) {
+            return contentLength;
+        }
+        const nextLine = lineNumber + 1;
+        if (nextLine > lineCounter.lineCount) {
+            return contentLength;
+        }
+        return lineCounter.getCharIndexForLine(nextLine);
     }
 
     private getCharRangeForLineRange(lineRange: LineRange, lineCounter: LineCounter, contentLength: number): { start: number; end: number } {
@@ -890,6 +1013,14 @@ export class EditorEngine {
                     lineNumber: lineCounter.getLineNumber(start),
                     matchType: 'exact'
                 });
+            } else if (edit.insertMode) {
+                try {
+                    const insertMatch = this.planInsertOperation(originalContent, edit, lineCounter);
+                    plannedMatches.push(insertMatch);
+                } catch (error) {
+                    (error as any).edit = edit;
+                    throw error;
+                }
             } else {
                 try {
                     const match = this.findMatch(originalContent, edit, lineCounter);

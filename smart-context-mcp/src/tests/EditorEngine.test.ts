@@ -275,3 +275,103 @@ describe("EditorEngine - Safe Delete Operations (ADR-024 Phase 3)", () => {
         expect(updated).toContain("prod");
     });
 });
+
+describe("EditorEngine - Context fuzziness & smart inserts (ADR-025 Phase 1)", () => {
+    const rootPath = path.join(process.cwd(), "__context_fuzziness_workspace__");
+    const filePath = path.join(rootPath, "module.ts");
+    let fileSystem: MemoryFileSystem;
+    let editor: EditorEngine;
+
+    beforeEach(async () => {
+        fileSystem = new MemoryFileSystem(rootPath);
+        editor = new EditorEngine(rootPath, fileSystem);
+        await fileSystem.createDir(path.dirname(filePath));
+    });
+
+    it("applies edits when beforeContext differs only by whitespace under normal fuzziness", async () => {
+        const content = [
+            "const   foo =    1;",
+            "",
+            "const bar = 2;"
+        ].join("\n");
+        await fileSystem.writeFile(filePath, content);
+
+        const edits: Edit[] = [{
+            targetString: "const bar = 2;",
+            replacementString: "const bar = 3;",
+            beforeContext: "const foo = 1;",
+            contextFuzziness: "normal"
+        }];
+
+        const result = await editor.applyEdits(filePath, edits);
+        expect(result.success).toBe(true);
+        const updated = await fileSystem.readFile(filePath);
+        expect(updated).toContain("const bar = 3;");
+    });
+
+    it("rejects edits when contextFuzziness is strict and context differs", async () => {
+        const content = [
+            "const   foo =    1;",
+            "const bar = 2;"
+        ].join("\n");
+        await fileSystem.writeFile(filePath, content);
+
+        const edits: Edit[] = [{
+            targetString: "const bar = 2;",
+            replacementString: "const bar = 4;",
+            beforeContext: "const foo = 1;",
+            contextFuzziness: "strict"
+        }];
+
+        const result = await editor.applyEdits(filePath, edits);
+        expect(result.success).toBe(false);
+        expect(result.message).toContain("Target not found");
+    });
+
+    it("supports insertMode 'at' with explicit line numbers", async () => {
+        const content = [
+            "const alpha = 1;",
+            "const omega = 2;"
+        ].join("\n");
+        await fileSystem.writeFile(filePath, content);
+
+        const edits: Edit[] = [{
+            targetString: "",
+            replacementString: "const inserted = 99;\n",
+            insertMode: "at",
+            insertLineRange: { start: 2 }
+        }];
+
+        const result = await editor.applyEdits(filePath, edits);
+        expect(result.success).toBe(true);
+        const updated = await fileSystem.readFile(filePath);
+        const lines = updated.split("\n");
+        expect(lines[1]).toBe("const inserted = 99;");
+    });
+
+    it("supports insertMode 'after' using normalization for anchor matching", async () => {
+        const content = [
+            "const   anchor   =   1;",
+            "const target = 2;"
+        ].join("\n");
+        await fileSystem.writeFile(filePath, content);
+
+        const edits: Edit[] = [{
+            targetString: "const anchor = 1;",
+            replacementString: "console.log('after anchor');\n",
+            insertMode: "after",
+            normalization: "whitespace"
+        }];
+
+        const result = await editor.applyEdits(filePath, edits);
+        expect(result.success).toBe(true);
+        const updated = await fileSystem.readFile(filePath);
+        expect(updated).toContain("console.log('after anchor');");
+        const expectedOrder = [
+            "const   anchor   =   1;",
+            "console.log('after anchor');",
+            "const target = 2;"
+        ].join("\n");
+        expect(updated).toBe(expectedOrder);
+    });
+});

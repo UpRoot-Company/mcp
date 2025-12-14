@@ -141,6 +141,15 @@ Smart Context는 ADR-020 워크플로우를 커버하는 5개의 Intent 기반 �
 | `filePath` | string | ✅ | 프로젝트 루트 기준 상대 경로 |
 | `view` | `"full"` \| `"skeleton"` \| `"fragment"` | | 뷰 모드 (기본값: `"full"`) |
 | `lineRange` | string | `view="fragment"` 시 필수 | 라인 범위 (예: `"10-50"`) |
+| `skeletonOptions` | object | `view="skeleton"` 시 선택 | 스켈레톤 세부 옵션 (멤버/주석/디테일 제어) |
+
+**`skeletonOptions`**
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `includeMemberVars` | boolean | `true` | 클래스/구조체의 멤버 변수 표시 여부 |
+| `includeComments` | boolean | `false` | 주석 및 DocBlock 포함 여부 |
+| `detailLevel` | `"minimal"` \| `"standard"` \| `"detailed"` | `"standard"` | 접히는 범위 제어 (detailed는 50라인 이하 본문을 그대로 노출) |
+| `maxMemberPreview` | number | `3` | 멤버 배열/객체 미리보기 항목 수 (`['a', 'b', ...2 more]`) |
 
 **Returns**
 ```typescript
@@ -175,6 +184,11 @@ Smart Context는 ADR-020 워크플로우를 커버하는 5개의 Intent 기반 �
 | `query` | string | ✅ | 검색 쿼리 (자연어, 심볼명, glob 패턴) |
 | `type` | `"auto"` \| `"file"` \| `"symbol"` \| `"directory"` | | 검색 타입 (기본값: `"auto"`) |
 | `maxResults` | number | | 최대 결과 수 (기본값: 20) |
+| `fileTypes` | string[] | | 확장자 필터 (예: `["ts","tsx"]`) |
+| `snippetLength` | number | | 미리보기 길이(문자). `0`이면 미리보기 숨김 |
+| `matchesPerFile` | number | | 파일당 수집할 최대 매치 수 (기본 5) |
+| `groupByFile` | boolean | | 동일 파일 매치를 하나의 결과로 묶기 |
+| `deduplicateByContent` | boolean | | 동일 미리보기 텍스트를 한 번만 노출 |
 
 **Returns**
 ```typescript
@@ -185,6 +199,8 @@ Smart Context는 ADR-020 워크플로우를 커버하는 5개의 Intent 기반 �
     score: number;        // 0-1 관련성 점수
     context?: string;     // 미리보기 또는 요약
     line?: number;        // 심볼의 라인 번호
+    groupedMatches?: Array<{ lineNumber: number; preview: string; score?: number }>;
+    matchCount?: number;  // groupByFile=true일 때 파일 내 매치 개수
   }>;
   inferredType?: string;  // auto 모드에서 추론된 타입
 }

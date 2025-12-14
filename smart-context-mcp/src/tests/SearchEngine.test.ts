@@ -159,4 +159,56 @@ describe("SearchEngine trigram index integration", () => {
         expect(results[0].scoreDetails?.fieldType).toBe("symbol-definition");
         expect(commentMatch!.scoreDetails?.fieldType).toBe("comment");
     });
+
+    it("applies file type filters and per-file match limits", async () => {
+        const notesPath = path.join(rootPath, "README.md");
+        await fileSystem.writeFile(notesPath, joinLines([
+            "# Notes",
+            "alpha appears here too"
+        ]));
+        await searchEngine.invalidateFile(notesPath);
+        const results = await searchEngine.scout({
+            keywords: ["alpha"],
+            basePath: rootPath,
+            fileTypes: ["ts"],
+            matchesPerFile: 1
+        });
+        expect(results.every(result => result.filePath.endsWith(".ts"))).toBe(true);
+        const alphaMatches = results.filter(result => result.filePath === "src/utils/alpha.ts");
+        expect(alphaMatches).toHaveLength(1);
+    });
+
+    it("supports snippet-less previews and grouped matches", async () => {
+        const results = await searchEngine.scout({
+            keywords: ["alpha"],
+            basePath: rootPath,
+            snippetLength: 0,
+            groupByFile: true
+        });
+        const alphaEntry = results.find(result => result.filePath === "src/utils/alpha.ts");
+        expect(alphaEntry).toBeDefined();
+        expect(alphaEntry?.preview).toBe("");
+        expect(alphaEntry?.groupedMatches).toBeDefined();
+        expect(alphaEntry?.matchCount).toBe(alphaEntry?.groupedMatches?.length);
+        expect(alphaEntry?.groupedMatches?.length).toBeGreaterThan(0);
+    });
+
+    it("deduplicates identical previews across files when requested", async () => {
+        const dupPath = path.join(rootPath, "src", "utils", "alphaDuplicate.ts");
+        await fileSystem.createDir(path.dirname(dupPath));
+        await fileSystem.writeFile(dupPath, joinLines([
+            "export function alphaFunction() {",
+            "  const message = 'alpha matches here';",
+            "  return message;",
+            "}",
+        ]));
+        await searchEngine.invalidateFile(dupPath);
+        const results = await searchEngine.scout({
+            keywords: ["alpha"],
+            basePath: rootPath,
+            deduplicateByContent: true
+        });
+        const duplicates = results.filter(result => result.preview.includes("alpha matches here"));
+        expect(duplicates).toHaveLength(1);
+    });
 });
