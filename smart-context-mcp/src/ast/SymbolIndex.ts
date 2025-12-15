@@ -23,8 +23,9 @@ export class SymbolIndex {
     private readonly cache: LRUCache<string, CacheEntry>;
     private readonly rootPath: string;
     private readonly skeletonGenerator: SkeletonGenerator;
-    private readonly ignoreFilter: ReturnType<typeof ignore.default>;
+    private ignoreFilter: ReturnType<typeof ignore.default>;
     private readonly db: IndexDatabase;
+    private userIgnorePatterns: string[];
 
     private baselinePromise?: Promise<void>;
     private editTracker: Map<string, number> = new Map();
@@ -35,8 +36,8 @@ export class SymbolIndex {
     constructor(rootPath: string, skeletonGenerator: SkeletonGenerator, ignorePatterns: string[], db?: IndexDatabase) {
         this.rootPath = rootPath;
         this.skeletonGenerator = skeletonGenerator;
-        this.ignoreFilter = ignore.default().add(ignorePatterns);
-        this.ignoreFilter.add(['.git', 'node_modules', '.mcp', '.smart-context', 'dist', 'coverage', '.DS_Store']);
+        this.userIgnorePatterns = [...ignorePatterns];
+        this.ignoreFilter = this.createIgnoreFilter(this.userIgnorePatterns);
         this.db = db ?? new IndexDatabase(this.rootPath);
         this.cache = new LRUCache({ max: HOT_CACHE_SIZE });
     }
@@ -81,6 +82,11 @@ export class SymbolIndex {
 
     public clearCache() {
         this.cache.clear();
+    }
+
+    public updateIgnorePatterns(patterns: string[]): void {
+        this.userIgnorePatterns = [...patterns];
+        this.ignoreFilter = this.createIgnoreFilter(this.userIgnorePatterns);
     }
 
     public async search(query: string): Promise<SymbolSearchResult[]> {
@@ -395,6 +401,12 @@ export class SymbolIndex {
     public findSimilar(query: string, limit: number = 5): SymbolInfo[] {
         const results = this.fuzzySearch(query, { maxEditDistance: 2 });
         return results.slice(0, limit).map(r => r.symbol);
+    }
+
+    private createIgnoreFilter(patterns: string[]) {
+        const filter = ignore.default().add(patterns);
+        filter.add(['.git', 'node_modules', '.mcp', '.smart-context', 'dist', 'coverage', '.DS_Store']);
+        return filter;
     }
 }
 

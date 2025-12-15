@@ -3,6 +3,9 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { SymbolIndex } from '../ast/SymbolIndex.js';
 import { DependencyGraph } from '../ast/DependencyGraph.js';
+import { IndexDatabase } from './IndexDatabase.js';
+import { ModuleResolver } from '../ast/ModuleResolver.js';
+import { ConfigurationEvent, ConfigurationManager } from '../config/ConfigurationManager.js';
 import { metrics } from "../utils/MetricsCollector.js";
 
 export interface IncrementalIndexerOptions {
@@ -13,9 +16,26 @@ export interface IncrementalIndexerOptions {
 
 const DEFAULT_BATCH_PAUSE_MS = 50;
 const MAX_BATCH_PAUSE_MS = 500;
+type PriorityLevel = 'high' | 'medium' | 'low';
+
+export interface IndexerStatusSnapshot {
+    queueDepth: { high: number; medium: number; low: number; total: number };
+    currentPauseMs: number;
+    maxQueueDepthSeen: number;
+    processing: boolean;
+    activity?: {
+        label: string;
+        detail?: string;
+        startedAt: string;
+    };
+}
 
 export class IncrementalIndexer {
-    private readonly queue = new Map<string, number>();
+    private readonly queues: Record<PriorityLevel, Map<string, number>> = {
+        high: new Map(),
+        medium: new Map(),
+        low: new Map()
+    };
     private processing = false;
     private watcher?: chokidar.FSWatcher;
     private stopped = false;
@@ -26,10 +46,20 @@ export class IncrementalIndexer {
     private maxQueueDepthSeen = 0;
     private lastDepthLogAt = 0;
 
+    private static readonly IGNORE_FILE = '.gitignore';
+    private static readonly CONFIG_FILES = ['tsconfig.json', 'jsconfig.json', 'package.json'];
+    private moduleConfigReloadPromise?: Promise<void>;
+    private configurationSubscriptions: Array<{ event: ConfigurationEvent; handler: (payload: any) => void }> = [];
+    private configEventsRegistered = false;
+    private activity?: { label: string; detail?: string; startedAt: number };
+
     constructor(
         private readonly rootPath: string,
         private readonly symbolIndex: SymbolIndex,
         private readonly dependencyGraph: DependencyGraph,
+        private readonly indexDatabase?: IndexDatabase,
+        private readonly moduleResolver?: ModuleResolver,
+        private readonly configurationManager?: ConfigurationManager,
         private readonly options: IncrementalIndexerOptions = {}
     ) {}
 
@@ -48,18 +78,36 @@ export class IncrementalIndexer {
                 },
                 atomic: true
             });
-            this.watcher.on('add', file => this.enqueuePath(file));
-            this.watcher.on('change', file => this.enqueuePath(file));
+
+            if (!this.configurationManager) {
+                this.watcher.add(path.join(this.rootPath, IncrementalIndexer.IGNORE_FILE));
+                for (const file of IncrementalIndexer.CONFIG_FILES) {
+                    const configPath = path.join(this.rootPath, file);
+                    try {
+                        this.watcher.add(configPath);
+                    } catch {
+                        // File may not exist yet, which is acceptable.
+                    }
+                }
+            }
+
+            this.watcher.on('add', file => this.enqueuePath(file, 'medium'));
+            this.watcher.on('change', file => void this.handleFileChange(file));
             this.watcher.on('unlink', file => this.handleDeletion(file));
             this.watcher.on('unlinkDir', dir => this.handleDirectoryDeletion(dir));
             this.watcher.on('error', error => {
                 console.warn('[IncrementalIndexer] watcher error', error);
             });
         }
+
+        if (this.configurationManager && !this.configEventsRegistered) {
+            this.registerConfigurationEvents();
+        }
     }
 
     public async stop(): Promise<void> {
         this.stopped = true;
+        this.unregisterConfigurationEvents();
         if (this.watcher) {
             await this.watcher.close();
         }
@@ -70,14 +118,32 @@ export class IncrementalIndexer {
     }
 
     public getQueueStats(): { currentDepth: number; maxDepthSeen: number; currentPauseMs: number } {
+        const depth = this.getQueueDepth();
         return {
-            currentDepth: this.queue.size,
+            currentDepth: depth.total,
             maxDepthSeen: this.maxQueueDepthSeen,
             currentPauseMs: this.currentPauseMs
         };
     }
 
-    private enqueuePath(filePath: string) {
+    public getActivitySnapshot(): IndexerStatusSnapshot {
+        const depth = this.getQueueDepth();
+        return {
+            queueDepth: depth,
+            currentPauseMs: this.currentPauseMs,
+            maxQueueDepthSeen: this.maxQueueDepthSeen,
+            processing: this.processing,
+            activity: this.activity
+                ? {
+                    label: this.activity.label,
+                    detail: this.activity.detail,
+                    startedAt: new Date(this.activity.startedAt).toISOString()
+                }
+                : undefined
+        };
+    }
+
+    private enqueuePath(filePath: string, priority: PriorityLevel = 'medium') {
         if (!this.isWithinRoot(filePath)) return;
         if (!this.symbolIndex.isSupported(filePath)) return;
         let normalized = path.resolve(filePath);
@@ -102,15 +168,17 @@ export class IncrementalIndexer {
             this.currentPauseMs = Math.max(DEFAULT_BATCH_PAUSE_MS, this.currentPauseMs / 1.5);
         }
 
-        this.queue.set(normalized, now);
-        if (this.queue.size > this.maxQueueDepthSeen) {
-            this.maxQueueDepthSeen = this.queue.size;
+        this.removeFromQueues(normalized);
+        this.queues[priority].set(normalized, now);
+        const totalDepth = this.getTotalQueueSize();
+        if (totalDepth > this.maxQueueDepthSeen) {
+            this.maxQueueDepthSeen = totalDepth;
         }
         metrics.inc("indexer.events");
-        metrics.gauge("indexer.queue_depth", this.queue.size);
+        metrics.gauge("indexer.queue_depth", totalDepth);
         metrics.gauge("indexer.pause_ms", this.currentPauseMs);
-        if (this.queue.size >= 200 && now - this.lastDepthLogAt > 5000) {
-            console.info(`[IncrementalIndexer] High queue depth: ${this.queue.size} (pause=${this.currentPauseMs}ms)`);
+        if (totalDepth >= 200 && now - this.lastDepthLogAt > 5000) {
+            console.info(`[IncrementalIndexer] High queue depth: ${totalDepth} (pause=${this.currentPauseMs}ms)`);
             this.lastDepthLogAt = now;
         }
         void this.processQueue();
@@ -119,14 +187,16 @@ export class IncrementalIndexer {
     private async processQueue(): Promise<void> {
         if (this.processing || this.stopped) return;
         this.processing = true;
-        while (this.queue.size > 0 && !this.stopped) {
+        while (this.getTotalQueueSize() > 0 && !this.stopped) {
             const batchDelay = Math.max(this.options.batchPauseMs ?? this.currentPauseMs, 50);
             await this.sleep(batchDelay);
+            this.setActivity('queue_processing', `Processing ${this.getTotalQueueSize()} queued files`);
 
-            const batchEntries = Array.from(this.queue.keys());
-            this.queue.clear();
-
+            const batchEntries = this.pullNextBatch();
             for (const filePath of batchEntries) {
+                if (this.stopped) {
+                    break;
+                }
                 if (!(await this.fileExists(filePath))) {
                     continue;
                 }
@@ -139,6 +209,7 @@ export class IncrementalIndexer {
                 }
             }
         }
+        this.clearActivity('queue_processing');
         this.processing = false;
     }
 
@@ -162,16 +233,191 @@ export class IncrementalIndexer {
                 if (entry.isDirectory()) {
                     stack.push(fullPath);
                 } else if (this.symbolIndex.isSupported(fullPath)) {
-                    this.enqueuePath(fullPath);
+                    this.enqueuePath(fullPath, 'low');
                 }
             }
             await this.sleep(0);
         }
     }
 
+    private async handleFileChange(filePath: string): Promise<void> {
+        const basename = path.basename(filePath);
+        if (basename === IncrementalIndexer.IGNORE_FILE) {
+            if (this.configurationManager) {
+                return;
+            }
+            await this.handleIgnoreChange();
+            return;
+        }
+
+        if (IncrementalIndexer.CONFIG_FILES.includes(basename)) {
+            if (this.configurationManager) {
+                return;
+            }
+            await this.handleModuleConfigChange(filePath);
+            return;
+        }
+
+        this.enqueuePath(filePath);
+    }
+
+    private async handleIgnoreChange(): Promise<void> {
+        if (!this.indexDatabase) {
+            console.warn('[IncrementalIndexer] IndexDatabase not provided; skipping gitignore reindex');
+            return;
+        }
+
+        console.info('[IncrementalIndexer] Detected .gitignore change; re-evaluating indexed files...');
+        this.setActivity('gitignore_reindex', 'Re-evaluating ignore rules');
+        try {
+            const indexedFiles = this.indexDatabase.listFiles();
+            const filesToRemove: string[] = [];
+
+            for (const fileRecord of indexedFiles) {
+                const absolutePath = path.join(this.rootPath, fileRecord.path);
+                if (this.shouldIgnore(absolutePath)) {
+                    filesToRemove.push(fileRecord.path);
+                }
+            }
+
+            for (const relPath of filesToRemove) {
+                try {
+                    this.indexDatabase.deleteFile(relPath);
+                    console.debug(`[IncrementalIndexer] Removed ignored file from index: ${relPath}`);
+                } catch (error) {
+                    console.warn(`[IncrementalIndexer] Failed to remove ${relPath} from index:`, error);
+                }
+            }
+
+            const newFiles = await this.scanForNewFiles();
+            for (const filePath of newFiles) {
+                this.enqueuePath(filePath, 'high');
+            }
+
+            console.info(`[IncrementalIndexer] Gitignore reindex: removed ${filesToRemove.length} files, enqueued ${newFiles.length} new files`);
+        } catch (error) {
+            console.error('[IncrementalIndexer] Error handling .gitignore change:', error);
+        } finally {
+            this.clearActivity('gitignore_reindex');
+        }
+    }
+
+    private async scanForNewFiles(): Promise<string[]> {
+        if (!this.indexDatabase) {
+            return [];
+        }
+
+        const newFiles: string[] = [];
+        const stack: string[] = [this.rootPath];
+
+        while (stack.length > 0 && !this.stopped) {
+            const current = stack.pop()!;
+            let entries: fs.Dirent[];
+            try {
+                entries = await fs.promises.readdir(current, { withFileTypes: true });
+            } catch {
+                continue;
+            }
+
+            for (const entry of entries) {
+                const fullPath = path.join(current, entry.name);
+                if (this.shouldIgnore(fullPath)) {
+                    continue;
+                }
+
+                if (entry.isDirectory()) {
+                    stack.push(fullPath);
+                    continue;
+                }
+
+                if (!this.symbolIndex.isSupported(fullPath)) {
+                    continue;
+                }
+
+                const relPath = path.relative(this.rootPath, fullPath);
+                const existing = this.indexDatabase.getFile(relPath);
+                if (!existing) {
+                    newFiles.push(fullPath);
+                }
+            }
+
+            await this.sleep(0);
+        }
+
+        return newFiles;
+    }
+
+    private registerConfigurationEvents(): void {
+        if (!this.configurationManager) {
+            return;
+        }
+        const ignoreHandler = () => void this.handleIgnoreChange();
+        const tsconfigHandler = (payload: { filePath: string }) => void this.handleModuleConfigChange(payload.filePath);
+        const packageHandler = (payload: { filePath: string }) => void this.handleModuleConfigChange(payload.filePath);
+
+        this.configurationManager.on("ignoreChanged", ignoreHandler);
+        this.configurationSubscriptions.push({ event: "ignoreChanged", handler: ignoreHandler });
+
+        this.configurationManager.on("tsconfigChanged", tsconfigHandler);
+        this.configurationSubscriptions.push({ event: "tsconfigChanged", handler: tsconfigHandler });
+
+        this.configurationManager.on("jsconfigChanged", tsconfigHandler);
+        this.configurationSubscriptions.push({ event: "jsconfigChanged", handler: tsconfigHandler });
+
+        this.configurationManager.on("packageJsonChanged", packageHandler);
+        this.configurationSubscriptions.push({ event: "packageJsonChanged", handler: packageHandler });
+
+        this.configEventsRegistered = true;
+    }
+
+    private unregisterConfigurationEvents(): void {
+        if (!this.configurationManager) {
+            return;
+        }
+        for (const subscription of this.configurationSubscriptions) {
+            this.configurationManager.off(subscription.event as ConfigurationEvent, subscription.handler);
+        }
+        this.configurationSubscriptions = [];
+        this.configEventsRegistered = false;
+    }
+
+    private async handleModuleConfigChange(filePath: string): Promise<void> {
+        if (!this.moduleResolver) {
+            console.warn('[IncrementalIndexer] ModuleResolver not provided; skipping config reload');
+            return;
+        }
+
+        if (!this.moduleConfigReloadPromise) {
+            this.moduleConfigReloadPromise = this.performModuleConfigReload(filePath).finally(() => {
+                this.moduleConfigReloadPromise = undefined;
+            });
+        }
+
+        try {
+            await this.moduleConfigReloadPromise;
+        } catch {
+            // Errors already logged in performModuleConfigReload
+        }
+    }
+
+    private async performModuleConfigReload(filePath: string): Promise<void> {
+        const basename = path.basename(filePath);
+        console.info(`[IncrementalIndexer] Detected configuration change (${basename}); reloading module resolver and rebuilding unresolved dependencies...`);
+        this.setActivity('config_reload', `Reloading configuration from ${basename}`);
+        try {
+            this.moduleResolver!.reloadConfig();
+            await this.dependencyGraph.rebuildUnresolved();
+            console.info('[IncrementalIndexer] Configuration reload complete.');
+        } catch (error) {
+            console.error('[IncrementalIndexer] Error handling configuration change:', error);
+        } finally {
+            this.clearActivity('config_reload');
+        }
+    }
+
     private async handleDeletion(filePath: string): Promise<void> {
         if (!this.isWithinRoot(filePath)) return;
-        this.queue.delete(path.resolve(filePath));
+        this.removeFromQueues(path.resolve(filePath));
         try {
             await this.dependencyGraph.removeFile(filePath);
         } catch (error) {
@@ -181,11 +427,8 @@ export class IncrementalIndexer {
 
     private async handleDirectoryDeletion(dirPath: string): Promise<void> {
         if (!this.isWithinRoot(dirPath)) return;
-        for (const queued of Array.from(this.queue.keys())) {
-            if (queued.startsWith(path.resolve(dirPath))) {
-                this.queue.delete(queued);
-            }
-        }
+        const normalizedDir = path.resolve(dirPath);
+        this.removeMatchingFromQueues(queued => queued.startsWith(normalizedDir));
         try {
             await this.dependencyGraph.removeDirectory(dirPath);
         } catch (error) {
@@ -217,5 +460,67 @@ export class IncrementalIndexer {
 
     private sleep(ms: number): Promise<void> {
         return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    private pullNextBatch(): string[] {
+        if (this.queues.high.size > 0) {
+            return this.flushQueue('high');
+        }
+        if (this.queues.medium.size > 0) {
+            return this.flushQueue('medium');
+        }
+        if (this.queues.low.size > 0) {
+            return this.flushQueue('low');
+        }
+        return [];
+    }
+
+    private flushQueue(priority: PriorityLevel): string[] {
+        const queue = this.queues[priority];
+        const entries = Array.from(queue.keys());
+        queue.clear();
+        return entries;
+    }
+
+    private getTotalQueueSize(): number {
+        return this.queues.high.size + this.queues.medium.size + this.queues.low.size;
+    }
+
+    private getQueueDepth() {
+        const high = this.queues.high.size;
+        const medium = this.queues.medium.size;
+        const low = this.queues.low.size;
+        return {
+            high,
+            medium,
+            low,
+            total: high + medium + low
+        };
+    }
+
+    private removeFromQueues(filePath: string): void {
+        for (const queue of Object.values(this.queues)) {
+            queue.delete(filePath);
+        }
+    }
+
+    private removeMatchingFromQueues(predicate: (path: string) => boolean): void {
+        for (const queue of Object.values(this.queues)) {
+            for (const key of Array.from(queue.keys())) {
+                if (predicate(key)) {
+                    queue.delete(key);
+                }
+            }
+        }
+    }
+
+    private setActivity(label: string, detail?: string): void {
+        this.activity = { label, detail, startedAt: Date.now() };
+    }
+
+    private clearActivity(label?: string): void {
+        if (!label || (this.activity && this.activity.label === label)) {
+            this.activity = undefined;
+        }
     }
 }

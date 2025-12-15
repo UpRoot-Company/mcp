@@ -40,6 +40,7 @@ import { IncrementalIndexer } from "./indexing/IncrementalIndexer.js";
 import { TransactionLog, TransactionLogEntry } from "./engine/TransactionLog.js";
 import { metrics } from "./utils/MetricsCollector.js";
 import { PathNormalizer } from "./utils/PathNormalizer.js";
+import { ConfigurationManager } from "./config/ConfigurationManager.js";
 
 
 
@@ -51,7 +52,7 @@ export class SmartContextServer {
     private rootRealPath?: string;
     private fileSystem: IFileSystem;
     private ig: any;
-    private ignoreGlobs: string[];
+    private ignoreGlobs: string[] = [];
     private searchEngine: SearchEngine;
     private contextEngine: ContextEngine;
     private editorEngine: EditorEngine;
@@ -71,6 +72,7 @@ export class SmartContextServer {
     private indexDatabase: IndexDatabase;
     private transactionLog: TransactionLog;
     private incrementalIndexer?: IncrementalIndexer;
+    private configurationManager: ConfigurationManager;
     private sigintListener?: () => Promise<void>;
     private static hasSigintListener = false;
     private static readonly READ_CODE_MAX_BYTES = 1_000_000;
@@ -123,8 +125,9 @@ export class SmartContextServer {
             SmartContextServer.READ_FILE_DEFAULT_MAX_BYTES
         );
 
+        this.configurationManager = new ConfigurationManager(this.rootPath);
         this.ig = (ignore.default as any)();
-        this.ignoreGlobs = this._loadIgnoreFiles();
+        this.applyIgnorePatterns(this.configurationManager.getIgnoreGlobs(), { skipPropagation: true });
 
         // 경로 정규화 초기화 (절대경로 ↔ 상대경로 자동 변환)
         this.pathNormalizer = new PathNormalizer(this.rootPath);
@@ -166,9 +169,18 @@ export class SmartContextServer {
         }, {
             precomputation: { enabled: precomputeEnabled }
         });
+        this.applyIgnorePatterns(this.ignoreGlobs);
+        this.registerConfigurationListeners();
         const indexingEnabled = process.env.SMART_CONTEXT_DISABLE_STREAMING_INDEX === 'true' ? false : !isTestEnv;
         if (indexingEnabled) {
-            this.incrementalIndexer = new IncrementalIndexer(this.rootPath, this.symbolIndex, this.dependencyGraph);
+            this.incrementalIndexer = new IncrementalIndexer(
+                this.rootPath,
+                this.symbolIndex,
+                this.dependencyGraph,
+                this.indexDatabase,
+                this.moduleResolver,
+                this.configurationManager
+            );
         }
 
         const requestedMode = process.env.SMART_CONTEXT_ENGINE_MODE as EngineConfig['mode'];
@@ -204,6 +216,7 @@ export class SmartContextServer {
             this.sigintListener = async () => {
                 this.clusterSearchEngine.stopBackgroundTasks();
                 await this.incrementalIndexer?.stop();
+                await this.configurationManager.dispose();
                 await this.server.close();
                 process.exit(0);
             };
@@ -216,25 +229,29 @@ export class SmartContextServer {
         }
     }
 
-    private _loadIgnoreFiles(): string[] {
-        const patterns: string[] = [];
-        const collectPatterns = (filePath: string) => {
-            if (!fs.existsSync(filePath)) {
-                return;
+    private applyIgnorePatterns(patterns: string[], options: { skipPropagation?: boolean } = {}): void {
+        this.ignoreGlobs = patterns;
+        const newIgnore = (ignore.default as any)();
+        if (patterns.length > 0) {
+            newIgnore.add(patterns);
+        }
+        this.ig = newIgnore;
+        if (!options.skipPropagation) {
+            this.contextEngine?.updateIgnoreFilter(this.ig);
+            this.symbolIndex?.updateIgnorePatterns(patterns);
+            if (this.searchEngine) {
+                void this.searchEngine.updateExcludeGlobs(patterns).catch(error => {
+                    console.warn('[SmartContextServer] Failed to update search ignore globs:', error);
+                });
             }
-            const content = fs.readFileSync(filePath, 'utf-8');
-            this.ig.add(content);
-            const parsed = content
-                .split(/\r?\n/)
-                .map((line: string) => line.trim())
-                .filter((line: string) => line.length > 0 && !line.startsWith('#'));
-            patterns.push(...parsed);
-        };
-        const gitignorePath = path.join(this.rootPath, '.gitignore');
-        collectPatterns(gitignorePath);
-        const mcpignorePath = path.join(this.rootPath, '.mcpignore');
-        collectPatterns(mcpignorePath);
-        return patterns;
+        }
+    }
+
+    private registerConfigurationListeners(): void {
+        this.configurationManager.on('ignoreChanged', ({ patterns }) => {
+            console.info('[SmartContextServer] .gitignore or .mcpignore changed; refreshing ignore filters.');
+            this.applyIgnorePatterns(patterns);
+        });
     }
 
     private _getAbsPathAndVerify(filePath: string): string {
@@ -1747,7 +1764,14 @@ export class SmartContextServer {
             case "status": {
                 await this.dependencyGraph.ensureBuilt();
                 const status = await this.dependencyGraph.getIndexStatus();
-                return { output: "Index status retrieved.", data: status };
+                const indexerStatus = this.incrementalIndexer?.getActivitySnapshot();
+                return {
+                    output: "Index status retrieved.",
+                    data: {
+                        dependencyIndex: status,
+                        indexer: indexerStatus
+                    }
+                };
             }
             case "metrics": {
                 const snapshot = metrics.snapshot();
@@ -1759,6 +1783,63 @@ export class SmartContextServer {
                         indexer: indexerStats
                     }
                 };
+            }
+            case "reindex": {
+                const startTime = Date.now();
+                try {
+                    console.info('[SmartContextServer] Starting full project reindex...');
+
+                    console.debug('[SmartContextServer] Clearing index database...');
+                    this.indexDatabase.clearAllFiles();
+
+                    const shouldRestartIndexer = !!this.incrementalIndexer;
+                    if (this.incrementalIndexer) {
+                        console.debug('[SmartContextServer] Stopping incremental indexer...');
+                        await this.incrementalIndexer.stop();
+                        this.incrementalIndexer = undefined;
+                    }
+
+                    console.debug('[SmartContextServer] Reloading module resolver config...');
+                    this.moduleResolver.reloadConfig();
+
+                    console.debug('[SmartContextServer] Clearing caches...');
+                    this.symbolIndex.clearCache();
+                    this.callGraphBuilder.clearCaches();
+                    this.typeDependencyTracker.clearCaches();
+
+                    if (shouldRestartIndexer) {
+                        console.debug('[SmartContextServer] Starting incremental indexer for full scan...');
+                        this.incrementalIndexer = new IncrementalIndexer(
+                            this.rootPath,
+                            this.symbolIndex,
+                            this.dependencyGraph,
+                            this.indexDatabase,
+                            this.moduleResolver,
+                            this.configurationManager
+                        );
+                        this.incrementalIndexer.start();
+                        await this.incrementalIndexer.waitForInitialScan();
+                    }
+
+                    const elapsed = Date.now() - startTime;
+                    console.info(`[SmartContextServer] Full project reindex completed in ${elapsed}ms`);
+
+                    return {
+                        output: `Project re-indexed successfully in ${elapsed}ms`,
+                        data: {
+                            status: "complete",
+                            durationMs: elapsed,
+                            timestamp: new Date().toISOString()
+                        }
+                    };
+                } catch (error) {
+                    const message = error instanceof Error ? error.message : String(error);
+                    console.error('[SmartContextServer] Reindex failed:', message);
+                    throw new McpError(
+                        ErrorCode.InternalError,
+                        `Re-indexing failed: ${message}`
+                    );
+                }
             }
             default:
                 throw new McpError(ErrorCode.InvalidParams, `Unknown manage_project command '${args.command}'.`);
@@ -1936,11 +2017,11 @@ export class SmartContextServer {
             },
             {
                 name: "manage_project",
-                description: "Runs project-level commands like undo, redo, workflow guidance, index status, and metrics.",
+                description: "Runs project-level commands like undo, redo, workflow guidance, index status, metrics, and manual reindexing.",
                 inputSchema: {
                     type: "object",
                     properties: {
-                        command: { type: "string", enum: ["undo", "redo", "guidance", "status", "metrics"] }
+                        command: { type: "string", enum: ["undo", "redo", "guidance", "status", "metrics", "reindex"] }
                     },
                     required: ["command"]
                 }

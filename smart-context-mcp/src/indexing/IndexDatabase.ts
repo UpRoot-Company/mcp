@@ -386,6 +386,20 @@ export class IndexDatabase {
         this.statements.deleteUnresolvedForSource.run(file.id);
     }
 
+    public clearAllFiles(): void {
+        const db = this.getHandle();
+        try {
+            db.exec('DELETE FROM symbols');
+            db.exec('DELETE FROM dependencies');
+            db.exec('DELETE FROM unresolved_dependencies');
+            db.exec('DELETE FROM files');
+            console.info('[IndexDatabase] All indexed files cleared');
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            throw new Error(`Failed to clear index database: ${message}`);
+        }
+    }
+
     private normalize(relPath: string): string {
         return relPath.replace(/\\/g, '/');
     }

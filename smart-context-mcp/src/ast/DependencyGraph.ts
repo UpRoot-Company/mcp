@@ -137,6 +137,41 @@ export class DependencyGraph {
         };
     }
 
+    public async rebuildUnresolved(): Promise<void> {
+        if (!this.db) {
+            console.warn('[DependencyGraph] IndexDatabase not available; skipping unresolved rebuild');
+            return;
+        }
+
+        console.info('[DependencyGraph] Rebuilding unresolved dependencies...');
+        try {
+            const unresolved = this.db.listUnresolved();
+            const filePathSet = new Set<string>();
+
+            for (const entry of unresolved) {
+                filePathSet.add(entry.filePath);
+            }
+
+            let rebuiltCount = 0;
+            for (const relativePath of filePathSet) {
+                const absPath = path.isAbsolute(relativePath)
+                    ? relativePath
+                    : path.join(this.rootPath, relativePath);
+                try {
+                    const symbols = await this.symbolIndex.getSymbolsForFile(absPath);
+                    await this.updateFileDependencies(absPath, symbols);
+                    rebuiltCount++;
+                } catch (error) {
+                    console.warn(`[DependencyGraph] Failed to rebuild dependencies for ${relativePath}:`, error);
+                }
+            }
+
+            console.info(`[DependencyGraph] Rebuilt dependencies for ${rebuiltCount} files with previously unresolved imports`);
+        } catch (error) {
+            console.error('[DependencyGraph] Error rebuilding unresolved dependencies:', error);
+        }
+    }
+
     public async invalidateFile(filePath: string): Promise<void> {
         const absPath = path.isAbsolute(filePath) ? filePath : path.join(this.rootPath, filePath);
         this.symbolIndex.invalidateFile(absPath);

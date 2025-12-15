@@ -31,8 +31,8 @@ interface SearchCandidate {
 export class TrigramIndex {
     private readonly rootPath: string;
     private readonly fileSystem: IFileSystem;
-    private readonly ignoreFilter: IgnoreInstance;
-    private readonly options: Required<TrigramIndexOptions>;
+    private ignoreFilter: IgnoreInstance;
+    private options: Required<TrigramIndexOptions>;
     private readonly fileEntries = new Map<string, FileEntry>();
     private readonly postings = new Map<string, Map<string, number>>();
     private isReady = false;
@@ -72,6 +72,12 @@ export class TrigramIndex {
         this.isReady = false;
         this.buildPromise = this.buildIndex();
         await this.buildPromise;
+    }
+
+    public async updateIgnoreGlobs(globs: string[]): Promise<void> {
+        this.options.ignoreGlobs = globs;
+        this.ignoreFilter = createIgnore().add(globs);
+        await this.rebuild();
     }
 
     public listFiles(): string[] {

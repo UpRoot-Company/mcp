@@ -325,4 +325,11 @@ export class ModuleResolver {
         this.fileExistsCache.clear();
         this.dirExistsCache.clear();
     }
+
+    public reloadConfig(): void {
+        console.info('[ModuleResolver] Reloading configuration...');
+        this.clearCache();
+        this.initializeTsconfigMatchers();
+        console.info('[ModuleResolver] Configuration reload complete');
+    }
 }

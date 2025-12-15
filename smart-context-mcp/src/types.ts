@@ -691,7 +691,7 @@ export interface GetBatchGuidanceArgs {
 }
 
 
-export type ManageProjectCommand = "undo" | "redo" | "guidance" | "status" | "metrics";
+export type ManageProjectCommand = "undo" | "redo" | "guidance" | "status" | "metrics" | "reindex";
 
 export interface ManageProjectArgs {
     command: ManageProjectCommand;

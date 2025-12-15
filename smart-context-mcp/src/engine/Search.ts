@@ -58,7 +58,7 @@ export class SearchEngine {
     private readonly rootPath: string;
     private readonly fileSystem: IFileSystem;
     private readonly bm25Ranking: BM25FRanking;
-    private readonly defaultExcludeGlobs: string[];
+    private defaultExcludeGlobs: string[];
     private readonly trigramIndex: TrigramIndex;
     private readonly maxPreviewLength: number;
     private readonly maxMatchesPerFile: number;
@@ -84,6 +84,12 @@ export class SearchEngine {
             ignoreGlobs: this.defaultExcludeGlobs,
             ...options.trigram
         });
+    }
+
+    public async updateExcludeGlobs(patterns: string[]): Promise<void> {
+        const combined = [...BUILTIN_EXCLUDE_GLOBS, ...patterns];
+        this.defaultExcludeGlobs = Array.from(new Set(combined));
+        await this.trigramIndex.updateIgnoreGlobs(this.defaultExcludeGlobs);
     }
 
     public async warmup(): Promise<void> {

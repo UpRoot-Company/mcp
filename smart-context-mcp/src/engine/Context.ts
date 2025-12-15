@@ -11,6 +11,10 @@ export class ContextEngine {
         this.fileSystem = fileSystem;
     }
 
+    public updateIgnoreFilter(ig: any): void {
+        this.ig = ig;
+    }
+
     private mergeIntervals(ranges: LineRange[]): LineRange[] {
         if (ranges.length === 0) return [];
         const sortedRanges = [...ranges].sort((a, b) => a.start - b.start);
