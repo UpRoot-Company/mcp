@@ -262,6 +262,8 @@ npx smart-context-mcp
 - Faster queries (bigger cache)
 - More RAM usage (~500MB-1GB)
 
+**See also:** [Agent Optimization Guide](./agent-optimization.md) for model-specific tuning
+
 ---
 
 ### For CI/CD Pipelines
@@ -280,6 +282,8 @@ npx smart-context-mcp
 - Fast indexing
 - Minimal memory (good for containers)
 - No unnecessary logging
+
+**See also:** [Agent Optimization Guide - Token Budget Management](./agent-optimization.md#token-budget-management)
 
 ---
 
@@ -366,6 +370,8 @@ Smart Context is sandboxed by default. It cannot access files outside the `cwd`:
 }
 ```
 
+**See also:** [Permissions Guide](./permissions.md) for tool access control
+
 ---
 
 ### Disable Debug Mode in Production
@@ -394,6 +400,8 @@ echo $SMART_CONTEXT_MAX_CACHE_SIZE
 SMART_CONTEXT_MAX_CACHE_SIZE=100 npx smart-context-mcp
 ```
 
+**See also:** [Agent Optimization Guide - Token Budget Management](./agent-optimization.md#6-token-budget-management)
+
 ---
 
 ### ❌ "Queries are slow"
@@ -414,6 +422,8 @@ SMART_CONTEXT_MAX_CACHE_SIZE=100 npx smart-context-mcp
    ```bash
    SMART_CONTEXT_DB_BUSY_TIMEOUT=10000  # Increase from 5000ms
    ```
+
+**See also:** [Prompt Engineering Guide - Token Optimization](./prompt-engineering.md#token-optimization-techniques)
 
 ---
 
@@ -495,6 +505,7 @@ Before deploying to production, verify:
 - [ ] `SMART_CONTEXT_DEBUG` is `false`
 - [ ] `SMART_CONTEXT_ENGINE_PROFILE` is `production`
 - [ ] `SMART_CONTEXT_MAX_CACHE_SIZE` is reasonable for your RAM
+- [ ] Tool permissions configured (see [Permissions Guide](./permissions.md))
 - [ ] Database backup strategy is in place
 - [ ] Log rotation is configured (if logging to file)
 
@@ -502,12 +513,22 @@ Before deploying to production, verify:
 
 ## Further Reading
 
-- [Getting Started](./getting-started.md) - Installation & setup
-- [Integration Guide](./integration.md) - IDE-specific tips
-- [AGENT_PLAYBOOK.md](../agent/AGENT_PLAYBOOK.md) - Usage patterns
+### Getting Started & Integration
+- **[Getting Started](./getting-started.md)** - Installation & setup for all platforms
+- **[Integration Guide](./integration.md)** - IDE-specific configuration (VS Code, Cursor, JetBrains, Vim, Emacs)
+
+### Agent & Workflow Guides
+- **[Prompt Engineering Guide](./prompt-engineering.md)** - How to prompt effectively, token optimization, multi-turn patterns
+- **[Agent Optimization Guide](./agent-optimization.md)** - Model-specific strategies (Claude, OpenAI, Gemini), performance benchmarks
+- **[AGENT_PLAYBOOK.md](../agent/AGENT_PLAYBOOK.md)** - Workflow patterns and practical examples
+
+### Tool & Security Configuration
+- **[Tool Conflict Resolution Guide](./tool-conflicts.md)** - Bash vs smart-context decisions
+- **[Permissions Guide](./permissions.md)** - `.claude/settings.local.json` configuration and security
+- **[Agent README](../agent/README.md)** - Quick navigation by task and concept
 
 ---
 
 **Version:** 1.0.0  
-**Last Updated:** 2025-12-14  
+**Last Updated:** 2025-12-15  
 **Maintained by:** Smart Context MCP Team

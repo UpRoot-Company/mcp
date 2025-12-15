@@ -91,7 +91,7 @@ All edits in one `edit_code` call succeed or fail together. If any edit fails, a
 
 ## Token Efficiency Analysis
 
-This table demonstrates real token savings achieved by following the Scout → Read → Edit pipeline:
+This table demonstrates real token savings achieved by following the Scout → Read → Edit pipeline. See [Prompt Engineering Guide - Token Optimization](../guides/prompt-engineering.md#token-optimization-techniques) for detailed optimization strategies.
 
 | Workflow | Full File Read | Skeleton + Fragment | Savings | Real Example |
 |----------|---|---|---|---|
@@ -637,7 +637,7 @@ You discover: `const  timeout  =  5000;` (extra spaces!)
 }
 ```
 
-**Best Practice:** Always use `normalization="whitespace"` as default. Only use `"exact"` when you're 100% sure the whitespace is correct.
+**Best Practice:** Always use `normalization="whitespace"` as default. Only use `"exact"` when you're 100% sure the whitespace is correct. See [Tool Conflict Resolution Guide](../guides/tool-conflicts.md#anti-pattern-4-grepping-without-result-limits) for more on matching strategies.
 
 #### Situation 7.2: `AMBIGUOUS_MATCH` Error
 
@@ -857,18 +857,29 @@ Error occurs
 
 ## References
 
-- **Related Documentation:**
-  - [TOOL_REFERENCE.md](./TOOL_REFERENCE.md) - Detailed parameter documentation
-  - [ARCHITECTURE.md](./ARCHITECTURE.md) - Internal system design
-  - [../guides/integration.md](../guides/integration.md) - IDE integration
+### Optimization & Prompt Engineering
+- **[Prompt Engineering Guide](../guides/prompt-engineering.md)** - Core principles, templates, multi-turn patterns, token optimization, error recovery
+- **[Agent Optimization Guide](../guides/agent-optimization.md)** - Model-specific strategies, performance benchmarks, token budget management
+- **[Tool Conflict Resolution Guide](../guides/tool-conflicts.md)** - When to use Bash vs smart-context, decision matrix, performance comparison
 
-- **ADRs:**
-  - [ADR-024: Enhanced Edit Flexibility and Safety](../../docs/adr/ADR-024-enhanced-edit-flexibility-and-safety.md)
-  - [ADR-009: Editor Engine Improvements](../../docs/adr/ADR-009-editor-engine-improvements.md)
-  - [ADR-025: User Experience Enhancements](../../docs/adr/ADR-025-User-Experience-Enhancements.md)
+### Core Documentation
+- **[TOOL_REFERENCE.md](./TOOL_REFERENCE.md)** - Detailed parameter documentation for all 10+ tools
+- **[ARCHITECTURE.md](./ARCHITECTURE.md)** - Internal system design, algorithms, reliability mechanisms
+- **[README.md](./README.md)** - Quick navigation by task and concept
+
+### Integration & Setup
+- **[../guides/integration.md](../guides/integration.md)** - IDE integration (VSCode, Cursor, JetBrains, Vim, Emacs)
+- **[../guides/getting-started.md](../guides/getting-started.md)** - Installation and basic setup
+- **[../guides/configuration.md](../guides/configuration.md)** - Environment variables and tuning
+- **[../guides/permissions.md](../guides/permissions.md)** - Tool access control and security
+
+### ADRs (Architectural Decision Records)
+- **[ADR-024: Enhanced Edit Flexibility and Safety](../../docs/adr/ADR-024-enhanced-edit-flexibility-and-safety.md)** - Design of safe editing
+- **[ADR-009: Editor Engine Improvements](../../docs/adr/ADR-009-editor-engine-improvements.md)** - Engine architecture
+- **[ADR-025: User Experience Enhancements](../../docs/adr/ADR-025-User-Experience-Enhancements.md)** - UX improvements
 
 ---
 
 **Version:** 1.0.0  
-**Last Updated:** 2025-12-14  
+**Last Updated:** 2025-12-15  
 **Maintained by:** Smart Context MCP Team

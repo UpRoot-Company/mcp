@@ -58,50 +58,83 @@ npx smart-context-mcp
 
 Smart Context implements the **Model Context Protocol (MCP)** standard. Choose your platform below.
 
-### 3.1 Claude Desktop (Native Support)
+### 3.1 Claude Code (Official CLI Tool)
 
-**Step 1: Locate config file**
+Claude Code is Anthropic's official CLI tool for agentic coding that runs directly in your terminal.
 
-- **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
-- **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
-- **Linux**: `~/.config/Claude/claude_desktop_config.json`
+**Installation:**
 
-**Step 2: Add Smart Context server**
+```bash
+# macOS/Linux
+curl -fsSL https://claude.ai/install.sh | bash
 
-Replace `/absolute/path/to/your/project` with your actual project directory:
+# Or with Homebrew (macOS)
+brew install --cask claude-code
+
+# Or with npm (requires Node.js 18+)
+npm install -g @anthropic-ai/claude-code
+```
+
+**Step 1: Add Smart Context MCP Server**
+
+Add the server to your Claude Code configuration:
+
+```bash
+# Add globally (all projects)
+claude mcp add --transport stdio smart-context -- npx -y smart-context-mcp
+```
+
+**Step 2: Configure MCP (Optional)**
+
+Create `.mcp.json` in your project for team configuration:
 
 ```json
 {
   "mcpServers": {
     "smart-context": {
       "command": "npx",
-      "args": ["-y", "smart-context-mcp"],
-      "cwd": "/absolute/path/to/your/project",
-      "env": {
-        "SMART_CONTEXT_DEBUG": "false"
-      }
+      "args": ["-y", "smart-context-mcp"]
     }
   }
 }
 ```
 
-**Step 3: Restart Claude**
+**Step 3: Start Claude Code**
 
-Fully quit (Cmd+Q on Mac) and reopen Claude. You should see a 🔌 icon at the bottom of the chat window.
+```bash
+cd your-project
+claude
+```
+
+**Verify Installation:**
+
+```bash
+# List all installed MCP servers
+claude mcp list
+
+# Check status within Claude Code
+/mcp
+```
+
+**Scope Options:**
+- `local` (default): Project-specific, stored in `~/.claude.json`
+- `project`: Team-shared, stored in `.mcp.json` (tracked in git)
+- `user`: All projects globally, stored in `~/.claude.json`
 
 **Troubleshooting:**
-- If no 🔌 icon appears, check the log: Claude menu → Logs
-- Ensure the `cwd` path exists and is readable
+- Run `claude mcp list` to verify the server is installed
+- Check `.claude.json` or `.mcp.json` for configuration
+- For permission configuration, see [Tool Permissions](./permissions.md)
 
 ---
 
-### 3.2 GitHub Copilot CLI (`gh copilot`)
+### 3.2 GitHub Copilot (VS Code)
 
-GitHub Copilot CLI supports MCP natively via `mcp.json` configuration.
+GitHub Copilot in VS Code supports MCP natively via `.vscode/mcp.json` configuration (v1.99+, March 2025).
 
 **Step 1: Create config file**
 
-Create `.vscode/mcp.json` in your project (or edit global settings):
+Create `.vscode/mcp.json` in your project (shared with team):
 
 ```json
 {
@@ -118,14 +151,29 @@ Create `.vscode/mcp.json` in your project (or edit global settings):
 }
 ```
 
-**Step 2: Use in CLI**
+Alternatively, for personal settings only, edit `.vscode/settings.json`:
 
-```bash
-# Interactive mode
-gh copilot suggest "Find all authentication logic"
-
-# The AI can now use Smart Context tools to analyze your project
+```json
+{
+  "github.copilot.mcp": {
+    "smart-context": {
+      "command": "npx",
+      "args": ["-y", "smart-context-mcp"]
+    }
+  }
+}
 ```
+
+**Step 2: Use in GitHub Copilot Chat**
+
+Open GitHub Copilot Chat and ask:
+```
+"Find all authentication logic in this project"
+```
+
+GitHub Copilot can now use Smart Context tools to analyze your code.
+
+**Reference:** See [GitHub Copilot MCP Documentation](https://docs.github.com/copilot/customizing-copilot/using-model-context-protocol/extending-copilot-chat-with-mcp)
 
 ---
 
@@ -150,9 +198,19 @@ Create a new chat and ask: `"Analyze the project structure"`
 
 ### 3.4 Gemini CLI
 
-**Step 1: Update settings**
+Gemini CLI is Google's open-source AI agent that runs in your terminal. It supports MCP servers for tool integration.
 
-Edit `~/.gemini/settings.json`:
+**Step 1: Install Gemini CLI**
+
+```bash
+npm install -g @google-gemini/cli
+# or
+pip install gemini-cli
+```
+
+**Step 2: Configure MCP Server**
+
+Edit `~/.gemini/settings.json` (user-level) or `.gemini/settings.json` (project-level):
 
 ```json
 {
@@ -160,24 +218,52 @@ Edit `~/.gemini/settings.json`:
     "smart-context": {
       "command": "npx",
       "args": ["-y", "smart-context-mcp"],
-      "transport": "stdio",
-      "env": {
-        "SMART_CONTEXT_DEBUG": "false"
-      }
+      "cwd": "/path/to/your/project"
     }
   }
 }
 ```
 
-**Step 2: Test**
+**Step 3: Use in Gemini CLI**
 
 ```bash
 gemini "Help me understand the API structure of this project"
 ```
 
+Gemini CLI can now use Smart Context tools to analyze your codebase.
+
+**Reference:** See [Gemini CLI MCP Configuration](https://geminicli.com/docs/tools/)
+
 ---
 
-### 3.5 OpenAI Codex CLI / Other Platforms
+### 3.5 Codex CLI (OpenAI)
+
+Codex is OpenAI's CLI tool for agentic coding with extended thinking.
+
+**Installation:**
+
+```bash
+curl -fsSL https://install.openai.com/codex | bash
+```
+
+**Add MCP Server:**
+
+```bash
+codex mcp add smart-context -- npx -y smart-context-mcp
+```
+
+**Configuration:** `~/.codex/config.toml`
+
+```toml
+model = "gpt-5.1-codex-max"
+model_reasoning_effort = "high"
+```
+
+**Reference:** [Codex Docs](https://developers.openai.com/codex)
+
+---
+
+### 3.6 Other Platforms & Generic MCP Integration
 
 For other platforms supporting MCP, use the general pattern:
 
@@ -189,7 +275,7 @@ npx -y smart-context-mcp
 # Transport: stdio
 ```
 
-Consult your platform's MCP documentation for specific configuration.
+Consult your platform's MCP documentation for specific configuration details.
 
 ---
 
@@ -451,6 +537,7 @@ You're ready! Try these:
    - Read [AGENT_PLAYBOOK.md](../agent/AGENT_PLAYBOOK.md) for advanced patterns
    - See [TOOL_REFERENCE.md](../agent/TOOL_REFERENCE.md) for tool details
    - Check [integration.md](./integration.md) for IDE-specific tips
+   - Explore [Agent Optimization Guide](./agent-optimization.md) for LLM-specific strategies
 
 3. **Troubleshoot:**
    - Check the platform logs (Claude → Logs, etc.)
@@ -468,5 +555,5 @@ You're ready! Try these:
 ---
 
 **Version:** 1.0.0  
-**Last Updated:** 2025-12-14  
+**Last Updated:** 2025-12-15  
 **Maintained by:** Smart Context MCP Team

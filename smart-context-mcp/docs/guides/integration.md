@@ -126,17 +126,121 @@ const isWithin = await RootDetector.isWithinProject(
 
 ## IDE-Specific Integration
 
-### Claude Desktop
+### Claude Code (Official CLI Tool)
 
-**Configuration:** See [Getting Started Guide](./getting-started.md#31-claude-desktop-native-support)
+Claude Code is Anthropic's official CLI tool for agentic coding.
 
-Smart Context works out-of-the-box with Claude Desktop's MCP support.
+**Installation:**
+
+```bash
+curl -fsSL https://claude.ai/install.sh | bash
+```
+
+**Add MCP Server:**
+
+```bash
+claude mcp add --transport stdio smart-context -- npx -y smart-context-mcp
+```
+
+**Configuration:** `.mcp.json` or `.claude/settings.json`
+
+**Reference:** [Claude Code Docs](https://code.claude.com/docs/en/overview)
 
 ---
 
-### VSCode Copilot Extension
+### Codex CLI (OpenAI)
 
-VSCode provides absolute file paths through its extension API.
+Codex is OpenAI's CLI tool for agentic coding with extended thinking.
+
+**Installation:**
+
+```bash
+curl -fsSL https://install.openai.com/codex | bash
+```
+
+**Add MCP Server:**
+
+```bash
+codex mcp add smart-context -- npx -y smart-context-mcp
+```
+
+**Configuration:** `~/.codex/config.toml`
+
+```toml
+model = "gpt-5.1-codex-max"
+model_reasoning_effort = "high"
+
+[mcp_servers.smart-context]
+command = "npx"
+args = ["-y", "smart-context-mcp"]
+```
+
+**Key Features:**
+- Extended thinking for deep reasoning
+- Agents.md for project instructions
+- Models: GPT-5.1-Codex-Max or Mini
+
+**Reference:** [Codex Docs](https://developers.openai.com/codex)
+
+---
+
+### GitHub Copilot (VS Code)
+
+GitHub Copilot is a Microsoft/GitHub product available in VS Code (v1.99+, March 2025) and other IDEs. It supports MCP via configuration files.
+
+**Setup in VS Code:**
+
+**Method 1: Project-level configuration (shared with team)**
+
+Create `.vscode/mcp.json` in your project:
+
+```json
+{
+  "mcpServers": {
+    "smart-context": {
+      "command": "npx",
+      "args": ["-y", "smart-context-mcp"],
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "SMART_CONTEXT_ROOT": "${workspaceFolder}"
+      }
+    }
+  }
+}
+```
+
+**Method 2: Personal settings (user-specific)**
+
+Edit `.vscode/settings.json` or VS Code settings UI:
+
+```json
+{
+  "github.copilot.mcp": {
+    "smart-context": {
+      "command": "npx",
+      "args": ["-y", "smart-context-mcp"],
+      "cwd": "${workspaceFolder}"
+    }
+  }
+}
+```
+
+**Using in GitHub Copilot Chat:**
+
+Open the Copilot Chat view and ask:
+```
+"Find all authentication logic in this project"
+```
+
+GitHub Copilot can now use Smart Context tools to analyze your code.
+
+**Reference:** See [GitHub Copilot MCP Documentation](https://docs.github.com/copilot/customizing-copilot/using-model-context-protocol/extending-copilot-chat-with-mcp)
+
+---
+
+### VS Code MCP Extension Development
+
+For building custom MCP-compatible extensions in VS Code:
 
 **Setup:**
 
@@ -311,6 +415,76 @@ const request = {
 // Send directly - Smart Context normalizes
 const result = await smartContext.editCode(request);
 ```
+
+---
+
+### Gemini CLI
+
+Gemini CLI is Google's open-source AI agent that runs in your terminal. It supports MCP server integration for extended functionality.
+
+**Installation:**
+
+```bash
+# Via npm
+npm install -g @google-gemini/cli
+
+# Or via pip
+pip install gemini-cli
+
+# Verify installation
+gemini --version
+```
+
+**Configuration:**
+
+Edit `~/.gemini/settings.json` (user-level) or `.gemini/settings.json` (project-level):
+
+```json
+{
+  "mcpServers": {
+    "smart-context": {
+      "command": "npx",
+      "args": ["-y", "smart-context-mcp"],
+      "cwd": "/path/to/your/project"
+    }
+  }
+}
+```
+
+**Available Settings Categories:**
+
+Gemini CLI supports comprehensive settings via `/settings` command:
+
+- **General**: Preview features, Vim mode, auto-updates, session retention
+- **Output**: Format selection (text or JSON)
+- **UI**: Display options, accessibility features
+- **Model**: Session configuration, compression thresholds
+- **Context**: File discovery, .gitignore respect
+- **Tools**: Shell configuration, auto-accept settings
+- **Security**: YOLO mode (auto-approve), folder trust
+- **Experimental**: Codebase Investigator agent
+
+**Using Smart Context in Gemini CLI:**
+
+```bash
+# Start Gemini CLI in your project
+gemini
+
+# Ask questions that use Smart Context tools
+gemini "Analyze the API structure of this project"
+gemini "Find all authentication logic and show me the flow"
+gemini "What are the main entry points?"
+```
+
+**Features:**
+
+- **Agent Mode**: Autonomous reasoning with tool integration
+- **Built-in Tools**: File system, shell, web search, memory, todos
+- **MCP Integration**: Extends capabilities with custom tools
+- **Large Context**: 1M tokens for Gemini 3 Pro (state-of-the-art reasoning)
+- **Speed**: Gemini 2.0 Flash for rapid iterations
+
+**Reference:** See [Gemini CLI Documentation](https://geminicli.com/docs/)
 
 ---
 
@@ -511,10 +685,10 @@ async function checkImports(files) {
 
   for (const file of files) {
     const content = fs.readFileSync(file, 'utf-8');
-    const imports = content.match(/import .* from ['"](.+?)['"]/g) || [];
+    const imports = content.match(/import .* from ['\"](.+?)['\"]/g) || [];
 
     for (const importStr of imports) {
-      const match = importStr.match(/from ['"](.+?)['"]/);
+      const match = importStr.match(/from ['\"](.+?)['\"]/);;
       if (!match) continue;
 
       const importPath = match[1];
@@ -738,11 +912,16 @@ console.log('Content available:', content.length > 0);
 
 - [Getting Started Guide](./getting-started.md) - Installation & setup
 - [Configuration Guide](./configuration.md) - Environment variables
+- [Agent Optimization Guide](./agent-optimization.md) - LLM-specific tuning
+- [Prompt Engineering Guide](./prompt-engineering.md) - Effective communication
+- [Tool Conflict Resolution](./tool-conflicts.md) - Bash vs smart-context decisions
+- [Permissions Configuration](./permissions.md) - Security and access control
 - [AGENT_PLAYBOOK.md](../agent/AGENT_PLAYBOOK.md) - Usage patterns
+- [TOOL_REFERENCE.md](../agent/TOOL_REFERENCE.md) - Tool API details
 - [Model Context Protocol](https://modelcontextprotocol.io/) - MCP standard
 
 ---
 
 **Version:** 1.0.0  
-**Last Updated:** 2025-12-14  
+**Last Updated:** 2025-12-15  
 **Maintained by:** Smart Context MCP Team

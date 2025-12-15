@@ -17,7 +17,7 @@ This section contains everything you need to install, configure, integrate, and 
 **Covers:**
 - Prerequisites and installation (global vs local)
 - Platform-specific configuration:
-  - Claude Desktop
+  - Claude Code
   - GitHub Copilot
   - Cursor IDE
   - Google Gemini
@@ -40,7 +40,8 @@ This section contains everything you need to install, configure, integrate, and 
 - Quick start for tool developers
 - PathNormalizer and RootDetector APIs
 - IDE-specific integration guides:
-  - VSCode Copilot (with TypeScript example)
+  - Claude Code
+  - GitHub Copilot (VS Code)
   - JetBrains IDEs (IntelliJ, PyCharm, etc.)
   - Cursor IDE
   - Vim/Neovim (Lua configuration)
@@ -128,6 +129,105 @@ This section contains everything you need to install, configure, integrate, and 
 - Troubleshooting configuration issues
 
 **Read this if:** You need to customize Smart Context
+
+---
+
+### 🤖 Agent Optimization
+
+**[agent-optimization.md](./agent-optimization.md)** - LLM-Specific Configuration and Strategies  
+**Time:** 15-20 minutes  
+**For:** Optimizing AI agents to work with Smart Context
+
+**Covers:**
+- Agent type identification:
+  - Claude family (Opus, Sonnet, Haiku)
+  - OpenAI Codex (GPT-5.1-Codex)
+  - Google Gemini (3 Pro, 2.0 Flash)
+- LLM-specific configuration recipes
+- Tool conflict resolution strategies
+- Performance benchmarks by agent type
+- Multi-agent workflows (Opus for planning, Haiku for execution)
+- Token budget management by model
+- Context window optimization
+- Tool permission optimization by agent type
+- Prompt engineering tips per agent
+
+**Read this if:** You want to optimize AI agents for Smart Context
+
+---
+
+### 🔄 Tool Conflict Resolution
+
+**[tool-conflicts.md](./tool-conflicts.md)** - Bash vs Smart Context Decision Guide  
+**Time:** 10-15 minutes  
+**For:** Understanding when to use Bash commands vs smart-context tools
+
+**Covers:**
+- Decision matrix: Bash commands vs smart-context tools
+- Detailed comparisons (file finding, code search, reading, editing)
+- Performance comparison (grep vs search_project: 20x faster)
+- Common anti-patterns and corrections
+- Permission configuration strategies (restrictive, development, production)
+- Hybrid workflows combining both approaches
+- Security considerations and dangerous commands
+- Performance benchmarks and token cost analysis
+
+**Read this if:** You're deciding whether to use Bash or smart-context tools
+
+---
+
+### 💬 Prompt Engineering
+
+**[prompt-engineering.md](./prompt-engineering.md)** - How to Communicate Effectively with Smart Context  
+**Time:** 12-18 minutes  
+**For:** AI agents and engineers using Smart Context
+
+**Covers:**
+- Core principles: Scout → Read → Edit pipeline
+- Prompt templates for common tasks:
+  - Symbol renaming across files
+  - Impact analysis
+  - Bug fixing workflow
+  - Code quality audits
+- Multi-turn conversation patterns
+- Agent-specific prompt variations (Haiku, Sonnet, Opus, GPT-4o, Gemini)
+- Error recovery prompts (NO_MATCH, AMBIGUOUS_MATCH, PERMISSION_DENIED)
+- Token optimization techniques (skeleton-first, fragment vs full, batch edits)
+- Quality checklist before calling tools
+- Real-world examples
+- Common pitfalls and how to avoid them
+
+**Read this if:** You want to maximize efficiency and quality of Smart Context usage
+
+---
+
+### 🔐 Tool Permissions Configuration
+
+**[permissions.md](./permissions.md)** - Access Control and Security  
+**Time:** 10-15 minutes  
+**For:** Configuring tool access and security policies
+
+**Covers:**
+- `.claude/settings.json` configuration pattern
+- Overview and design rationale for project-level config
+- Permission patterns:
+  - Read-Only (safest)
+  - Safe Development (recommended)
+  - Restrictive (production)
+  - Minimal (analysis only)
+- Wildcard patterns for Bash and smart-context tools
+- Security considerations (dangerous commands, blacklist)
+- Per-agent configuration:
+  - Claude Code (Anthropic)
+  - Codex (OpenAI)
+  - Gemini CLI (Google)
+  - GitHub Copilot & Cursor
+  - CI/CD systems
+- Environment-specific patterns (development, staging, production)
+- Best practices and tool exclusion guidelines
+- Examples by use case (code review, testing, documentation)
+
+**Read this if:** You need to configure tool access control and security
 
 ---
 
@@ -263,6 +363,18 @@ This section contains everything you need to install, configure, integrate, and 
 - **Customize behavior with environment variables**  
   → [configuration.md](./configuration.md)
 
+- **Optimize AI agents for Smart Context**  
+  → [agent-optimization.md](./agent-optimization.md)
+
+- **Decide between Bash and smart-context tools**  
+  → [tool-conflicts.md](./tool-conflicts.md)
+
+- **Learn how to prompt Smart Context effectively**  
+  → [prompt-engineering.md](./prompt-engineering.md)
+
+- **Configure tool permissions and security**  
+  → [permissions.md](./permissions.md)
+
 - **Answer a quick question**  
   → [FAQ.md](./FAQ.md)
 
@@ -281,6 +393,12 @@ This section contains everything you need to install, configure, integrate, and 
 2. [integration.md](./integration.md) - Set up your IDE
 3. [FAQ.md](./FAQ.md) - Answer quick questions
 
+### For AI Agents & LLM-Based Tools
+1. [prompt-engineering.md](./prompt-engineering.md) - Core principles and templates
+2. [agent-optimization.md](./agent-optimization.md) - Model-specific strategies
+3. [tool-conflicts.md](./tool-conflicts.md) - Tool selection guidance
+4. [permissions.md](./permissions.md) - Access control configuration
+
 ### For Developers
 1. [integration.md](./integration.md) - Understand PathNormalizer API
 2. [module-resolution.md](./module-resolution.md) - Module system
@@ -289,7 +407,8 @@ This section contains everything you need to install, configure, integrate, and 
 ### For DevOps/CI
 1. [integration.md - CI/CD Integration](./integration.md#cicd-integration)
 2. [configuration.md](./configuration.md) - Environment variables
-3. [CHANGELOG.md](./CHANGELOG.md) - Version compatibility
+3. [permissions.md](./permissions.md) - Security configuration
+4. [CHANGELOG.md](./CHANGELOG.md) - Version compatibility
 
 ### For Contributors
 1. [CONTRIBUTING.md](./CONTRIBUTING.md) - Setup & guidelines
@@ -301,9 +420,9 @@ This section contains everything you need to install, configure, integrate, and 
 ## 🔗 Cross-References
 
 **Related documentation:**
-- **AI Agent guides:** [../../agent/](../../agent/)
-  - [AGENT_PLAYBOOK.md](../../agent/AGENT_PLAYBOOK.md) - 7 workflow patterns
-  - [TOOL_REFERENCE.md](../../agent/TOOL_REFERENCE.md) - Tool API reference
+- **AI Agent guides:** [../agent/](../agent/)
+  - [AGENT_PLAYBOOK.md](../agent/AGENT_PLAYBOOK.md) - 7 workflow patterns
+  - [TOOL_REFERENCE.md](../agent/TOOL_REFERENCE.md) - Tool API reference
   
 - **Architecture documentation:** [../architecture/](../architecture/)
   - [01-system-overview.md](../architecture/01-system-overview.md) - System design
@@ -321,8 +440,12 @@ This section contains everything you need to install, configure, integrate, and 
 |-------|-------|------|----------|
 | getting-started.md | 🟢 Beginner | 10-15m | First-time setup |
 | FAQ.md | 🟢 Beginner | 5-10m | Quick answers |
+| tool-conflicts.md | 🟡 Intermediate | 10-15m | Tool selection |
 | configuration.md | 🟡 Intermediate | 10m | Customization |
 | module-resolution.md | 🟡 Intermediate | 10-15m | Problem-solving |
+| agent-optimization.md | 🟡 Intermediate | 15-20m | Agent optimization |
+| prompt-engineering.md | 🟡 Intermediate | 12-18m | Effective prompting |
+| permissions.md | 🟡 Intermediate | 10-15m | Security config |
 | integration.md | 🟡 Intermediate | 20-30m | IDE/CI setup |
 | CONTRIBUTING.md | 🔴 Advanced | 15m | Development |
 | CHANGELOG.md | 📋 Reference | 5-10m | Version info |
@@ -332,14 +455,18 @@ This section contains everything you need to install, configure, integrate, and 
 ## ✨ Key Features Documented
 
 | Feature | Guide | Details |
-|---------|-------|---------|
+|---------|-------|---------| 
 | **Installation** | getting-started.md | Global/local, platform-specific |
 | **IDE Integration** | integration.md | VSCode, Vim, JetBrains, Emacs |
 | **CI/CD Pipeline** | integration.md | GitHub Actions, GitLab, pre-commit |
 | **Configuration** | configuration.md | 13 environment variables |
 | **Module Resolution** | module-resolution.md | Aliases, monorepo, troubleshooting |
+| **Agent Optimization** | agent-optimization.md | LLM-specific strategies |
+| **Tool Selection** | tool-conflicts.md | Bash vs smart-context decisions |
+| **Prompting** | prompt-engineering.md | Effective communication patterns |
+| **Permissions** | permissions.md | Access control and security |
 | **Troubleshooting** | Multiple guides | Each guide has troubleshooting |
-| **Performance** | Getting-started.md | Performance expectations |
+| **Performance** | getting-started.md | Performance expectations |
 
 ---
 
@@ -350,6 +477,10 @@ This section contains everything you need to install, configure, integrate, and 
 - **Installation problems** → [getting-started.md - Troubleshooting](./getting-started.md#troubleshooting)
 - **IDE integration issues** → [integration.md - Troubleshooting](./integration.md#troubleshooting)
 - **Module resolution errors** → [module-resolution.md - Troubleshooting](./module-resolution.md#troubleshooting)
+- **Agent optimization issues** → [agent-optimization.md](./agent-optimization.md)
+- **Tool selection questions** → [tool-conflicts.md](./tool-conflicts.md)
+- **Prompting effectiveness** → [prompt-engineering.md](./prompt-engineering.md)
+- **Permission/security issues** → [permissions.md](./permissions.md)
 - **Performance issues** → [FAQ.md](./FAQ.md) (search for "slow", "performance", "latency")
 - **Configuration problems** → [configuration.md - Troubleshooting](./configuration.md#troubleshooting-configuration-issues)
 - **General questions** → [FAQ.md](./FAQ.md)
@@ -358,14 +489,17 @@ This section contains everything you need to install, configure, integrate, and 
 
 ## 📞 Support Resources
 
-- **Questions:** [FAQ.md](./FAQ.md)
-- **Problems:** Troubleshooting sections in each guide
+- **Quick answers:** [FAQ.md](./FAQ.md)
+- **Agent optimization:** [agent-optimization.md](./agent-optimization.md) + [prompt-engineering.md](./prompt-engineering.md)
+- **Tool decisions:** [tool-conflicts.md](./tool-conflicts.md)
+- **Security/permissions:** [permissions.md](./permissions.md)
+- **Troubleshooting:** Each guide has a troubleshooting section
 - **Contributing:** [CONTRIBUTING.md](./CONTRIBUTING.md)
 - **Architecture:** [../architecture/](../architecture/) for deep dives
 
 ---
 
 **Status:** All guides production-ready ⭐⭐⭐⭐⭐  
-**Last updated:** 2025-12-14
+**Last updated:** 2025-12-15
 
 Choose a guide above to get started!
