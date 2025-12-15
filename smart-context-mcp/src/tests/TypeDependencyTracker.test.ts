@@ -8,7 +8,7 @@ import { TypeGraphResult } from '../types.js';
 
 describe('TypeDependencyTracker', () => {
     const testDir = path.join(process.cwd(), 'src', 'tests', 'type_dependency_test_env');
-    const rel = (filePath: string) => path.relative(testDir, filePath).replace(/\\/g, '/');
+
 
     let symbolIndex: SymbolIndex;
     let tracker: TypeDependencyTracker;

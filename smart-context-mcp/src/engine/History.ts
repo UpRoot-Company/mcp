@@ -8,12 +8,12 @@ interface HistoryState {
 }
 
 export class HistoryEngine {
-    private rootPath: string;
+
     private historyFilePath: string;
     private readonly fileSystem: IFileSystem;
 
     constructor(rootPath: string, fileSystem: IFileSystem) {
-        this.rootPath = rootPath;
+
         this.historyFilePath = path.join(rootPath, ".mcp", "history.json");
         this.fileSystem = fileSystem;
     }

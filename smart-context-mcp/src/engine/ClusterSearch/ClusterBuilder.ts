@@ -28,7 +28,7 @@ const MAX_CALL_RELATIONS = 15;
 const MAX_TYPE_RELATIONS = 10;
 
 export type ExpandableRelationship = "callers" | "callees" | "typeFamily";
-type RelationshipKey = keyof SearchCluster["related"];
+
 
 export interface BuildClusterOptions {
     depth?: number;

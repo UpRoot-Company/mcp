@@ -388,19 +388,6 @@ export class DataFlowTracer {
         return null;
     }
 
-    private isReturnNode(node: any): boolean {
-        let current = node;
-        while (current) {
-            if (current.type === "return_statement") {
-                return true;
-            }
-            if (current.type === "function_declaration" || current.type === "method_definition") {
-                break;
-            }
-            current = current.parent;
-        }
-        return false;
-    }
 
     private getCallArgumentMetadata(node: any): { metadata: Record<string, unknown>; highlightNode: any } | null {
         const callExpression = this.findAncestor(node, ancestor => ancestor.type === "call_expression" || ancestor.type === "new_expression");

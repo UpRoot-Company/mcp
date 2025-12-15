@@ -32,7 +32,7 @@ import { FileProfiler, FileMetadataAnalysis } from "./engine/FileProfiler.js";
 import { AgentWorkflowGuidance } from "./engine/AgentPlaybook.js";
 import { ClusterSearchEngine, ClusterSearchOptions, ClusterExpansionOptions } from "./engine/ClusterSearch/index.js";
 import { BuildClusterOptions, ExpandableRelationship } from "./engine/ClusterSearch/ClusterBuilder.js";
-import { FileSearchResult, ReadFragmentResult, EditResult, DirectoryTree, Edit, EngineConfig, SmartFileProfile, SymbolInfo, ToolSuggestion, ImpactPreview, BatchEditGuidance, ReadCodeResult, ReadCodeArgs, SearchProjectResult, SearchProjectArgs, AnalyzeRelationshipResult, EditCodeArgs, EditCodeResult, EditCodeEdit, ManageProjectResult, ManageProjectArgs, AnalyzeRelationshipArgs, ReadCodeView, SearchProjectType, ResolvedRelationshipTarget, AnalyzeRelationshipDirection, AnalyzeRelationshipNode, AnalyzeRelationshipEdge, LineRange, DiffMode, SafetyLevel, RefactoringContext, NextActionHint, BatchOpportunity, GetBatchGuidanceArgs, SuggestedBatchEdit } from "./types.js";
+import { FileSearchResult, ReadFragmentResult, EditResult, Edit, EngineConfig, SmartFileProfile, SymbolInfo, ToolSuggestion, ImpactPreview, BatchEditGuidance, ReadCodeResult, ReadCodeArgs, SearchProjectResult, SearchProjectArgs, AnalyzeRelationshipResult, EditCodeArgs, EditCodeResult, EditCodeEdit, ManageProjectResult, ManageProjectArgs, AnalyzeRelationshipArgs, ReadCodeView, SearchProjectType, ResolvedRelationshipTarget, AnalyzeRelationshipDirection, AnalyzeRelationshipNode, AnalyzeRelationshipEdge, LineRange, DiffMode, SafetyLevel, RefactoringContext, NextActionHint, BatchOpportunity, SuggestedBatchEdit } from "./types.js";
 import { FileStats, IFileSystem, NodeFileSystem } from "./platform/FileSystem.js";
 import { AstAwareDiff } from "./engine/AstAwareDiff.js";
 import { IndexDatabase } from "./indexing/IndexDatabase.js";
@@ -40,7 +40,7 @@ import { IncrementalIndexer } from "./indexing/IncrementalIndexer.js";
 import { TransactionLog, TransactionLogEntry } from "./engine/TransactionLog.js";
 import { metrics } from "./utils/MetricsCollector.js";
 import { PathNormalizer } from "./utils/PathNormalizer.js";
-import { RootDetector } from "./utils/RootDetector.js";
+
 
 
 const ENABLE_DEBUG_LOGS = process.env.SMART_CONTEXT_DEBUG === 'true';
@@ -384,7 +384,7 @@ export class SmartContextServer {
             usage.testFiles = testFiles;
         }
 
-        const guidance = this.buildGuidance(metadata, usage, metaAnalysis);
+        const guidance = this.buildGuidance(metadata, metaAnalysis);
 
         return {
             metadata,
@@ -450,7 +450,7 @@ export class SmartContextServer {
         return matches;
     }
 
-    private buildGuidance(metadata: SmartFileProfile['metadata'], usage: SmartFileProfile['usage'], meta: FileMetadataAnalysis): SmartFileProfile['guidance'] {
+    private buildGuidance(metadata: SmartFileProfile['metadata'], meta: FileMetadataAnalysis): SmartFileProfile['guidance'] {
         const isLarge = metadata.lineCount > 400 || metadata.sizeBytes > 64 * 1024;
         const readFullHint = metadata.isConfigFile
             ? '이 파일은 구성 역할을 하므로 전체 맥락을 확인한 뒤 필요한 부분만 수정하세요. full=true는 검증 용도로만 사용하세요.'
@@ -851,13 +851,7 @@ export class SmartContextServer {
         return Math.max(0, Math.min(1, value));
     }
 
-    private looksLikeFilename(query: string): boolean {
-        return (
-            /^[A-Z0-9-_]+\.(ts|js|tsx|jsx|md|json|yaml|yml)$/i.test(query) ||
-            /^ADR-\d+/.test(query) ||
-            (query.includes('.') && !query.includes(' '))
-        );
-    }
+
 
     private async pathExists(absPath: string): Promise<boolean> {
         try {
@@ -1048,7 +1042,7 @@ export class SmartContextServer {
         }
 
         if (searchResult.results.length === 0) {
-            const enhancedDetails = ErrorEnhancer.enhanceSearchNotFound(args.query, args.type);
+            const enhancedDetails = ErrorEnhancer.enhanceSearchNotFound(args.query);
             return {
                 ...searchResult,
                 message: "No results found",

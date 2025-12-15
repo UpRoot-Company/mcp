@@ -1,5 +1,5 @@
 import { SymbolIndex } from '../ast/SymbolIndex.js';
-import { EnhancedErrorDetails, ToolSuggestion } from '../types.js';
+import { EnhancedErrorDetails } from '../types.js';
 
 export class ErrorEnhancer {
     /**
@@ -46,7 +46,7 @@ export class ErrorEnhancer {
      */
     static enhanceSearchNotFound(
         query: string,
-        searchType: string | undefined
+
     ): EnhancedErrorDetails {
         const isLikelyFilename = /^[A-Z0-9-_]+\.(ts|js|tsx|jsx|md|json)$/i.test(query);
         const isLikelyPattern = query.includes('*') || query.includes('ADR-');

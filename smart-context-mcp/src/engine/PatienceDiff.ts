@@ -232,7 +232,7 @@ export class PatienceDiff {
             );
         }
 
-        return this.mergeAdjacentHunks(hunks, contextLines);
+        return this.mergeAdjacentHunks(hunks);
     }
 
     private static processGap(
@@ -317,7 +317,7 @@ export class PatienceDiff {
         return this.buildHunks(oldLines, newLines, subLis, contextLines);
     }
 
-    private static mergeAdjacentHunks(hunks: DiffHunk[], contextLines: number): DiffHunk[] {
+    private static mergeAdjacentHunks(hunks: DiffHunk[]): DiffHunk[] {
         if (hunks.length === 0) {
             return [];
         }

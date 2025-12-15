@@ -155,7 +155,7 @@ export class IncrementalIndexer {
 
             for (const entry of entries) {
                 const fullPath = path.join(current, entry.name);
-                const relative = path.relative(this.rootPath, fullPath);
+
                 if (this.shouldIgnore(fullPath)) {
                     continue;
                 }

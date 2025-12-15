@@ -25,7 +25,7 @@ export class SymbolIndex {
     private readonly skeletonGenerator: SkeletonGenerator;
     private readonly ignoreFilter: ReturnType<typeof ignore.default>;
     private readonly db: IndexDatabase;
-    private initialScanCompleted = false;
+
     private baselinePromise?: Promise<void>;
     private editTracker: Map<string, number> = new Map();
     private pendingUpdates: Set<string> = new Set();
@@ -229,7 +229,7 @@ export class SymbolIndex {
                 this.cache.delete(record.path);
             }
         }
-        this.initialScanCompleted = true;
+
     }
 
     private scanFiles(dir: string): string[] {

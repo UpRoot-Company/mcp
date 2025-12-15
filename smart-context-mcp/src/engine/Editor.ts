@@ -133,22 +133,7 @@ export class EditorEngine {
         return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     }
 
-    private createBoundaryPattern(target: string): string {
-        const needsStartBoundary = /^[a-zA-Z0-9_]/.test(target);
-        const needsEndBoundary = /[a-zA-Z0-9_]$/.test(target);
-        const escaped = this.escapeRegExp(target);
-        
-        const supportsLookbehind = (() => { try { new RegExp('(?<=a)'); return true; } catch { return false; } })();
 
-        let pattern = escaped;
-        if (needsStartBoundary) {
-            pattern = supportsLookbehind ? `(?<![a-zA-Z0-9_])${pattern}` : `\\b${pattern}`;
-        }
-        if (needsEndBoundary) {
-            pattern = `${pattern}(?![a-zA-Z0-9_])`;
-        }
-        return pattern;
-    }
 
     private trigramKeys(value: string): Set<string> {
         return new Set(TrigramIndex.extractTrigramCounts(value).keys());
@@ -578,7 +563,7 @@ export class EditorEngine {
     }
 
     private generateMatchFailureDiagnostics(
-        content: string,
+
         edit: Edit,
         matches: Match[],
         filteredMatches: Match[],
@@ -753,7 +738,7 @@ export class EditorEngine {
 
         if (filteredMatches.length === 0) {
             throw new MatchNotFoundError(
-                this.generateMatchFailureDiagnostics(content, edit, matches, filteredMatches, {
+                this.generateMatchFailureDiagnostics(edit, matches, filteredMatches, {
                     normalizationAttempts: normalizationDiagnostics
                 })
             );

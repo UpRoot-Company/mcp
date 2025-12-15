@@ -440,7 +440,7 @@ function validateCredentials(user, pass) {
             console.log(`  Has confidence info:  ${hasConfidence ? '✓' : '✗'}`);
             console.log(`  Has line numbers:     ${hasLineNumber ? '✓' : '✗'}`);
 
-            const diagnosticScore = [hasSuggestions, hasConfidence, hasLineNumber].filter(Boolean).length;
+
 
             expect(hasSuggestions).toBe(true);
             expect(hasLineNumber).toBe(true);

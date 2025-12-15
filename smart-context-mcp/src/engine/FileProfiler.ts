@@ -1,5 +1,5 @@
 import * as path from 'path';
-import * as fs from 'fs';
+
 
 export interface FileMetadataAnalysis {
     newlineStyle: "lf" | "crlf" | "mixed";
