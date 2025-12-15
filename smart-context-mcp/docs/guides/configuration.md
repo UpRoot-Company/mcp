@@ -517,10 +517,7 @@ Before deploying to production, verify:
 - **[Getting Started](./getting-started.md)** - Installation & setup for all platforms
 - **[Integration Guide](./integration.md)** - IDE-specific configuration (VS Code, Cursor, JetBrains, Vim, Emacs)
 
-### Agent & Workflow Guides
-- **[Prompt Engineering Guide](./prompt-engineering.md)** - How to prompt effectively, token optimization, multi-turn patterns
-- **[Agent Optimization Guide](./agent-optimization.md)** - Model-specific strategies (Claude, OpenAI, Gemini), performance benchmarks
-- **[AGENT_PLAYBOOK.md](../agent/AGENT_PLAYBOOK.md)** - Workflow patterns and practical examples
+
 
 ### Tool & Security Configuration
 - **[Tool Conflict Resolution Guide](./tool-conflicts.md)** - Bash vs smart-context decisions

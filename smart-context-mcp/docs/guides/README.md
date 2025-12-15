@@ -209,14 +209,8 @@ This section contains everything you need to install, configure, integrate, and 
 
 **Covers:**
 - `.claude/settings.json` configuration pattern
-- Overview and design rationale for project-level config
-- Permission patterns:
-  - Read-Only (safest)
-  - Safe Development (recommended)
-  - Restrictive (production)
-  - Minimal (analysis only)
-- Wildcard patterns for Bash and smart-context tools
-- Security considerations (dangerous commands, blacklist)
+- Permission patterns by use case
+- Bash and tool whitelisting/blacklisting
 - Per-agent configuration:
   - Claude Code (Anthropic)
   - Codex (OpenAI)
@@ -228,6 +222,36 @@ This section contains everything you need to install, configure, integrate, and 
 - Examples by use case (code review, testing, documentation)
 
 **Read this if:** You need to configure tool access control and security
+
+---
+
+### 🚀 Advanced Tool Tuning & Optimization
+
+**[advanced-tool-tuning.md](./advanced-tool-tuning.md)** - Professional-Grade Tool Configuration  
+**Time:** 30-45 minutes  
+**For:** Advanced users, DevOps engineers, platform teams
+
+**Covers:**
+- All 11 core tools: characteristics, token costs, and latency
+- Model-specific tool strategies:
+  - Claude Haiku (cost-optimized, 100K context)
+  - Claude Sonnet (balanced default, 200K context)
+  - Claude Opus (maximum intelligence, 200K context)
+  - Codex (agentic coding, 256K context)
+  - Gemini Pro (massive context, 1M tokens, bulk ops)
+  - Gemini Flash (speed-optimized, 1M tokens)
+- Use-case-specific configurations:
+  - Analysis-only (read-only)
+  - Auto-fix (automated remediation)
+  - Performance-optimized (speed + cost)
+  - Security-hardened (locked down)
+- Environment variable tuning matrices
+- Token budget & latency optimization
+- Tool selection decision trees
+- Advanced patterns and monitoring
+- Complete configuration templates (CI/CD, code review, real-time)
+
+**Read this if:** You're building production AI automation, optimizing for specific use cases, or need fine-grained control
 
 ---
 
@@ -375,6 +399,9 @@ This section contains everything you need to install, configure, integrate, and 
 - **Configure tool permissions and security**  
   → [permissions.md](./permissions.md)
 
+- **Build production AI automation with fine-grained control**  
+  → [advanced-tool-tuning.md](./advanced-tool-tuning.md)
+
 - **Answer a quick question**  
   → [FAQ.md](./FAQ.md)
 
@@ -398,6 +425,7 @@ This section contains everything you need to install, configure, integrate, and 
 2. [agent-optimization.md](./agent-optimization.md) - Model-specific strategies
 3. [tool-conflicts.md](./tool-conflicts.md) - Tool selection guidance
 4. [permissions.md](./permissions.md) - Access control configuration
+5. [advanced-tool-tuning.md](./advanced-tool-tuning.md) - Advanced optimization
 
 ### For Developers
 1. [integration.md](./integration.md) - Understand PathNormalizer API
@@ -408,7 +436,14 @@ This section contains everything you need to install, configure, integrate, and 
 1. [integration.md - CI/CD Integration](./integration.md#cicd-integration)
 2. [configuration.md](./configuration.md) - Environment variables
 3. [permissions.md](./permissions.md) - Security configuration
-4. [CHANGELOG.md](./CHANGELOG.md) - Version compatibility
+4. [advanced-tool-tuning.md](./advanced-tool-tuning.md) - Production tuning
+5. [CHANGELOG.md](./CHANGELOG.md) - Version compatibility
+
+### For Platform Engineers & Automation Teams
+1. [advanced-tool-tuning.md](./advanced-tool-tuning.md) - Complete tool reference
+2. [agent-optimization.md](./agent-optimization.md) - Model-specific strategies
+3. [permissions.md](./permissions.md) - Access control strategies
+4. [TOOL_REFERENCE.md](../agent/TOOL_REFERENCE.md) - Tool API details
 
 ### For Contributors
 1. [CONTRIBUTING.md](./CONTRIBUTING.md) - Setup & guidelines
@@ -447,6 +482,7 @@ This section contains everything you need to install, configure, integrate, and 
 | prompt-engineering.md | 🟡 Intermediate | 12-18m | Effective prompting |
 | permissions.md | 🟡 Intermediate | 10-15m | Security config |
 | integration.md | 🟡 Intermediate | 20-30m | IDE/CI setup |
+| advanced-tool-tuning.md | 🔴 Advanced | 30-45m | Professional tuning |
 | CONTRIBUTING.md | 🔴 Advanced | 15m | Development |
 | CHANGELOG.md | 📋 Reference | 5-10m | Version info |
 
@@ -465,6 +501,7 @@ This section contains everything you need to install, configure, integrate, and 
 | **Tool Selection** | tool-conflicts.md | Bash vs smart-context decisions |
 | **Prompting** | prompt-engineering.md | Effective communication patterns |
 | **Permissions** | permissions.md | Access control and security |
+| **Advanced Tuning** | advanced-tool-tuning.md | All 11 tools, models, use cases |
 | **Troubleshooting** | Multiple guides | Each guide has troubleshooting |
 | **Performance** | getting-started.md | Performance expectations |
 
@@ -481,6 +518,7 @@ This section contains everything you need to install, configure, integrate, and 
 - **Tool selection questions** → [tool-conflicts.md](./tool-conflicts.md)
 - **Prompting effectiveness** → [prompt-engineering.md](./prompt-engineering.md)
 - **Permission/security issues** → [permissions.md](./permissions.md)
+- **Advanced tuning & optimization** → [advanced-tool-tuning.md](./advanced-tool-tuning.md)
 - **Performance issues** → [FAQ.md](./FAQ.md) (search for "slow", "performance", "latency")
 - **Configuration problems** → [configuration.md - Troubleshooting](./configuration.md#troubleshooting-configuration-issues)
 - **General questions** → [FAQ.md](./FAQ.md)
@@ -493,6 +531,7 @@ This section contains everything you need to install, configure, integrate, and 
 - **Agent optimization:** [agent-optimization.md](./agent-optimization.md) + [prompt-engineering.md](./prompt-engineering.md)
 - **Tool decisions:** [tool-conflicts.md](./tool-conflicts.md)
 - **Security/permissions:** [permissions.md](./permissions.md)
+- **Advanced tuning:** [advanced-tool-tuning.md](./advanced-tool-tuning.md)
 - **Troubleshooting:** Each guide has a troubleshooting section
 - **Contributing:** [CONTRIBUTING.md](./CONTRIBUTING.md)
 - **Architecture:** [../architecture/](../architecture/) for deep dives

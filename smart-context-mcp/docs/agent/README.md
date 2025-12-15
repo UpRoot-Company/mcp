@@ -132,12 +132,7 @@ Quick links to guides for optimizing your interaction with Smart Context:
 - Security considerations and dangerous commands
 - Examples by use case
 
-**Best for:** Securing and restricting tool access  
-**Time:** 10-15 minutes
 
----
-
-## 🎯 Quick Navigation by Task
 
 **I want to...**
 

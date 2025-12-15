@@ -112,6 +112,16 @@ Welcome to the comprehensive human-readable documentation for Smart Context MCP.
   - Examples by use case
   - *Best for: Security and access control configuration*
 
+- **[advanced-tool-tuning.md](./guides/advanced-tool-tuning.md)** (30-45min)
+  - All 11 core tools: characteristics and token costs
+  - Model-specific tool strategies (Claude, OpenAI, Gemini)
+  - Use-case-specific configurations (Analysis, Auto-fix, Performance, Security)
+  - Environment variable tuning matrices
+  - Token budget & latency optimization strategies
+  - Tool selection decision trees
+  - Advanced patterns and monitoring strategies
+  - *Best for: Building production AI automation and advanced optimization*
+
 - **[module-resolution.md](./guides/module-resolution.md)** (10-15min)
   - Module resolution types and algorithms
   - Path alias configuration
@@ -160,9 +170,10 @@ Welcome to the comprehensive human-readable documentation for Smart Context MCP.
 2. Optimize: [agent-optimization.md](./guides/agent-optimization.md) - Model-specific strategies
 3. Resolve conflicts: [tool-conflicts.md](./guides/tool-conflicts.md) - When to use Bash vs smart-context
 4. Configure: [permissions.md](./guides/permissions.md) - Tool access control
-5. Reference: [integration.md](./guides/integration.md) for platform-specific setup
+5. Advanced: [advanced-tool-tuning.md](./guides/advanced-tool-tuning.md) - Professional optimization
+6. Reference: [integration.md](./guides/integration.md) for platform-specific setup
 
-**Total time:** ~1 hour for comprehensive agent optimization
+**Total time:** ~1.5 hours for comprehensive agent optimization
 
 ### 🔧 **Developers / System Integrators**
 1. Start with [system-overview.md](./architecture/01-system-overview.md) for context
@@ -177,10 +188,11 @@ Welcome to the comprehensive human-readable documentation for Smart Context MCP.
 1. Quick reference: [getting-started.md](./guides/getting-started.md#platform-configuration)
 2. Focus: [integration.md](./guides/integration.md) (CI/CD section)
 3. Permissions: [permissions.md](./guides/permissions.md) for security configuration
-4. Operational: [02-core-engine.md](./architecture/02-core-engine.md#operational-procedures)
-5. Tuning: [configuration.md](./guides/configuration.md#performance-tuning)
+4. Advanced tuning: [advanced-tool-tuning.md](./guides/advanced-tool-tuning.md) for production optimization
+5. Operational: [02-core-engine.md](./architecture/02-core-engine.md#operational-procedures)
+6. Tuning: [configuration.md](./guides/configuration.md#performance-tuning)
 
-**Total time:** ~1-2 hours for production setup
+**Total time:** ~2-3 hours for production setup
 
 ### 🐛 **Troubleshooters**
 1. Quick answers: [FAQ.md](./guides/FAQ.md)
@@ -203,8 +215,8 @@ Welcome to the comprehensive human-readable documentation for Smart Context MCP.
 
 | Metric | Value |
 |--------|-------|
-| **Files** | 7 architecture + 14 guides |
-| **Total size** | ~200KB of human documentation |
+| **Files** | 7 architecture + 15 guides |
+| **Total size** | ~250KB of human documentation |
 | **Code examples** | 50+ real examples from source |
 | **Diagrams** | 8+ Mermaid visualizations |
 | **Cross-references** | 120+ links throughout |
@@ -252,13 +264,14 @@ Smart Context works with different AI models:
 ### By Task
 - **I want to integrate Smart Context into my IDE** → [integration.md](./guides/integration.md)
 - **I need to optimize AI agents working with my code** → [agent-optimization.md](./guides/agent-optimization.md)
+- **I need to build production AI automation** → [advanced-tool-tuning.md](./guides/advanced-tool-tuning.md)
 - **I need to configure tool permissions** → [permissions.md](./guides/permissions.md)
 - **I want to understand the search algorithm** → [04-advanced-algorithms.md](./architecture/04-advanced-algorithms.md)
 - **I'm setting up CI/CD pipeline** → [integration.md](./guides/integration.md#cicd-integration)
 - **I need to resolve tool conflicts** → [tool-conflicts.md](./guides/tool-conflicts.md)
 - **I need troubleshooting help** → [FAQ.md](./guides/FAQ.md)
 - **I'm contributing code** → [CONTRIBUTING.md](./guides/CONTRIBUTING.md)
-- **I need performance tuning** → [configuration.md](./guides/configuration.md#performance-tuning) and [agent-optimization.md](./guides/agent-optimization.md#performance-benchmarks)
+- **I need performance tuning** → [configuration.md](./guides/configuration.md#performance-tuning) and [advanced-tool-tuning.md](./guides/advanced-tool-tuning.md)
 
 ### By Concept
 - **Indexing** → [02-core-engine.md](./architecture/02-core-engine.md)
@@ -268,17 +281,19 @@ Smart Context works with different AI models:
 - **Module Resolution** → [guides/module-resolution.md](./guides/module-resolution.md)
 - **Prompting AI agents** → [prompt-engineering.md](./guides/prompt-engineering.md)
 - **Agent optimization** → [agent-optimization.md](./guides/agent-optimization.md)
+- **Advanced tuning** → [advanced-tool-tuning.md](./guides/advanced-tool-tuning.md)
 - **Tool selection** → [tool-conflicts.md](./guides/tool-conflicts.md)
 
 ### By Complexity Level
 - 🟢 **Beginner** → getting-started.md, system-overview.md, prompt-engineering.md
 - 🟡 **Intermediate** → integration.md, agent-optimization.md, tool-conflicts.md, permissions.md
-- 🔴 **Advanced** → 04-advanced-algorithms.md, 05-semantic-analysis.md, 06-reliability-engineering.md
+- 🔴 **Advanced** → 04-advanced-algorithms.md, 05-semantic-analysis.md, 06-reliability-engineering.md, advanced-tool-tuning.md
 
 ## 📞 Support and Resources
 
 - **Quick answers**: [FAQ.md](./guides/FAQ.md)
 - **Agent-specific help**: [agent-optimization.md](./guides/agent-optimization.md), [prompt-engineering.md](./guides/prompt-engineering.md)
+- **Advanced optimization**: [advanced-tool-tuning.md](./guides/advanced-tool-tuning.md)
 - **Security questions**: [permissions.md](./guides/permissions.md)
 - **Tool decision help**: [tool-conflicts.md](./guides/tool-conflicts.md)
 - **Architecture decisions**: [ADR-INDEX.md](./architecture/ADR-INDEX.md)
@@ -306,6 +321,7 @@ This documentation is designed to:
 - AI agent optimization and prompting strategies
 - Tool permission and security configuration
 - Tool conflict resolution
+- Advanced tool tuning for production automation
 - Troubleshooting and FAQ
 - Contributing guidelines
 
@@ -314,5 +330,5 @@ This documentation is designed to:
 **Last Updated:** 2025-12-15 (v1.0.0)  
 **Documentation Status:** Production-Ready  
 **Total Learning Time:** 1-3 hours depending on role  
-**New in v1.0.0:** Agent optimization guides, prompt engineering, tool conflict resolution, and permissions configuration  
+**New in v1.0.0:** Agent optimization guides, prompt engineering, tool conflict resolution, permissions configuration, and advanced tool tuning  
 **Next Step:** Choose your role above and start reading!
