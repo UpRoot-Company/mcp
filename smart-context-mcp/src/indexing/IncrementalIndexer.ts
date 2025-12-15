@@ -46,8 +46,6 @@ export class IncrementalIndexer {
     private maxQueueDepthSeen = 0;
     private lastDepthLogAt = 0;
 
-    private static readonly IGNORE_FILE = '.gitignore';
-    private static readonly CONFIG_FILES = ['tsconfig.json', 'jsconfig.json', 'package.json'];
     private moduleConfigReloadPromise?: Promise<void>;
     private configurationSubscriptions: Array<{ event: ConfigurationEvent; handler: (payload: any) => void }> = [];
     private configEventsRegistered = false;
@@ -59,7 +57,7 @@ export class IncrementalIndexer {
         private readonly dependencyGraph: DependencyGraph,
         private readonly indexDatabase?: IndexDatabase,
         private readonly moduleResolver?: ModuleResolver,
-        private readonly configurationManager?: ConfigurationManager,
+        private readonly configurationManager: ConfigurationManager,
         private readonly options: IncrementalIndexerOptions = {}
     ) {}
 
@@ -78,18 +76,6 @@ export class IncrementalIndexer {
                 },
                 atomic: true
             });
-
-            if (!this.configurationManager) {
-                this.watcher.add(path.join(this.rootPath, IncrementalIndexer.IGNORE_FILE));
-                for (const file of IncrementalIndexer.CONFIG_FILES) {
-                    const configPath = path.join(this.rootPath, file);
-                    try {
-                        this.watcher.add(configPath);
-                    } catch {
-                        // File may not exist yet, which is acceptable.
-                    }
-                }
-            }
 
             this.watcher.on('add', file => this.enqueuePath(file, 'medium'));
             this.watcher.on('change', file => void this.handleFileChange(file));
@@ -241,23 +227,6 @@ export class IncrementalIndexer {
     }
 
     private async handleFileChange(filePath: string): Promise<void> {
-        const basename = path.basename(filePath);
-        if (basename === IncrementalIndexer.IGNORE_FILE) {
-            if (this.configurationManager) {
-                return;
-            }
-            await this.handleIgnoreChange();
-            return;
-        }
-
-        if (IncrementalIndexer.CONFIG_FILES.includes(basename)) {
-            if (this.configurationManager) {
-                return;
-            }
-            await this.handleModuleConfigChange(filePath);
-            return;
-        }
-
         this.enqueuePath(filePath);
     }
 
@@ -348,9 +317,6 @@ export class IncrementalIndexer {
     }
 
     private registerConfigurationEvents(): void {
-        if (!this.configurationManager) {
-            return;
-        }
         const ignoreHandler = () => void this.handleIgnoreChange();
         const tsconfigHandler = (payload: { filePath: string }) => void this.handleModuleConfigChange(payload.filePath);
         const packageHandler = (payload: { filePath: string }) => void this.handleModuleConfigChange(payload.filePath);
@@ -371,9 +337,6 @@ export class IncrementalIndexer {
     }
 
     private unregisterConfigurationEvents(): void {
-        if (!this.configurationManager) {
-            return;
-        }
         for (const subscription of this.configurationSubscriptions) {
             this.configurationManager.off(subscription.event as ConfigurationEvent, subscription.handler);
         }

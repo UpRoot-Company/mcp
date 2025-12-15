@@ -42,6 +42,8 @@ import { metrics } from "./utils/MetricsCollector.js";
 import { PathNormalizer } from "./utils/PathNormalizer.js";
 import { ConfigurationManager } from "./config/ConfigurationManager.js";
 
+export { ConfigurationManager } from "./config/ConfigurationManager.js";
+
 
 
 const ENABLE_DEBUG_LOGS = process.env.SMART_CONTEXT_DEBUG === 'true';
@@ -93,7 +95,9 @@ export class SmartContextServer {
         return parsed;
     }
 
-    constructor(rootPath: string, fileSystem?: IFileSystem) {
+    private ownsConfigurationManager: boolean;
+
+    constructor(rootPath: string, fileSystem?: IFileSystem, configurationManager?: ConfigurationManager) {
         if (ENABLE_DEBUG_LOGS) {
             console.error("DEBUG: SmartContextServer constructor started");
         }
@@ -125,7 +129,8 @@ export class SmartContextServer {
             SmartContextServer.READ_FILE_DEFAULT_MAX_BYTES
         );
 
-        this.configurationManager = new ConfigurationManager(this.rootPath);
+        this.configurationManager = configurationManager ?? new ConfigurationManager(this.rootPath);
+        this.ownsConfigurationManager = !configurationManager;
         this.ig = (ignore.default as any)();
         this.applyIgnorePatterns(this.configurationManager.getIgnoreGlobs(), { skipPropagation: true });
 
@@ -216,7 +221,9 @@ export class SmartContextServer {
             this.sigintListener = async () => {
                 this.clusterSearchEngine.stopBackgroundTasks();
                 await this.incrementalIndexer?.stop();
-                await this.configurationManager.dispose();
+                if (this.ownsConfigurationManager) {
+                    await this.configurationManager.dispose();
+                }
                 await this.server.close();
                 process.exit(0);
             };
@@ -245,6 +252,10 @@ export class SmartContextServer {
                 });
             }
         }
+    }
+
+    public getConfigurationManager(): ConfigurationManager {
+        return this.configurationManager;
     }
 
     private registerConfigurationListeners(): void {

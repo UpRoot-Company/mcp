@@ -48,17 +48,18 @@ describe("IncrementalIndexer configuration integration", () => {
             reloadConfig: jest.fn()
         } as unknown as ModuleResolver;
 
+        const manager = configurationManager ?? (new StubConfigurationManager() as unknown as ConfigurationManager);
         const indexer = new IncrementalIndexer(
             rootPath,
             symbolIndex,
             dependencyGraph,
             indexDatabase,
             moduleResolver,
-            configurationManager,
+            manager,
             { watch: false, initialScan: false }
         );
 
-        return { indexer, symbolIndex, dependencyGraph, indexDatabase, moduleResolver };
+        return { indexer, symbolIndex, dependencyGraph, indexDatabase, moduleResolver, configurationManager: manager };
     };
 
     test("ConfigurationManager 이벤트가 모듈 리로드와 unresolved 재빌드를 트리거한다", async () => {
