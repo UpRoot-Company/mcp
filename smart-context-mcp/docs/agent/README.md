@@ -2,7 +2,11 @@
 
 **Smart Context MCP for Intelligent Code Analysis and Modification**
 
-This section contains everything AI agents need to understand and effectively use Smart Context MCP. Optimized for LLMs and autonomous agents with token constraints.
+**Audience:** This directory is written FOR AI agents (LLMs, autonomous agents). Content is optimized for token efficiency and agent comprehension.
+
+**For humans:** If you're a person looking for setup guides, see [../guides/](../guides/) instead.
+
+**For agents:** This section contains everything you need to understand and effectively use Smart Context MCP.
 
 ---
 

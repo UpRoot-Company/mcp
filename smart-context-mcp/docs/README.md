@@ -112,15 +112,7 @@ Welcome to the comprehensive human-readable documentation for Smart Context MCP.
   - Examples by use case
   - *Best for: Security and access control configuration*
 
-- **[advanced-tool-tuning.md](./guides/advanced-tool-tuning.md)** (30-45min)
-  - All 11 core tools: characteristics and token costs
-  - Model-specific tool strategies (Claude, OpenAI, Gemini)
-  - Use-case-specific configurations (Analysis, Auto-fix, Performance, Security)
-  - Environment variable tuning matrices
-  - Token budget & latency optimization strategies
-  - Tool selection decision trees
-  - Advanced patterns and monitoring strategies
-  - *Best for: Building production AI automation and advanced optimization*
+
 
 - **[module-resolution.md](./guides/module-resolution.md)** (10-15min)
   - Module resolution types and algorithms
@@ -170,7 +162,7 @@ Welcome to the comprehensive human-readable documentation for Smart Context MCP.
 2. Optimize: [agent-optimization.md](./guides/agent-optimization.md) - Model-specific strategies
 3. Resolve conflicts: [tool-conflicts.md](./guides/tool-conflicts.md) - When to use Bash vs smart-context
 4. Configure: [permissions.md](./guides/permissions.md) - Tool access control
-5. Advanced: [advanced-tool-tuning.md](./guides/advanced-tool-tuning.md) - Professional optimization
+5. Advanced: [agent-optimization.md](./guides/agent-optimization.md) - Professional optimization
 6. Reference: [integration.md](./guides/integration.md) for platform-specific setup
 
 **Total time:** ~1.5 hours for comprehensive agent optimization
@@ -188,7 +180,7 @@ Welcome to the comprehensive human-readable documentation for Smart Context MCP.
 1. Quick reference: [getting-started.md](./guides/getting-started.md#platform-configuration)
 2. Focus: [integration.md](./guides/integration.md) (CI/CD section)
 3. Permissions: [permissions.md](./guides/permissions.md) for security configuration
-4. Advanced tuning: [advanced-tool-tuning.md](./guides/advanced-tool-tuning.md) for production optimization
+4. Advanced tuning: [agent-optimization.md](./guides/agent-optimization.md) for production optimization
 5. Operational: [02-core-engine.md](./architecture/02-core-engine.md#operational-procedures)
 6. Tuning: [configuration.md](./guides/configuration.md#performance-tuning)
 
@@ -215,7 +207,7 @@ Welcome to the comprehensive human-readable documentation for Smart Context MCP.
 
 | Metric | Value |
 |--------|-------|
-| **Files** | 7 architecture + 15 guides |
+| **Files** | 7 architecture + 14 guides |
 | **Total size** | ~250KB of human documentation |
 | **Code examples** | 50+ real examples from source |
 | **Diagrams** | 8+ Mermaid visualizations |
@@ -264,14 +256,14 @@ Smart Context works with different AI models:
 ### By Task
 - **I want to integrate Smart Context into my IDE** → [integration.md](./guides/integration.md)
 - **I need to optimize AI agents working with my code** → [agent-optimization.md](./guides/agent-optimization.md)
-- **I need to build production AI automation** → [advanced-tool-tuning.md](./guides/advanced-tool-tuning.md)
+- **I need to build production AI automation** → [agent-optimization.md](./guides/agent-optimization.md)
 - **I need to configure tool permissions** → [permissions.md](./guides/permissions.md)
 - **I want to understand the search algorithm** → [04-advanced-algorithms.md](./architecture/04-advanced-algorithms.md)
 - **I'm setting up CI/CD pipeline** → [integration.md](./guides/integration.md#cicd-integration)
 - **I need to resolve tool conflicts** → [tool-conflicts.md](./guides/tool-conflicts.md)
 - **I need troubleshooting help** → [FAQ.md](./guides/FAQ.md)
 - **I'm contributing code** → [CONTRIBUTING.md](./guides/CONTRIBUTING.md)
-- **I need performance tuning** → [configuration.md](./guides/configuration.md#performance-tuning) and [advanced-tool-tuning.md](./guides/advanced-tool-tuning.md)
+- **I need performance tuning** → [configuration.md](./guides/configuration.md#performance-tuning) and [agent-optimization.md](./guides/agent-optimization.md)
 
 ### By Concept
 - **Indexing** → [02-core-engine.md](./architecture/02-core-engine.md)
@@ -281,19 +273,19 @@ Smart Context works with different AI models:
 - **Module Resolution** → [guides/module-resolution.md](./guides/module-resolution.md)
 - **Prompting AI agents** → [prompt-engineering.md](./guides/prompt-engineering.md)
 - **Agent optimization** → [agent-optimization.md](./guides/agent-optimization.md)
-- **Advanced tuning** → [advanced-tool-tuning.md](./guides/advanced-tool-tuning.md)
+
 - **Tool selection** → [tool-conflicts.md](./guides/tool-conflicts.md)
 
 ### By Complexity Level
 - 🟢 **Beginner** → getting-started.md, system-overview.md, prompt-engineering.md
 - 🟡 **Intermediate** → integration.md, agent-optimization.md, tool-conflicts.md, permissions.md
-- 🔴 **Advanced** → 04-advanced-algorithms.md, 05-semantic-analysis.md, 06-reliability-engineering.md, advanced-tool-tuning.md
+- 🔴 **Advanced** → 04-advanced-algorithms.md, 05-semantic-analysis.md, 06-reliability-engineering.md, agent-optimization.md
 
 ## 📞 Support and Resources
 
 - **Quick answers**: [FAQ.md](./guides/FAQ.md)
 - **Agent-specific help**: [agent-optimization.md](./guides/agent-optimization.md), [prompt-engineering.md](./guides/prompt-engineering.md)
-- **Advanced optimization**: [advanced-tool-tuning.md](./guides/advanced-tool-tuning.md)
+
 - **Security questions**: [permissions.md](./guides/permissions.md)
 - **Tool decision help**: [tool-conflicts.md](./guides/tool-conflicts.md)
 - **Architecture decisions**: [ADR-INDEX.md](./architecture/ADR-INDEX.md)

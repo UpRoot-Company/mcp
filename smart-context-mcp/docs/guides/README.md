@@ -2,6 +2,12 @@
 
 **Practical guides for using, integrating, and configuring Smart Context MCP.**
 
+**Audience:** This directory is written FOR humans (developers, DevOps engineers, system architects).
+
+**For AI agents:** See [../agent/](../agent/) for agent-specific technical documentation.
+
+**Mixed audience guides:** Some guides in this directory (agent-optimization.md, prompt-engineering.md) serve both humans configuring agents AND agents optimizing their own behavior.
+
 This section contains everything you need to install, configure, integrate, and troubleshoot Smart Context.
 
 ---
@@ -227,7 +233,7 @@ This section contains everything you need to install, configure, integrate, and 
 
 ### 🚀 Advanced Tool Tuning & Optimization
 
-**[advanced-tool-tuning.md](./advanced-tool-tuning.md)** - Professional-Grade Tool Configuration  
+  
 **Time:** 30-45 minutes  
 **For:** Advanced users, DevOps engineers, platform teams
 
@@ -400,7 +406,7 @@ This section contains everything you need to install, configure, integrate, and 
   → [permissions.md](./permissions.md)
 
 - **Build production AI automation with fine-grained control**  
-  → [advanced-tool-tuning.md](./advanced-tool-tuning.md)
+  → [agent-optimization.md](./agent-optimization.md)
 
 - **Answer a quick question**  
   → [FAQ.md](./FAQ.md)
@@ -425,7 +431,7 @@ This section contains everything you need to install, configure, integrate, and 
 2. [agent-optimization.md](./agent-optimization.md) - Model-specific strategies
 3. [tool-conflicts.md](./tool-conflicts.md) - Tool selection guidance
 4. [permissions.md](./permissions.md) - Access control configuration
-5. [advanced-tool-tuning.md](./advanced-tool-tuning.md) - Advanced optimization
+
 
 ### For Developers
 1. [integration.md](./integration.md) - Understand PathNormalizer API
@@ -436,11 +442,11 @@ This section contains everything you need to install, configure, integrate, and 
 1. [integration.md - CI/CD Integration](./integration.md#cicd-integration)
 2. [configuration.md](./configuration.md) - Environment variables
 3. [permissions.md](./permissions.md) - Security configuration
-4. [advanced-tool-tuning.md](./advanced-tool-tuning.md) - Production tuning
+4. [agent-optimization.md](./agent-optimization.md) - Production tuning
 5. [CHANGELOG.md](./CHANGELOG.md) - Version compatibility
 
 ### For Platform Engineers & Automation Teams
-1. [advanced-tool-tuning.md](./advanced-tool-tuning.md) - Complete tool reference
+1. [agent-optimization.md](./agent-optimization.md) - Complete tool reference
 2. [agent-optimization.md](./agent-optimization.md) - Model-specific strategies
 3. [permissions.md](./permissions.md) - Access control strategies
 4. [TOOL_REFERENCE.md](../agent/TOOL_REFERENCE.md) - Tool API details
@@ -482,7 +488,7 @@ This section contains everything you need to install, configure, integrate, and 
 | prompt-engineering.md | 🟡 Intermediate | 12-18m | Effective prompting |
 | permissions.md | 🟡 Intermediate | 10-15m | Security config |
 | integration.md | 🟡 Intermediate | 20-30m | IDE/CI setup |
-| advanced-tool-tuning.md | 🔴 Advanced | 30-45m | Professional tuning |
+
 | CONTRIBUTING.md | 🔴 Advanced | 15m | Development |
 | CHANGELOG.md | 📋 Reference | 5-10m | Version info |
 
@@ -501,7 +507,7 @@ This section contains everything you need to install, configure, integrate, and 
 | **Tool Selection** | tool-conflicts.md | Bash vs smart-context decisions |
 | **Prompting** | prompt-engineering.md | Effective communication patterns |
 | **Permissions** | permissions.md | Access control and security |
-| **Advanced Tuning** | advanced-tool-tuning.md | All 11 tools, models, use cases |
+
 | **Troubleshooting** | Multiple guides | Each guide has troubleshooting |
 | **Performance** | getting-started.md | Performance expectations |
 
@@ -518,7 +524,7 @@ This section contains everything you need to install, configure, integrate, and 
 - **Tool selection questions** → [tool-conflicts.md](./tool-conflicts.md)
 - **Prompting effectiveness** → [prompt-engineering.md](./prompt-engineering.md)
 - **Permission/security issues** → [permissions.md](./permissions.md)
-- **Advanced tuning & optimization** → [advanced-tool-tuning.md](./advanced-tool-tuning.md)
+- **Advanced tuning & optimization** → [agent-optimization.md](./agent-optimization.md)
 - **Performance issues** → [FAQ.md](./FAQ.md) (search for "slow", "performance", "latency")
 - **Configuration problems** → [configuration.md - Troubleshooting](./configuration.md#troubleshooting-configuration-issues)
 - **General questions** → [FAQ.md](./FAQ.md)
@@ -531,7 +537,7 @@ This section contains everything you need to install, configure, integrate, and 
 - **Agent optimization:** [agent-optimization.md](./agent-optimization.md) + [prompt-engineering.md](./prompt-engineering.md)
 - **Tool decisions:** [tool-conflicts.md](./tool-conflicts.md)
 - **Security/permissions:** [permissions.md](./permissions.md)
-- **Advanced tuning:** [advanced-tool-tuning.md](./advanced-tool-tuning.md)
+- **Advanced tuning:** [agent-optimization.md](./agent-optimization.md)
 - **Troubleshooting:** Each guide has a troubleshooting section
 - **Contributing:** [CONTRIBUTING.md](./CONTRIBUTING.md)
 - **Architecture:** [../architecture/](../architecture/) for deep dives

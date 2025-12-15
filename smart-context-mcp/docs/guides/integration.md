@@ -56,185 +56,33 @@ await smartContext.editCode({
 
 ## Path Normalization
 
-### PathNormalizer Class
+Smart Context handles all path formats automatically - send absolute or relative paths, both work identically.
 
-Handles automatic conversion between absolute and relative paths:
+**Key utilities for integration:**
 
+- **PathNormalizer**: Converts between absolute/relative paths, validates paths are within project root
+- **RootDetector**: Auto-detects project root from file paths (searches for `.git`, `package.json`, etc.)
+
+**Example:**
 ```typescript
-import { PathNormalizer } from 'smart-context-mcp/utils/PathNormalizer';
+import { PathNormalizer, RootDetector } from 'smart-context-mcp/utils';
 
-const normalizer = new PathNormalizer('/project/root');
+const root = await RootDetector.detectCurrentProjectRoot();
+const normalizer = new PathNormalizer(root);
 
-// Convert absolute to relative
-normalizer.normalize('/project/root/src/main.ts');  // → 'src/main.ts'
-
-// Keep relative unchanged
-normalizer.normalize('src/main.ts');  // → 'src/main.ts'
-
-// Normalize path sequences
-normalizer.normalize('/project/root/src/../main.ts');  // → 'main.ts'
-
-// Verify path is within root (security)
-normalizer.isWithinRoot('src/main.ts');              // → true
-normalizer.isWithinRoot('../../../etc/passwd');      // → false
-
-// Convert back to absolute for file operations
-normalizer.toAbsolute('src/main.ts');  // → '/project/root/src/main.ts'
-```
-
-### RootDetector Class
-
-Auto-detects project root from any file path:
-
-```typescript
-import { RootDetector } from 'smart-context-mcp/utils/RootDetector';
-
-// Async detection (recommended)
-const root = await RootDetector.detectRoot(
-  '/project/src/deeply/nested/file.ts'
-);
-// → '/project' (found package.json)
-
-// Sync detection (faster, blocking)
-const rootSync = RootDetector.detectRootSync(filePath);
-
-// Custom markers (for non-standard projects)
-const root = await RootDetector.detectRoot(filePath, [
-  '.git',
-  'package.json',
-  'pyproject.toml',
-  'Cargo.toml'
-]);
-
-// Get detection details
-const { root, markerFound, depth } = 
-  await RootDetector.detectRootWithDetails(filePath);
-// → {
-//   root: '/project',
-//   markerFound: 'package.json',
-//   depth: 3
-// }
-
-// Check if file is in project
-const isWithin = await RootDetector.isWithinProject(
-  'src/main.ts',
-  projectRoot
-);  // → true
+// Both work identically
+normalizer.normalize('/project/src/main.ts');  // → 'src/main.ts'
+normalizer.normalize('src/main.ts');           // → 'src/main.ts'
 ```
 
 ---
 
 ## IDE-Specific Integration
 
-### Claude Code (Official CLI Tool)
+**For basic platform setup (Claude Code, GitHub Copilot, Cursor, Gemini CLI):**  
+See [getting-started.md](./getting-started.md#platform-configuration)
 
-Claude Code is Anthropic's official CLI tool for agentic coding.
-
-**Installation:**
-
-```bash
-curl -fsSL https://claude.ai/install.sh | bash
-```
-
-**Add MCP Server:**
-
-```bash
-claude mcp add --transport stdio smart-context -- npx -y smart-context-mcp
-```
-
-**Configuration:** `.mcp.json` or `.claude/settings.json`
-
-**Reference:** [Claude Code Docs](https://code.claude.com/docs/en/overview)
-
----
-
-### Codex CLI (OpenAI)
-
-Codex is OpenAI's CLI tool for agentic coding with extended thinking.
-
-**Installation:**
-
-```bash
-curl -fsSL https://install.openai.com/codex | bash
-```
-
-**Add MCP Server:**
-
-```bash
-codex mcp add smart-context -- npx -y smart-context-mcp
-```
-
-**Configuration:** `~/.codex/config.toml`
-
-```toml
-model = "gpt-5.1-codex-max"
-model_reasoning_effort = "high"
-
-[mcp_servers.smart-context]
-command = "npx"
-args = ["-y", "smart-context-mcp"]
-```
-
-**Key Features:**
-- Extended thinking for deep reasoning
-- Agents.md for project instructions
-- Models: GPT-5.1-Codex-Max or Mini
-
-**Reference:** [Codex Docs](https://developers.openai.com/codex)
-
----
-
-### GitHub Copilot (VS Code)
-
-GitHub Copilot is a Microsoft/GitHub product available in VS Code (v1.99+, March 2025) and other IDEs. It supports MCP via configuration files.
-
-**Setup in VS Code:**
-
-**Method 1: Project-level configuration (shared with team)**
-
-Create `.vscode/mcp.json` in your project:
-
-```json
-{
-  "mcpServers": {
-    "smart-context": {
-      "command": "npx",
-      "args": ["-y", "smart-context-mcp"],
-      "cwd": "${workspaceFolder}",
-      "env": {
-        "SMART_CONTEXT_ROOT": "${workspaceFolder}"
-      }
-    }
-  }
-}
-```
-
-**Method 2: Personal settings (user-specific)**
-
-Edit `.vscode/settings.json` or VS Code settings UI:
-
-```json
-{
-  "github.copilot.mcp": {
-    "smart-context": {
-      "command": "npx",
-      "args": ["-y", "smart-context-mcp"],
-      "cwd": "${workspaceFolder}"
-    }
-  }
-}
-```
-
-**Using in GitHub Copilot Chat:**
-
-Open the Copilot Chat view and ask:
-```
-"Find all authentication logic in this project"
-```
-
-GitHub Copilot can now use Smart Context tools to analyze your code.
-
-**Reference:** See [GitHub Copilot MCP Documentation](https://docs.github.com/copilot/customizing-copilot/using-model-context-protocol/extending-copilot-chat-with-mcp)
+This section covers advanced IDE integrations and extension development.
 
 ---
 
@@ -385,108 +233,7 @@ print(f"Success: {result['success']}")
 
 ---
 
-### Cursor IDE
 
-Cursor integrates seamlessly with MCP servers.
-
-**Configuration:**
-
-1. Go to **Cursor Settings** → **Features** → **MCP**
-2. Add new server:
-   - Name: `smart-context`
-   - Command: `npx -y smart-context-mcp`
-   - CWD: `/path/to/project`
-
-**Using in code:**
-
-```typescript
-// Cursor handles all path normalization
-const request = {
-  edits: [
-    {
-      filePath: editor.getActiveFile(),  // Cursor's absolute path
-      operation: 'replace',
-      targetString: 'oldCode',
-      replacementString: 'newCode'
-    }
-  ]
-};
-
-// Send directly - Smart Context normalizes
-const result = await smartContext.editCode(request);
-```
-
----
-
-### Gemini CLI
-
-Gemini CLI is Google's open-source AI agent that runs in your terminal. It supports MCP server integration for extended functionality.
-
-**Installation:**
-
-```bash
-# Via npm
-npm install -g @google-gemini/cli
-
-# Or via pip
-pip install gemini-cli
-
-# Verify installation
-gemini --version
-```
-
-**Configuration:**
-
-Edit `~/.gemini/settings.json` (user-level) or `.gemini/settings.json` (project-level):
-
-```json
-{
-  "mcpServers": {
-    "smart-context": {
-      "command": "npx",
-      "args": ["-y", "smart-context-mcp"],
-      "cwd": "/path/to/your/project"
-    }
-  }
-}
-```
-
-**Available Settings Categories:**
-
-Gemini CLI supports comprehensive settings via `/settings` command:
-
-- **General**: Preview features, Vim mode, auto-updates, session retention
-- **Output**: Format selection (text or JSON)
-- **UI**: Display options, accessibility features
-- **Model**: Session configuration, compression thresholds
-- **Context**: File discovery, .gitignore respect
-- **Tools**: Shell configuration, auto-accept settings
-- **Security**: YOLO mode (auto-approve), folder trust
-- **Experimental**: Codebase Investigator agent
-
-**Using Smart Context in Gemini CLI:**
-
-```bash
-# Start Gemini CLI in your project
-gemini
-
-# Ask questions that use Smart Context tools
-gemini "Analyze the API structure of this project"
-gemini "Find all authentication logic and show me the flow"
-gemini "What are the main entry points?"
-```
-
-**Features:**
-
-- **Agent Mode**: Autonomous reasoning with tool integration
-- **Built-in Tools**: File system, shell, web search, memory, todos
-- **MCP Integration**: Extends capabilities with custom tools
-- **Large Context**: 1M tokens for Gemini 3 Pro (state-of-the-art reasoning)
-- **Speed**: Gemini 2.0 Flash for rapid iterations
-
-**Reference:** See [Gemini CLI Documentation](https://geminicli.com/docs/)
-
----
 
 ### Vim/Neovim
 

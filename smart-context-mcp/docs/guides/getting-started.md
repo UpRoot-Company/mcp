@@ -236,34 +236,7 @@ Gemini CLI can now use Smart Context tools to analyze your codebase.
 
 ---
 
-### 3.5 Codex CLI (OpenAI)
-
-Codex is OpenAI's CLI tool for agentic coding with extended thinking.
-
-**Installation:**
-
-```bash
-curl -fsSL https://install.openai.com/codex | bash
-```
-
-**Add MCP Server:**
-
-```bash
-codex mcp add smart-context -- npx -y smart-context-mcp
-```
-
-**Configuration:** `~/.codex/config.toml`
-
-```toml
-model = "gpt-5.1-codex-max"
-model_reasoning_effort = "high"
-```
-
-**Reference:** [Codex Docs](https://developers.openai.com/codex)
-
----
-
-### 3.6 Other Platforms & Generic MCP Integration
+### 3.5 Other Platforms & Generic MCP Integration
 
 For other platforms supporting MCP, use the general pattern:
 
@@ -384,147 +357,55 @@ Result: Agent can work while indexing happens!
 
 **Check these:**
 
-1. **Did you restart the client?**
-   - Claude: Quit fully (Cmd+Q) and reopen
-   - Cursor: Restart the application
-   - GitHub Copilot: Restart terminal/IDE
-
-2. **Is the `cwd` path correct?**
-   ```bash
-   # Verify the directory exists
-   ls -la /absolute/path/to/your/project
-   ```
-
-3. **Is Node.js in your PATH?**
-   ```bash
-   which node
-   which npx
-   # Both should return paths
-   ```
-
-4. **Check MCP logs** (Platform-specific):
-   - Claude: Menu → Logs → Look for `smart-context` entries
-   - Cursor: Command Palette → Toggle Output Panel
-
----
-
-### ❌ "FileSystemError: Path is outside root directory"
-
-**What it means:** Smart Context is sandboxed for security. It can only access files under the `cwd` you configured.
-
-**Fix:**
-1. Update `cwd` in config to the correct project root
-2. Don't try to access `../sibling-project` from within a project config
-3. For multi-project setups, use a common parent directory as `cwd`
-
-**Example:**
-```json
-{
-  "cwd": "/Users/you/projects"  // ✅ Access all projects here
-  // NOT "/Users/you/projects/my-app"  ❌ Too narrow
-}
-```
+1. **Restart the client** - Claude: Quit fully (Cmd+Q) and reopen | Cursor/IDE: Restart application
+2. **Verify `cwd` path exists** - Run: `ls -la /absolute/path/to/your/project`
+3. **Check Node.js** - Run: `which node && which npx` (both should return paths)
+4. **Check MCP logs** - Claude: Menu → Logs | Cursor: Command Palette → Toggle Output Panel
 
 ---
 
 ### ❌ "It's slow on the first run"
 
-**Why:** Smart Context builds a high-performance SQLite index on startup.
+**Why:** Smart Context builds a SQLite index on startup (async, happens in background).
 
 **Timeline:**
-- First query: 500ms (after indexing completes)
-- Indexing in background: 5-30 seconds (depends on project size)
+- First query ready: ~500ms
+- Background indexing: 5-30 seconds (1000 files) | 1-2 minutes (100K+ files)
 - Subsequent queries: 50-300ms (very fast)
 
-**What to do:**
-- Wait 30 seconds on first launch for full indexing
-- Use AI while indexing happens—it's async!
-- For very large projects (>100K files), first index may take 1-2 minutes
-
----
-
-### ❌ "Skeleton view shows too much / too little"
-
-**Too much?** (You expected less detail)
-- Skeleton shows function signatures by default
-- To hide more, request: "Show me just the class and function names"
-- The AI can use `skeletonOptions: { detailLevel: "minimal" }`
-
-**Too little?** (You need more context)
-- Ask the AI to use `read_code(view="fragment", lineRange="start-end")`
-- Or request the full file: "Show me the complete implementation"
+**What to do:** Wait 30 seconds on first launch. You can use the AI while indexing continues!
 
 ---
 
 ### ❌ Edit Failed: "NO_MATCH" / "AMBIGUOUS_MATCH"
 
-**NO_MATCH: "Target string not found"**
-- Whitespace might differ (extra spaces, different line endings)
-- Code might have changed since last read
-- **Recovery:** Ask AI to `read_code` again, then retry with exact whitespace
+**NO_MATCH** - Target string not found (whitespace differs or code changed)
+- **Fix:** Ask AI to `read_code` again, then retry with exact whitespace
 
-**AMBIGUOUS_MATCH: "Found 3 matches"**
-- Target string appears multiple times (`return true;`, etc.)
-- **Recovery:** Ask AI to add `beforeContext` / `afterContext` to disambiguate
-- Or specify exact line number with `lineRange`
+**AMBIGUOUS_MATCH** - Multiple matches found
+- **Fix:** Ask AI to add `beforeContext`/`afterContext` to disambiguate, or specify `lineRange`
 
-**Example fix:**
+**Example:**
 ```json
-// Instead of generic target:
-"targetString": "return true;"
-
-// Use specific context:
+// Instead of: "targetString": "return true;"
+// Use:
 "targetString": "return true;",
 "beforeContext": "if (isAdmin) {",
-"afterContext": "} else {",
 "lineRange": {"start": 40, "end": 40}
 ```
 
 ---
 
-## 7. Advanced: Custom Configuration
-
-### Environment Variables
-
-Control Smart Context behavior with environment variables:
-
-```bash
-# In your config:
-"env": {
-  "SMART_CONTEXT_DEBUG": "true",        # Enable debug logging
-  "SMART_CONTEXT_ENGINE_PROFILE": "ci", # production|ci|test
-  "SMART_CONTEXT_MAX_CACHE_SIZE": "500" # MB, default 200
-}
-```
+**For more troubleshooting, configuration options, and advanced setups:**
+- [FAQ.md](./FAQ.md) - 20+ common questions
+- [configuration.md](./configuration.md) - Environment variables, engine profiles, multi-project setup
+- [integration.md](./integration.md) - IDE-specific integration guides
 
 ---
 
-### Multi-Project Setup
 
-Configure multiple projects in Claude:
 
-```json
-{
-  "mcpServers": {
-    "smart-context-api": {
-      "command": "npx",
-      "args": ["-y", "smart-context-mcp"],
-      "cwd": "/Users/you/projects/my-api"
-    },
-    "smart-context-web": {
-      "command": "npx",
-      "args": ["-y", "smart-context-mcp"],
-      "cwd": "/Users/you/projects/my-web"
-    }
-  }
-}
-```
-
-Then ask: "Using smart-context-api, find the login endpoint."
-
----
-
-## 8. Next Steps
+## 7. Next Steps
 
 You're ready! Try these:
 

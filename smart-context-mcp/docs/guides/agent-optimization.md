@@ -1,586 +1,317 @@
-# Agent-Specific Optimization Guide
+# Agent Optimization Guide
 
-This guide helps you optimize Smart Context MCP for different AI agent types and language models, ensuring maximum performance and token efficiency.
+**For:** AI agents, developers configuring agents, DevOps engineers  
+**Level:** 🟡 Intermediate  
+**Time:** 20-30 minutes
+
+---
+
+## Overview
+
+Optimize Smart Context MCP for different AI models by:
+1. Understanding model capabilities and limitations
+2. Configuring environment variables appropriately
+3. Selecting the right tools for each use case
+4. Managing token budgets and performance
+
+**Quick links:**
+- **Tool selection?** → See [tool-conflicts.md](./tool-conflicts.md)
+- **Permission setup?** → See [permissions.md](./permissions.md)
+- **Environment variables?** → See [configuration.md](./configuration.md)
+- **Prompting strategies?** → See [prompt-engineering.md](./prompt-engineering.md)
 
 ---
 
 ## 1. Agent Type Identification
 
-Smart Context performs differently based on the AI model's capabilities:
-
 ### 🔵 Claude Family (Anthropic)
 
 | Model | Context | Speed | Best For |
 |-------|---------|-------|----------|
-| **Claude Sonnet 4.5** | 200K tokens | Fast | Recommended default - complex agents, coding, most tasks |
-| **Claude Opus 4.5** | 200K tokens | Medium | Maximum intelligence for complex specialized tasks |
-| **Claude Haiku 4.5** | 100K tokens | Very Fast | Lightning-speed, most cost-efficient, with reasoning |
-
-**Characteristics:**
-- State-of-the-art tool use and multi-turn reasoning
-- Excellent code analysis and edge-case handling  
-- Claude 4.5 models: Enhanced reasoning and extended thinking
-
-### 🔷 Codex (OpenAI - Agentic Coding)
-
-| Model | Context | Speed | Best For |
-|-------|---------|-------|----------|
-| **GPT-5.1-Codex-Max** | 256K tokens | Medium | Long-horizon agentic coding (recommended) |
-| **GPT-5.1-Codex-Mini** | 256K tokens | Fast | Cost-effective agentic tasks |
-
-**Characteristics:**
-- Specialized for agentic coding and reasoning
-- Extended thinking for deep analysis
-- Agents.md for project instructions
-- Sandbox and approval controls
-
-### 🟢 Google Gemini (Terminal Agent)
-
-| Model | Context | Speed | Best For |
-|-------|---------|-------|----------|
-| **Gemini 3 Pro** | 1M tokens | Medium | Large projects, complex reasoning, bulk operations |
-| **Gemini 2.0 Flash** | 1M tokens | Very Fast | Quick operations, prototyping, real-time analysis |
-
-**Characteristics:**
-- Largest context window (1M tokens)
-- Built-in tools: shell commands, file system, web, memory, todos
-- Native MCP support with `includeTools` / `excludeTools` control
-- No IDE dependency - terminal-based agent
-
----
-
-## 2. Tool Conflict Resolution
-
-One of the most critical optimization decisions: **when to use which tool**.
-
-### Decision Matrix
-
-| Task | Bash Command | Smart Context Tool | Recommendation | Why |
-|------|-------------|-------------------|----------------|-----|
-| Find files by name | `find . -name "*.ts"` | `search_project(type="filename")` | ✅ Use smart-context | Trigram index is 40x faster |
-| Search for symbol | `grep -r "function"` | `search_project(type="symbol")` | ✅ Use smart-context | BM25F ranking, fuzzy matching |
-| Read file content | `cat file.ts` | `read_code(view="full")` | 🟡 Bash for non-code, smart-context for code | skeleton saves 95% tokens |
-| Edit file | `sed -i 's/old/new/' file` | `edit_code()` | ✅ Use smart-context | Transaction safety, rollback |
-| List directory | `ls -la` | `list_directory()` | 🟡 Bash is fine for quick checks | Both work, Bash is simpler |
-| Complex search with transforms | `find . \| xargs grep \| awk` | `search_project()` | ✅ Use smart-context | Single command, ranked results |
-| Git operations | `git status`, `git log` | N/A | ✅ Use Bash | No alternative, essential |
-| Run tests | `npm test`, `pytest` | N/A | ✅ Use Bash | No alternative, essential |
-
----
-
-## 3. LLM-Specific Configuration Recipes
-
-### 🟢 Claude Haiku 4.5 (Fast, Cost-Efficient)
-
-**Profile:** Lightning-fast with reasoning capability, most cost-efficient, best for rapid iterations
-
-**Configuration:**
-```json
-{
-  "env": {
-    "SMART_CONTEXT_MAX_CACHE_SIZE": "50",
-    "SMART_CONTEXT_ENGINE_PROFILE": "production"
-  }
-}
-```
-
-**Optimization strategies:**
-- Maximize skeleton views (95%+ token savings)
-- Fragment reads with explicit line ranges
-- Lower search result limits (maxResults: 10)
-- Batch-aware edits (max 10 files per dryRun)
-- Explicit sequencing in prompts
-
-**Use case:** Smaller projects (< 5,000 files), quick fixes, cost-sensitive operations
-
----
-
-### 🟡 Claude Sonnet 4.5 (Recommended Default)
-
-**Profile:** Best balance of intelligence, speed, and cost
-
-**Configuration:**
-```json
-{
-  "env": {
-    "SMART_CONTEXT_MAX_CACHE_SIZE": "100",
-    "SMART_CONTEXT_ENGINE_PROFILE": "production"
-  }
-}
-```
-
-**Optimization strategies:**
-- Mixed view approach (skeleton + fragments)
-- Moderate search limits (maxResults: 50)
-- Reasonable batch sizes (20-30 files)
-- Standard multi-turn workflow
-
-**Use case:** Most development tasks, the default choice
-
----
-
-### 🔴 Claude Opus 4.5 (Maximum Intelligence)
-
-**Profile:** Highest intelligence for complex specialized tasks, architectural decisions
-
-**Configuration:**
-```json
-{
-  "env": {
-    "SMART_CONTEXT_MAX_CACHE_SIZE": "200",
-    "SMART_CONTEXT_ENGINE_PROFILE": "production"
-  }
-}
-```
-
-**Optimization strategies:**
-- Flexible view usage (can use full views liberally)
-- Higher search result limits (maxResults: 100)
-- Large batch operations (50+ file edits)
-- Complex multi-file analysis with full impact analysis
-
-**Use case:** Large projects, critical refactors, architectural changes
-
----
-
-### 🔷 Codex (OpenAI - Agentic Coding)
-
-**Profile:** Specialized for long-horizon agentic coding with extended thinking
-
-**Configuration:**
-```json
-{
-  "env": {
-    "SMART_CONTEXT_MAX_CACHE_SIZE": "150",
-    "SMART_CONTEXT_ENGINE_PROFILE": "production"
-  }
-}
-```
-
-**Optimization strategies:**
-- Extended thinking for deep analysis
-- Use approval policies for safe autonomous execution
-- Batch processing (30-50 files per batch)
-- Leverage sandbox modes for workspace control
-
-**Use case:** Long-horizon agentic tasks, autonomous code generation
-
----
-
-### 🟢 Gemini CLI (Google - Bulk Operations)
-
-**Profile:** Massive context (1M tokens), excellent for large-scale analysis
-
-**Configuration:**
-```json
-{
-  "env": {
-    "SMART_CONTEXT_MAX_CACHE_SIZE": "200",
-    "SMART_CONTEXT_ENGINE_PROFILE": "production"
-  }
-}
-```
-
-**Tool System:**
-
-Gemini CLI has TWO separate tool systems:
-1. **Smart Context MCP tools** (controlled by `includeTools` / `excludeTools`)
-   - `search_project`, `read_code`, `edit_code`, `analyze_relationship`, etc.
-2. **Gemini built-in tools** (controlled by `tools.core` / `tools.exclude`)
-   - `run_shell_command`: Execute shell commands
-   - `read_file`, `write_file`, `list_files`: File system operations
-   - `web_fetch`, `google_web_search`: Web access
-   - `save_memory`, `write_todos`: Session management
-
-**MCP Configuration:**
-```json
-{
-  "mcpServers": {
-    "smart-context": {
-      "command": "npx",
-      "args": ["-y", "smart-context-mcp"],
-      "includeTools": [
-        "search_project",
-        "read_code",
-        "edit_code",
-        "analyze_relationship",
-        "analyze_file"
-      ]
-    }
-  }
-}
-```
-
-**Shell Command Control:**
-```json
-{
-  "tools": {
-    "core": [
-      "run_shell_command(git)",
-      "run_shell_command(npm)",
-      "run_shell_command(node)"
-    ],
-    "exclude": [
-      "run_shell_command(rm)",
-      "run_shell_command(curl)",
-      "run_shell_command(eval)"
-    ]
-  }
-}
-```
-
-**Optimization strategies:**
-- Leverage massive 1M context window
-- High search result limits (maxResults: 150)
-- Bulk processing (100+ file edits in single batch)
-- Deep analysis patterns for architectural decisions
-- Use both MCP and built-in tools strategically
-
-**Use case:** Large-scale refactoring, architectural analysis, bulk operations
-
----
-
-## 4. Performance Benchmarks by Agent Type
-
-Results from testing with a 10,000-file project:
-
-### Search Performance
-
-| Operation | Haiku | Sonnet | Opus | Codex | Gemini 3 |
-|-----------|-------|--------|------|-------|----------|
-| `search_project(symbol)` 20 results | 95ms | 100ms | 105ms | 120ms | 80ms |
-| `search_project(symbol)` 100 results | 200ms | 220ms | 240ms | 280ms | 160ms |
-| `search_project(filename)` | 50ms | 50ms | 50ms | 60ms | 40ms |
-
-### Read Performance
-
-| Operation | Haiku | Sonnet | Opus | Codex | Gemini 3 |
-|-----------|-------|--------|------|-------|----------|
-| `read_code(skeleton)` 500KB file | 80ms | 80ms | 80ms | 90ms | 65ms |
-| `read_code(fragment)` 1000 lines | 60ms | 60ms | 60ms | 70ms | 50ms |
-| `read_code(full)` 50KB file | 120ms | 120ms | 120ms | 140ms | 100ms |
-
-### Edit Performance
-
-| Operation | Haiku | Sonnet | Opus | Codex | Gemini 3 |
-|-----------|-------|--------|------|-------|----------|
-| Single file edit | 150ms | 150ms | 150ms | 170ms | 130ms |
-| 10-file batch (dryRun) | 400ms | 400ms | 400ms | 450ms | 320ms |
-| 50-file batch (dryRun) | 1200ms | 1200ms | 1200ms | 1400ms | 900ms |
-
-**Key insight:** Use `view="skeleton"` saves 15,000 tokens per large file!
-
----
-
-## 5. Multi-Agent Workflows
-
-### Workflow 1: Opus for Planning, Haiku for Execution
-```
-1. Opus: Analyze architecture
-2. Opus: Plan refactor strategy
-3. Haiku: Execute Phase 1-3
-4. Opus: Verify and document
-```
-
-### Workflow 2: Gemini for Bulk, Claude for Quality
-```
-1. Gemini 3 Pro: Bulk search across 1M tokens
-2. Gemini: Generate fixes
-3. Claude Opus: Quality review
-4. Claude Opus: Apply high-confidence fixes
-```
-
----
-
-## 6. Token Budget Management
-
-Hard limits by agent:
-```
-Claude Haiku:     100,000 tokens
-Claude Sonnet:    200,000 tokens
-Claude Opus:      200,000 tokens
-Codex:            256,000 tokens
-Gemini:           1,000,000 tokens
-```
-
-Graceful degradation:
-- Reduce search results: `maxResults: 10` (was 50)
-- Use skeletons only: `view: "skeleton"`
-- Batch smaller edits: Edit 5 files instead of 20
-- Request summaries instead of detailed analysis
-
----
-
-## 7. Context Window Optimization
-
-### 100K Context (Claude Haiku, Sonnet)
-- Max operations: 20-50
-- Search (50 results)
-- Read mixture (skeleton + fragments)
-- Edit (20-30 files per batch)
-
-### 200K Context (Claude Opus)
-- Max operations: 50-100+
-- Search (100 results)
-- Read (full files, multiple at once)
-- Edit (50-100 file batches)
-
-### 256K Context (Codex)
-- Max operations: 60-120
-- Search (100 results)
-- Read (skeleton + fragments)
-- Edit (30-50 files with approval policies)
-
-### 1M Context (Gemini)
-- Max operations: Unlimited
-- Read entire projects
-- Batch edit thousands of files
-- Complex multi-file analysis
-
----
-
-## 8. Tool Permission Optimization by Agent Type
-
-Different agents have different permission models.
-
-### 🔵 Claude Code (Anthropic CLI)
-
-**Configuration:** `.claude/settings.json`
-
-**Development:**
-```json
-{
-  "permissions": {
-    "allow": [
-      "Bash(git:*)",
-      "Bash(npm:*)",
-      "mcp__smart-context-mcp__*"
-    ],
-    "deny": ["Bash(rm:*)", "Bash(curl:*)", "Bash(wget:*)"]
-  }
-}
-```
-
-**Production:**
-```json
-{
-  "permissions": {
-    "allow": [
-      "Bash(npm test:*)",
-      "Bash(npm run build:*)",
-      "mcp__smart-context-mcp__search_project",
-      "mcp__smart-context-mcp__read_code",
-      "mcp__smart-context-mcp__edit_code"
-    ]
-  }
-}
-```
-
----
+| **Sonnet 4.5** | 200K | Fast | Recommended default - balanced intelligence, speed, cost |
+| **Opus 4.5** | 200K | Medium | Maximum intelligence for complex tasks |
+| **Haiku 4.5** | 100K | Very Fast | Lightning-speed, cost-optimized |
+
+**Characteristics:** State-of-the-art tool use, excellent code analysis, enhanced reasoning
 
 ### 🔷 Codex (OpenAI)
 
-**Configuration:** `~/.codex/config.toml`
+| Model | Context | Speed | Best For |
+|-------|---------|-------|----------|
+| **GPT-5.1-Codex** | 256K | Medium | Long-horizon agentic coding, extended thinking |
 
-**Development:**
-```toml
-[mcp.servers.smart-context.permissions]
-approval_policy = "on-request"
-sandbox_mode = "workspace-write"
+**Characteristics:** Specialized for autonomous coding, approval controls, sandbox modes
 
-[mcp.servers.smart-context.excludeTools]
-tools = ["Bash(rm:*)", "Bash(eval:*)", "Bash(curl:*)"]
+### 🟢 Gemini (Google)
+
+| Model | Context | Speed | Best For |
+|-------|---------|-------|----------|
+| **Gemini 3 Pro** | 1M | Medium | Large projects, complex reasoning, bulk operations |
+| **Gemini 2.0 Flash** | 1M | Very Fast | Quick operations, real-time analysis |
+
+**Characteristics:** Largest context window, built-in shell tools, native MCP support
+
+---
+
+## 2. Model-Specific Configuration
+
+### Environment Variables by Model
+
+| Model | MAX_CACHE_SIZE | MAX_RESULTS | Strategy | Token Budget |
+|-------|---------------|-------------|----------|-------------|
+| **Haiku 4.5** | 50 | 15 | Maximize skeleton views, limit results | 80K |
+| **Sonnet 4.5** | 100 | 50 | Mix skeleton + fragment, moderate limits | 180K |
+| **Opus 4.5** | 200 | 100 | Flexible views, higher limits | 180K |
+| **Codex** | 150 | 75 | Extended thinking, approval policies | 230K |
+| **Gemini** | 200 | 150 | Leverage 1M context, bulk operations | 900K |
+
+**Key strategies:**
+- **Haiku:** Cost-optimized - skeleton views (95% savings), fragment reads, maxResults: 10-15, batch 10-15 files
+- **Sonnet:** Balanced - mix views, maxResults: 50, batch 20-30 files (recommended default)
+- **Opus:** Maximum intelligence - full views acceptable, maxResults: 100, batch 50+ files
+- **Codex:** Agentic coding - extended thinking, sandbox modes, batch 30-50 files
+- **Gemini:** Bulk operations - maxResults: 150-200, batch 100+ files, MCP + built-in tools
+
+**Gemini Tool Systems:**
+1. **MCP tools** (`includeTools`/`excludeTools`): search_project, read_code, edit_code
+2. **Built-in tools** (`tools.core`/`tools.exclude`): run_shell_command, read_file
+
+**For complete environment variable reference:** See [configuration.md](./configuration.md)
+
+---
+
+## 3. Use-Case Templates
+
+### Analysis-Only (Read-Only)
+
+**Tools:** search_project, read_code, analyze_relationship, analyze_file
+
+**Workflow:**
+```
+1. analyze_file (get profile)
+2. search_project (find patterns)
+3. analyze_relationship (understand impact)
+4. read_code (detailed examination)
 ```
 
-**Autonomous:**
-```toml
-[mcp.servers.smart-context.permissions]
-approval_policy = "never"
-sandbox_mode = "workspace-write"
+**Permission:** Read-only tools only. See [permissions.md](./permissions.md#read-only-pattern)
+
+---
+
+### Auto-Fix (Automated Remediation)
+
+**Tools:** search_project, read_code, edit_code, manage_project + test commands
+
+**Workflow:**
+```
+1. search_project (find problem)
+2. read_code(skeleton) (understand context)
+3. edit_code(dryRun: true) (preview fix)
+4. edit_code(final) (apply)
+5. Run tests
+6. manage_project undo (if tests fail)
+```
+
+**Permission:** Edit + test commands. See [permissions.md](./permissions.md#auto-fix-pattern)
+
+---
+
+### Performance-Optimized (Speed + Cost)
+
+**Environment:**
+```bash
+SMART_CONTEXT_ENGINE_PROFILE=ci
+SMART_CONTEXT_MAX_CACHE_SIZE=50
+SMART_CONTEXT_MAX_RESULTS=10
+SMART_CONTEXT_QUERY_TIMEOUT=15000
+```
+
+**Tool Priority:**
+- ⚡⚡⚡ search_project, read_fragment, list_directory
+- ⚡⚡ analyze_file
+- AVOID: analyze_relationship, get_batch_guidance
+
+---
+
+### Security-Hardened (Locked Down)
+
+**Tools:** search_project, read_code, analyze_relationship (read-only)
+
+**Restrictions:**
+- ✅ Code analysis only
+- ❌ No code modification
+- ❌ No external network
+- ❌ No file creation
+
+**Permission:** See [permissions.md](./permissions.md#security-hardened)
+
+---
+
+## 4. Multi-Agent Workflows
+
+### Workflow 1: Planning + Execution
+
+```
+1. Opus: Analyze architecture and plan strategy
+2. Opus: Design refactor approach
+3. Haiku: Execute changes in phases
+4. Opus: Verify and document
+```
+
+**Cost savings:** 60-70% vs using Opus for everything
+
+---
+
+### Workflow 2: Bulk + Quality
+
+```
+1. Gemini 3 Pro: Bulk search (1M context)
+2. Gemini: Generate initial fixes
+3. Opus: Quality review
+4. Opus: Apply high-confidence fixes
+```
+
+**Use case:** Large-scale refactoring with quality assurance
+
+---
+
+## 5. Performance Benchmarks
+
+Testing results from 10,000-file project:
+
+### Search Performance (P95)
+
+| Model | 20 results | 100 results | Filename |
+|-------|-----------|-------------|----------|
+| Haiku | 95ms | 200ms | 50ms |
+| Sonnet | 100ms | 220ms | 50ms |
+| Opus | 105ms | 240ms | 50ms |
+| Codex | 120ms | 280ms | 60ms |
+| Gemini 3 | 80ms | 160ms | 40ms |
+
+### Read Performance (P95)
+
+| Model | Skeleton (500KB) | Fragment (1K lines) | Full (50KB) |
+|-------|----------------|-------------------|------------|
+| Haiku | 80ms | 60ms | 120ms |
+| Sonnet | 80ms | 60ms | 120ms |
+| Opus | 80ms | 60ms | 120ms |
+| Codex | 90ms | 70ms | 140ms |
+| Gemini 3 | 65ms | 50ms | 100ms |
+
+**Key insight:** Skeleton views save ~15,000 tokens per large file!
+
+---
+
+## 6. Tool Selection Guide
+
+**Quick decision tree:**
+
+```
+What do you need?
+
+├─ Find code/files → search_project
+├─ Understand file → read_code(skeleton) or analyze_file
+├─ Specific lines → read_fragment
+├─ Relationships → analyze_relationship
+├─ Make changes → edit_code (use dryRun first)
+├─ Undo mistake → manage_project undo
+└─ Explore structure → list_directory
+```
+
+**For detailed tool selection:** See [tool-conflicts.md](./tool-conflicts.md)
+
+---
+
+## 7. Token & Environment Management
+
+### Token Budgets by Model
+
+| Model | Hard Limit | Read-Heavy | Modify-Heavy | Analysis-Heavy |
+|-------|-----------|-----------|--------------|----------------|
+| Haiku | 100K | 30K | 20K | 15K |
+| Sonnet | 200K | 80K | 60K | 50K |
+| Opus | 200K | 150K | 100K | 100K |
+| Codex | 256K | 100K | 80K | 80K |
+| Gemini Pro | 1M | 400K | 300K | 300K |
+
+**For token optimization techniques (skeleton views, fragment reads, etc.):** See [prompt-engineering.md](./prompt-engineering.md#token-optimization-techniques)  
+**For environment variables:** See [configuration.md](./configuration.md)
+
+---
+
+## 8. Monitoring & Common Patterns
+
+### Expected Latency (P95)
+
+| Tool | Target | Acceptable | Slow |
+|------|--------|-----------|------|
+| search_project | 300ms | <1000ms | >2000ms |
+| read_code | 300ms | <1000ms | >2000ms |
+| read_fragment | 100ms | <500ms | >1000ms |
+| edit_code | 500ms | <2000ms | >5000ms |
+| analyze_relationship | 800ms | <3000ms | >5000ms |
+
+### Common Patterns
+
+**Pattern 1: Safe Single-File Edit**
+```
+1. search_project (find file)
+2. read_code(skeleton) (understand structure)
+3. read_fragment (get exact location)
+4. edit_code(dryRun: true) (preview)
+5. edit_code(final) (apply)
+
+Token cost: ~2,000
+```
+
+**Pattern 2: Bulk Refactoring (50+ files)**
+```
+1. search_project(maxResults: 100)
+2. get_batch_guidance (clustering)
+3. For each cluster:
+   - read_code(skeleton)
+   - edit_code(dryRun)
+   - edit_code(final)
+
+Token cost: ~15,000-25,000
+```
+
+**Pattern 3: Architecture Analysis**
+```
+1. analyze_file (entry point)
+2. analyze_relationship (impact, maxDepth: 5)
+3. search_project (patterns)
+4. read_code (multiple files, skeleton)
+
+Token cost: ~8,000-15,000
 ```
 
 ---
 
-### 💚 Gemini CLI (Google)
+## 9. Quick Start Configuration
 
-**Configuration:** `~/.gemini/settings.json`
-
-**Development (MCP + Shell):**
-```json
-{
-  "mcpServers": {
-    "smart-context": {
-      "command": "npx",
-      "args": ["-y", "smart-context-mcp"],
-      "includeTools": [
-        "search_project",
-        "read_code",
-        "edit_code",
-        "analyze_relationship"
-      ]
-    }
-  },
-  "tools": {
-    "core": [
-      "run_shell_command(git)",
-      "run_shell_command(npm)",
-      "run_shell_command(node)"
-    ],
-    "exclude": [
-      "run_shell_command(rm)",
-      "run_shell_command(curl)"
-    ]
-  }
-}
-```
-
-**Analysis Only (Read-Only):**
-```json
-{
-  "mcpServers": {
-    "smart-context": {
-      "command": "npx",
-      "args": ["-y", "smart-context-mcp"],
-      "includeTools": [
-        "search_project",
-        "read_code",
-        "analyze_relationship"
-      ],
-      "excludeTools": ["edit_code"]
-    }
-  },
-  "tools": {
-    "exclude": ["run_shell_command"]
-  }
-}
-```
-
-**Key Points:**
-- `includeTools` / `excludeTools` control Smart Context MCP tools
-- `tools.core` / `tools.exclude` control Gemini's built-in shell commands
-- Command restriction via string matching is NOT a security boundary
-- For security, use explicit `core` allowlist only
-
----
-
-### 📋 Others (GitHub Copilot, Cursor, CI/CD)
-
-**GitHub Copilot & Cursor:**
-- Use `.claude/settings.json` (same as Claude Code)
-- Safe Development pattern
-
-**CI/CD:**
-```json
-{
-  "permissions": {
-    "allow": [
-      "Bash(npm test:*)",
-      "Bash(npm run build:*)",
-      "mcp__smart-context-mcp__search_project",
-      "mcp__smart-context-mcp__read_code",
-      "mcp__smart-context-mcp__edit_code"
-    ]
-  }
-}
-```
-
----
-
-## 9. Permission Summary & Recommendations
-
-**Speed Impact:**
-- Restrictive (maximum approval): -30% speed
-- Safe development: -5% speed
-- Autonomous (no approval): +0% speed
-
-**By Context:**
-- **Local Development:** Safe Development pattern
-- **CI/CD Automation:** Restrictive pattern
-- **Production Agents:** Restrictive + approval_policy
-- **Untrusted Code:** Maximum restrictions
-
-**Tool Exclusion Best Practices:**
-
-Always exclude:
-```
-Bash(rm:*)        → File deletion
-Bash(eval:*)      → Code execution
-Bash(exec:*)      → Process replacement
-Bash(sudo:*)      → Privilege escalation
-```
-
-Usually safe:
-```
-Bash(git:*)                    → Version control
-Bash(npm:*)                    → Package management
-mcp__smart-context-mcp__*      → All smart-context tools (sandboxed)
-```
-
----
-
-## 10. Prompt Engineering Tips by Agent Type
-
-### For Haiku
-```
-"Search for X, then read skeleton, then edit."
-(Be explicit, no inference)
-```
-
-### For Sonnet
-```
-"Find all occurrences of X. Show me the most relevant one in skeleton view. 
-Then propose edits with dryRun."
-(Natural flow, inference expected)
-```
-
-### For Opus
-```
-"Comprehensively analyze X. Consider edge cases. Propose the highest-quality solution."
-(Detailed, quality-focused)
-```
-
-### For Codex
-```
-"Analyze X autonomously. Use extended thinking for deep analysis."
-(Autonomous, extended thinking)
-```
-
-### For Gemini
-```
-"Process all occurrences of X across the entire project. 
-Return: [count, locations, proposed solution]."
-(Bulk-first thinking)
-```
-
----
-
-## 11. Quick Start Templates
-
-### Cost-Optimized (Claude Haiku)
+### Cost-Optimized (Haiku)
 ```json
 {
   "model": "claude-haiku-4-5-20251001",
-  "env": { "SMART_CONTEXT_MAX_CACHE_SIZE": "50" },
-  "view": "skeleton",
-  "max_results": 10
+  "env": { "SMART_CONTEXT_MAX_CACHE_SIZE": "50", "SMART_CONTEXT_MAX_RESULTS": "10" }
 }
 ```
 
-### Balanced (Claude Sonnet - Recommended)
+### Balanced (Sonnet - Recommended)
 ```json
 {
   "model": "claude-sonnet-4-5-20251022",
-  "env": { "SMART_CONTEXT_MAX_CACHE_SIZE": "100" },
-  "max_results": 50
+  "env": { "SMART_CONTEXT_MAX_CACHE_SIZE": "100", "SMART_CONTEXT_MAX_RESULTS": "50" }
 }
 ```
 
-### Production (Claude Opus)
+### Maximum Intelligence (Opus)
 ```json
 {
   "model": "claude-opus-4-5-20251101",
-  "env": { "SMART_CONTEXT_MAX_CACHE_SIZE": "200" },
-  "max_results": 50
+  "env": { "SMART_CONTEXT_MAX_CACHE_SIZE": "200", "SMART_CONTEXT_MAX_RESULTS": "100" }
 }
 ```
 
@@ -588,9 +319,7 @@ Return: [count, locations, proposed solution]."
 ```json
 {
   "model": "gpt-5.1-codex-max",
-  "env": { "SMART_CONTEXT_MAX_CACHE_SIZE": "150" },
-  "approval_policy": "on-failure",
-  "max_results": 75
+  "env": { "SMART_CONTEXT_MAX_CACHE_SIZE": "150", "SMART_CONTEXT_MAX_RESULTS": "75" }
 }
 ```
 
@@ -598,8 +327,7 @@ Return: [count, locations, proposed solution]."
 ```json
 {
   "model": "gemini-3-pro",
-  "env": { "SMART_CONTEXT_MAX_CACHE_SIZE": "200" },
-  "max_results": 150
+  "env": { "SMART_CONTEXT_MAX_CACHE_SIZE": "200", "SMART_CONTEXT_MAX_RESULTS": "150" }
 }
 ```
 
@@ -607,13 +335,14 @@ Return: [count, locations, proposed solution]."
 
 ## References
 
-- [Permissions Configuration](./permissions.md) - Detailed security and access control
-- [Tool Conflict Resolution](./tool-conflicts.md) - Bash vs smart-context decisions
-- [Prompt Engineering Guide](./prompt-engineering.md) - Communication patterns
-- [Getting Started](./getting-started.md) - Basic setup
+- **Tool selection decisions:** [tool-conflicts.md](./tool-conflicts.md)
+- **Security & permissions:** [permissions.md](./permissions.md)
+- **Environment variables:** [configuration.md](./configuration.md)
+- **Effective prompting:** [prompt-engineering.md](./prompt-engineering.md)
+- **Tool API reference:** [TOOL_REFERENCE.md](../agent/TOOL_REFERENCE.md)
 
 ---
 
-**Version:** 2.2.0  
+**Version:** 1.0.0  
 **Last Updated:** 2025-12-15  
 **Maintained by:** Smart Context MCP Team

@@ -376,117 +376,18 @@ read_code({ filePath: "src/main.ts" })                      // ✅ Works too
 
 ---
 
-## 5. Permission Configuration Strategies
+## 5. Permission Configuration
 
-Control which tools agents can use:
+Once you've decided which tools to use (Bash vs Smart Context), configure access permissions to control what agents can execute.
 
-### Strategy 1: Restrictive (Recommended for Security)
+**Common strategies:**
+- **Restrictive:** Read-only access for code analysis (search_project, read_code only)
+- **Development:** Full smart-context access + essential Bash (git, npm), deny dangerous commands (rm, curl)
+- **Production:** Minimal toolset for automated fixes (search, read, edit + test commands)
+- **Full Access:** All tools available (debugging only, not recommended for production)
 
-```json
-{
-  "permissions": {
-    "allow": [
-      "Bash(ls:*)",
-      "Bash(pwd:*)",
-      "mcp__smart-context-mcp__search_project",
-      "mcp__smart-context-mcp__read_code"
-    ]
-  }
-}
-```
-
-**Use for:**
-- Code analysis only
-- Security-sensitive environments
-- Read-only exploration
-- Documentation generation
-
-**Prevents:**
-- Accidental file deletion
-- Code modification
-- External data exfiltration
-
----
-
-### Strategy 2: Development (Balanced)
-
-```json
-{
-  "permissions": {
-    "allow": [
-      "Bash(ls:*)",
-      "Bash(git:*)",
-      "Bash(npm:*)",
-      "mcp__smart-context-mcp__*"
-    ],
-    "deny": [
-      "Bash(rm:*)",
-      "Bash(curl:*)"
-    ]
-  }
-}
-```
-
-**Use for:**
-- Normal development
-- Feature work
-- Refactoring
-- Testing
-
-**Prevents:**
-- File deletion
-- Data exfiltration
-- External network access
-
----
-
-### Strategy 3: Production (Haiku Execution)
-
-```json
-{
-  "permissions": {
-    "allow": [
-      "Bash(npm test:*)",
-      "Bash(npm run build:*)",
-      "mcp__smart-context-mcp__search_project",
-      "mcp__smart-context-mcp__read_code",
-      "mcp__smart-context-mcp__edit_code",
-      "mcp__smart-context-mcp__manage_project"
-    ]
-  }
-}
-```
-
-**Use for:**
-- CI/CD automated fixes
-- Production scripts
-- High-trust environments
-- Haiku execution layer
-
-**Prevents:**
-- Manual intervention
-- Accidental damage
-- Out-of-scope changes
-
----
-
-### Strategy 4: Full Access (Debugging Only)
-
-```json
-{
-  "permissions": {
-    "allow": ["*"]
-  }
-}
-```
-
-**Use for:**
-- Troubleshooting
-- Emergency recovery
-- Temporary debugging
-- Never for production
-
-**⚠️ Warning:** Use with extreme caution!
+**For complete permission configuration including JSON examples, security considerations, and per-agent setup:**  
+See [permissions.md](./permissions.md)
 
 ---
 
@@ -654,60 +555,27 @@ read_code({ view: "fragment", lineRange: "100-150" })
 
 ---
 
-## 9. Configuration Examples
+## 9. Summary
 
-### Development Project (.claude/settings.local.json)
+When deciding between Bash and Smart Context:
 
-```json
-{
-  "permissions": {
-    "allow": [
-      "Bash(git:*)",
-      "Bash(npm:*)",
-      "Bash(ls:*)",
-      "mcp__smart-context-mcp__*"
-    ],
-    "deny": [
-      "Bash(rm:*)",
-      "Bash(mv:*)",
-      "Bash(sudo:*)"
-    ]
-  }
-}
-```
+**Always use Smart Context for:**
+- Finding files (20x faster, indexed)
+- Searching code (ranked results, fuzzy matching)
+- Reading code (97% token savings with skeleton view)
+- Editing code (transactional, safe, validated)
+- Complex operations (single call vs multi-command pipelines)
 
-### Analysis-Only Project
+**Always use Bash for:**
+- Git operations (standard tool)
+- Build/test commands (npm, pytest, etc.)
+- Quick directory listings (ls -la)
 
-```json
-{
-  "permissions": {
-    "allow": [
-      "Bash(ls:*)",
-      "mcp__smart-context-mcp__search_project",
-      "mcp__smart-context-mcp__read_code",
-      "mcp__smart-context-mcp__analyze_relationship",
-      "mcp__smart-context-mcp__analyze_file"
-    ]
-  }
-}
-```
+**Use either:**
+- Directory exploration (Bash simpler, Smart Context more structured)
 
-### CI/CD Pipeline
-
-```json
-{
-  "permissions": {
-    "allow": [
-      "Bash(npm test:*)",
-      "Bash(npm run build:*)",
-      "Bash(git:*)",
-      "mcp__smart-context-mcp__search_project",
-      "mcp__smart-context-mcp__read_code",
-      "mcp__smart-context-mcp__edit_code"
-    ]
-  }
-}
-```
+**For permission configuration examples and security setup:**  
+See [permissions.md](./permissions.md)
 
 ---
 

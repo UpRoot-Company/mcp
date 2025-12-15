@@ -547,6 +547,6 @@ mcp__smart-context-mcp__*          → All smart-context tools (sandboxed)
 
 ---
 
-**Version:** 2.2.0  
+**Version:** 1.0.0  
 **Last Updated:** 2025-12-15  
 **Maintained by:** Smart Context MCP Team
