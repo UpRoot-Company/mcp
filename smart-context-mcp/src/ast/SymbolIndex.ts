@@ -411,7 +411,7 @@ export class SymbolIndex {
 
     private createIgnoreFilter(patterns: string[]) {
         const filter = ignore.default().add(patterns);
-        filter.add(['.git', 'node_modules', '.mcp', '.smart-context', 'dist', 'coverage', '.DS_Store']);
+                filter.add(['.git', 'node_modules', '.mcp', 'dist', 'coverage', '.DS_Store']);
         return filter;
     }
 }

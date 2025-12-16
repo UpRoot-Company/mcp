@@ -77,7 +77,7 @@ export class TrigramIndex {
             ]
         };
         this.ignoreFilter = createIgnore().add(this.options.ignoreGlobs);
-        this.cacheDir = path.join(this.rootPath, ".smart-context");
+                this.cacheDir = path.join(this.rootPath, ".mcp", "smart-context");
         this.persistPath = path.join(this.cacheDir, "trigram-index.json");
     }
 

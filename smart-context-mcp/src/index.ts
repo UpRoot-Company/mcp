@@ -349,8 +349,8 @@ export class SmartContextServer {
         await this.dependencyGraph.ensureBuilt();
         const relativePath = path.relative(this.rootPath, absPath) || path.basename(absPath);
         const [outgoingDeps, incomingRefs] = await Promise.all([
-            this.dependencyGraph.getDependencies(absPath, 'outgoing'),
-            this.dependencyGraph.getDependencies(absPath, 'incoming')
+            this.dependencyGraph.getDependencies(absPath, 'downstream').then(edges => edges.map(e => e.to)),
+            this.dependencyGraph.getDependencies(absPath, 'upstream').then(edges => edges.map(e => e.from))
         ]);
 
 
@@ -587,8 +587,8 @@ export class SmartContextServer {
 
         await Promise.all(normalized.map(async ({ abs, rel }) => {
             const [incoming, outgoing] = await Promise.all([
-                this.dependencyGraph.getDependencies(abs, 'incoming'),
-                this.dependencyGraph.getDependencies(abs, 'outgoing')
+                this.dependencyGraph.getDependencies(abs, 'upstream').then(edges => edges.map(e => e.from)),
+                this.dependencyGraph.getDependencies(abs, 'downstream').then(edges => edges.map(e => e.to))
             ]);
             dependencyCache.set(rel, { incoming, outgoing });
             const neighborSet = new Set<string>();
@@ -1215,16 +1215,16 @@ export class SmartContextServer {
             const absTarget = this._getAbsPathAndVerify(resolved.path);
             const baseId = addFileNode(this.normalizeRelativePath(absTarget));
             if (direction === "downstream" || direction === "both") {
-                const downstream = await this.dependencyGraph.getDependencies(absTarget, 'outgoing');
+                const downstream = await this.dependencyGraph.getDependencies(absTarget, 'downstream');
                 for (const dep of downstream) {
-                    const depId = addFileNode(dep);
+                    const depId = addFileNode(dep.to);
                     edges.push({ source: baseId, target: depId, relation: "imports" });
                 }
             }
             if (direction === "upstream" || direction === "both") {
-                const upstream = await this.dependencyGraph.getDependencies(absTarget, 'incoming');
+                const upstream = await this.dependencyGraph.getDependencies(absTarget, 'upstream');
                 for (const parent of upstream) {
-                    const parentId = addFileNode(parent);
+                    const parentId = addFileNode(parent.from);
                     edges.push({ source: parentId, target: baseId, relation: "imported_by" });
                 }
             }

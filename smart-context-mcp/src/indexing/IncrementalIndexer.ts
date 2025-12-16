@@ -10,6 +10,8 @@ import { metrics } from "../utils/MetricsCollector.js";
 
 import { ProjectIndexManager } from './ProjectIndexManager.js';
 import type { ProjectIndex, FileIndexEntry } from './ProjectIndex.js';
+import { ImportExtractor } from '../ast/ImportExtractor.js';
+import { ExportExtractor } from '../ast/ExportExtractor.js';
 
 export interface IncrementalIndexerOptions {
     watch?: boolean;
@@ -56,6 +58,8 @@ export class IncrementalIndexer {
 
     private indexManager: ProjectIndexManager;
     private currentIndex: ProjectIndex | null = null;
+    private importExtractor: ImportExtractor;
+    private exportExtractor: ExportExtractor;
 
     constructor(
         private readonly rootPath: string,
@@ -67,6 +71,8 @@ export class IncrementalIndexer {
                 private readonly options: IncrementalIndexerOptions = {}
     ) {
         this.indexManager = new ProjectIndexManager(rootPath);
+        this.importExtractor = new ImportExtractor(rootPath);
+        this.exportExtractor = new ExportExtractor(rootPath);
     }
 
     public async start(): Promise<void> {
@@ -229,7 +235,10 @@ export class IncrementalIndexer {
 
                                 try {
                     const symbols = await this.symbolIndex.getSymbolsForFile(filePath);
-                    await this.dependencyGraph.updateFileDependencies(filePath, symbols);
+                    const imports = await this.importExtractor.extractImports(filePath);
+                    const exports = await this.exportExtractor.extractExports(filePath);
+
+                    await this.dependencyGraph.updateFileDependencies(filePath);
 
                     // Update persistent index
                     if (this.currentIndex && !this.stopped) {
@@ -238,8 +247,8 @@ export class IncrementalIndexer {
                             const entry: FileIndexEntry = {
                                 mtime: stat.mtimeMs,
                                 symbols,
-                                imports: [], // TODO: P1 will populate this
-                                exports: [], // TODO: P1 will populate this
+                                imports,
+                                exports,
                                 trigrams: {
                                     wordCount: 0,
                                     uniqueTrigramCount: 0
@@ -474,7 +483,7 @@ export class IncrementalIndexer {
         if (!this.isWithinRoot(absolutePath)) return true;
         const relative = path.relative(this.rootPath, absolutePath);
         if (!relative) return false;
-        if (relative.startsWith('.smart-context')) return true;
+                if (relative.startsWith('.mcp')) return true;
         return this.symbolIndex.shouldIgnore(relative);
     }
 

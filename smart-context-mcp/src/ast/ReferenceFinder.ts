@@ -33,9 +33,9 @@ export class ReferenceFinder {
         const normalizedDefPath = path.resolve(definitionFilePath);
         searchFiles.add(normalizedDefPath);
         
-        const incoming = await this.graph.getDependencies(normalizedDefPath, 'incoming');
-        for (const f of incoming) {
-            searchFiles.add(path.resolve(this.rootPath, f));
+        const incoming = await this.graph.getDependencies(normalizedDefPath, 'upstream');
+        for (const edge of incoming) {
+            searchFiles.add(path.resolve(this.rootPath, edge.from));
         }
 
         let targetDefinition: SymbolInfo | undefined;

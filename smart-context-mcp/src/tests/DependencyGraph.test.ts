@@ -56,20 +56,20 @@ describe('DependencyGraph', () => {
     });
 
     it('should resolve outgoing dependencies', async () => {
-        const deps = await graph.getDependencies('main.ts', 'outgoing');
-        const normalizedDeps = deps.map((d: string) => d.replace(/\\/g, '/'));
+        const deps = await graph.getDependencies('main.ts', 'downstream');
+        const normalizedDeps = deps.map(d => d.to.replace(/\\/g, '/'));
         expect(normalizedDeps).toContain('utils.ts');
     });
 
     it('should resolve incoming dependencies', async () => {
-        const deps = await graph.getDependencies('utils.ts', 'incoming');
-        const normalizedDeps = deps.map((d: string) => d.replace(/\\/g, '/'));
+        const deps = await graph.getDependencies('utils.ts', 'upstream');
+        const normalizedDeps = deps.map(d => d.from.replace(/\\/g, '/'));
         expect(normalizedDeps).toContain('main.ts');
     });
 
     it('should handle directory index resolution', async () => {
-        const deps = await graph.getDependencies('component.ts', 'outgoing');
-        const normalizedDeps = deps.map((d: string) => d.replace(/\\/g, '/'));
+        const deps = await graph.getDependencies('component.ts', 'downstream');
+        const normalizedDeps = deps.map(d => d.to.replace(/\\/g, '/'));
         expect(normalizedDeps).toContain('shared/index.ts');
     });
 
@@ -138,30 +138,30 @@ describe('DependencyGraph', () => {
     describe('index invalidation', () => {
         it('drops dependencies after file invalidation and repopulates after update', async () => {
             await graph.invalidateFile(path.join(testDir, 'main.ts'));
-            let deps = await graph.getDependencies('main.ts', 'outgoing');
+            let deps = await graph.getDependencies('main.ts', 'downstream');
             expect(deps).toHaveLength(0);
 
             await graph.updateFileDependencies(path.join(testDir, 'main.ts'));
-            deps = await graph.getDependencies('main.ts', 'outgoing');
-            const normalizedDeps = deps.map((d: string) => d.replace(/\\/g, '/'));
+            deps = await graph.getDependencies('main.ts', 'downstream');
+            const normalizedDeps = deps.map(d => d.to.replace(/\\/g, '/'));
             expect(normalizedDeps).toContain('utils.ts');
         });
 
         it('removes directory-scoped data until affected files are reprocessed', async () => {
             await graph.invalidateDirectory(path.join(testDir, 'shared'));
-            let deps = await graph.getDependencies('component.ts', 'outgoing');
+            let deps = await graph.getDependencies('component.ts', 'downstream');
             expect(deps).toHaveLength(0);
 
             await graph.updateFileDependencies(path.join(testDir, 'shared', 'index.ts'));
             await graph.updateFileDependencies(path.join(testDir, 'component.ts'));
-            deps = await graph.getDependencies('component.ts', 'outgoing');
-            const normalizedDeps = deps.map((d: string) => d.replace(/\\/g, '/'));
+            deps = await graph.getDependencies('component.ts', 'downstream');
+            const normalizedDeps = deps.map(d => d.to.replace(/\\/g, '/'));
             expect(normalizedDeps).toContain('shared/index.ts');
         });
 
         it('removes persisted entries when files are deleted explicitly', async () => {
             await graph.removeFile(path.join(testDir, 'utils.ts'));
-            const incoming = await graph.getDependencies('utils.ts', 'incoming');
+            const incoming = await graph.getDependencies('utils.ts', 'upstream');
             expect(incoming).toHaveLength(0);
 
             // Restore file for other tests

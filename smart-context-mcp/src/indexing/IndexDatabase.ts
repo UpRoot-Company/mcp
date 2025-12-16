@@ -16,6 +16,7 @@ export interface DependencyRecord {
     target: string;
     type: string;
     weight: number;
+    metadata?: Record<string, unknown>;
 }
 
 interface SymbolRow {
@@ -196,12 +197,14 @@ export class IndexDatabase {
                 VALUES(?, ?, ?, ?, ?)
             `),
             selectDependenciesBySource: this.db.prepare(`
-                SELECT f.path as path FROM dependencies d
+                SELECT f.path as path, d.type, d.weight, d.metadata_json
+                FROM dependencies d
                 JOIN files f ON f.id = d.target_file_id
                 WHERE d.source_file_id = ?
             `),
             selectDependenciesByTarget: this.db.prepare(`
-                SELECT f.path as path FROM dependencies d
+                SELECT f.path as path, d.type, d.weight, d.metadata_json
+                FROM dependencies d
                 JOIN files f ON f.id = d.source_file_id
                 WHERE d.target_file_id = ?
             `),
@@ -328,13 +331,20 @@ export class IndexDatabase {
         tx(file.id);
     }
 
-    public getDependencies(relativePath: string, direction: 'incoming' | 'outgoing'): string[] {
+    public getDependencies(relativePath: string, direction: 'incoming' | 'outgoing'): DependencyRecord[] {
         const file = this.getFile(relativePath);
         if (!file) return [];
         const rows = (direction === 'outgoing'
             ? this.statements.selectDependenciesBySource.all(file.id)
-            : this.statements.selectDependenciesByTarget.all(file.id)) as Array<{ path: string }>;
-        return rows.map(row => row.path);
+            : this.statements.selectDependenciesByTarget.all(file.id)) as Array<{ path: string; type: string; weight: number; metadata_json: string | null }>;
+            
+        return rows.map(row => ({
+            source: direction === 'outgoing' ? relativePath : row.path,
+            target: direction === 'outgoing' ? row.path : relativePath,
+            type: row.type,
+            weight: row.weight,
+            metadata: row.metadata_json ? JSON.parse(row.metadata_json) : undefined
+        }));
     }
 
     public countDependencies(relativePath: string, direction: 'incoming' | 'outgoing'): number {

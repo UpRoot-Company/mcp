@@ -66,7 +66,7 @@ export class HotSpotDetector {
         let score = 0;
 
         try {
-            const incoming = await this.dependencyGraph.getDependencies(filePath, "incoming");
+            const incoming = await this.dependencyGraph.getDependencies(filePath, "upstream");
             if (incoming.length >= this.config.minIncomingRefs) {
                 score += Math.min(incoming.length / 2, 10);
             }

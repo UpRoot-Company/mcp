@@ -4,6 +4,17 @@ import { SymbolIndex } from './SymbolIndex.js';
 import { ModuleResolver, ResolutionResult } from './ModuleResolver.js';
 import { ImportSymbol, IndexStatus, SymbolInfo } from '../types.js';
 import { IndexDatabase } from '../indexing/IndexDatabase.js';
+import { ImportExtractor } from './ImportExtractor.js';
+import { ExportExtractor } from './ExportExtractor.js';
+import { ReverseImportIndex } from './ReverseImportIndex.js';
+
+export interface DependencyEdge {
+    from: string;
+    to: string;
+    type: string;
+    what?: string;
+    line?: number;
+}
 
 interface EdgeMetadata {
     targetPath?: string;
@@ -25,11 +36,19 @@ export class DependencyGraph {
     private readonly db: IndexDatabase;
     private lastRebuiltAt = 0;
 
+    private importExtractor: ImportExtractor;
+    private exportExtractor: ExportExtractor;
+    private reverseIndex: ReverseImportIndex;
+
     constructor(rootPath: string, symbolIndex: SymbolIndex, resolver: ModuleResolver, db?: IndexDatabase) {
         this.rootPath = rootPath;
         this.symbolIndex = symbolIndex;
         this.resolver = resolver;
         this.db = db ?? this.symbolIndex.getDatabase();
+
+        this.importExtractor = new ImportExtractor(this.rootPath);
+        this.exportExtractor = new ExportExtractor(this.rootPath);
+        this.reverseIndex = new ReverseImportIndex();
     }
 
     public isBuilt(): boolean {
@@ -66,24 +85,91 @@ export class DependencyGraph {
 
     public async build(): Promise<void> {
         const symbolMap = await this.symbolIndex.getAllSymbols();
-        for (const [relativePath, symbols] of symbolMap) {
-            await this.updateDependenciesForSymbols(relativePath, symbols);
+        for (const [relativePath, _] of symbolMap) {
+            const absPath = path.join(this.rootPath, relativePath);
+            await this.updateFileDependencies(absPath);
         }
         this.lastRebuiltAt = Date.now();
     }
 
-    public async updateFileDependencies(filePath: string, symbols?: SymbolInfo[]): Promise<void> {
+    public async updateFileDependencies(filePath: string): Promise<void> {
+        console.log(`[DependencyGraph] Updating dependencies for ${filePath}`);
+        
         const relPath = this.getNormalizedRelativePath(filePath);
-        const data = symbols ?? await this.symbolIndex.getSymbolsForFile(filePath);
         const stats = await fs.promises.stat(filePath).catch(() => undefined);
         const lastModified = stats?.mtimeMs ?? Date.now();
-        await this.updateDependenciesForSymbols(relPath, data, lastModified);
+
+        // Extract imports using AST parsing
+        const imports = await this.importExtractor.extractImports(filePath);
+        
+        console.log(`[DependencyGraph] Found ${imports.length} imports in ${filePath}`);
+        
+        const outgoing: EdgeMetadata[] = [];
+        const unresolved: UnresolvedMetadata[] = [];
+
+        // Convert imports to dependency edges
+        for (const imp of imports) {
+            const targetRelative = this.getNormalizedRelativePath(imp.from);
+            outgoing.push({
+                targetPath: targetRelative,
+                type: imp.importType,
+                metadata: { what: imp.what.join(', '), line: imp.line }
+            });
+        }
+        
+        // Store in database
+        this.db.replaceDependencies({
+            relativePath: relPath,
+            lastModified,
+            outgoing,
+            unresolved
+        });
+        
+        // Update reverse index
+        this.reverseIndex.removeImporter(relPath);
+        for (const imp of imports) {
+            const targetRelative = this.getNormalizedRelativePath(imp.from);
+            this.reverseIndex.addImport(relPath, targetRelative);
+        }
+        this.lastRebuiltAt = Date.now();
     }
 
-    public async getDependencies(filePath: string, direction: 'incoming' | 'outgoing'): Promise<string[]> {
+    public async getImporters(targetFile: string): Promise<DependencyEdge[]> {
+        return this.getDependencies(targetFile, 'upstream');
+    }
+
+    public async getDependencies(
+        filePath: string, 
+        direction: 'upstream' | 'downstream' | 'both' = 'both'
+    ): Promise<DependencyEdge[]> {
         const relPath = this.getNormalizedRelativePath(filePath);
-        const deps = this.db.getDependencies(relPath, direction);
-        return deps.map(dep => this.normalizePath(dep));
+        const edges: DependencyEdge[] = [];
+
+        // Downstream (outgoing) - files this file imports
+        if (direction === 'downstream' || direction === 'both') {
+            const records = this.db.getDependencies(relPath, 'outgoing');
+            edges.push(...records.map(r => ({
+                from: this.normalizePath(r.source),
+                to: this.normalizePath(r.target),
+                type: r.type,
+                what: (r.metadata?.what as string) || undefined,
+                line: (r.metadata?.line as number) || undefined
+            })));
+        }
+
+        // Upstream (incoming) - files that import this file
+        if (direction === 'upstream' || direction === 'both') {
+            const records = this.db.getDependencies(relPath, 'incoming');
+            edges.push(...records.map(r => ({
+                from: this.normalizePath(r.source),
+                to: this.normalizePath(r.target),
+                type: r.type,
+                what: (r.metadata?.what as string) || undefined,
+                line: (r.metadata?.line as number) || undefined
+            })));
+        }
+
+        return edges;
     }
 
     public async getTransitiveDependencies(filePath: string, direction: 'incoming' | 'outgoing', maxDepth: number = 20): Promise<string[]> {
@@ -95,9 +181,12 @@ export class DependencyGraph {
         while (queue.length > 0) {
             const current = queue.shift()!;
             if (current.depth >= maxDepth) continue;
+            
             const neighbors = this.db.getDependencies(current.path, direction);
-            for (const neighbor of neighbors) {
-                const normalized = this.normalizePath(neighbor);
+            
+            for (const neighborRecord of neighbors) {
+                const nextPath = direction === 'outgoing' ? neighborRecord.target : neighborRecord.source;
+                const normalized = this.normalizePath(nextPath);
                 if (visited.has(normalized)) continue;
                 visited.add(normalized);
                 results.push(normalized);
@@ -179,8 +268,7 @@ export class DependencyGraph {
                     ? relativePath
                     : path.join(this.rootPath, relativePath);
                 try {
-                    const symbols = await this.symbolIndex.getSymbolsForFile(absPath);
-                    await this.updateFileDependencies(absPath, symbols);
+                    await this.updateFileDependencies(absPath);
                     rebuiltCount++;
                 } catch (error) {
                     console.warn(`[DependencyGraph] Failed to rebuild dependencies for ${relativePath}:`, error);

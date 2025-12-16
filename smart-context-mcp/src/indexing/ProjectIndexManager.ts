@@ -13,7 +13,7 @@ export class ProjectIndexManager {
   
   constructor(projectRoot: string) {
     this.projectRoot = projectRoot;
-    this.indexPath = path.join(projectRoot, '.smart-context', 'index.json');
+        this.indexPath = path.join(projectRoot, '.mcp', 'smart-context', 'index.json');
   }
   
   /**
