@@ -43,6 +43,27 @@ export class DependencyGraph {
         await this.build();
     }
 
+    public async restoreEdges(filePath: string, edges: Array<{ from: string; to: string; type: string; what: string; line: number }>): Promise<void> {
+        const relPath = this.getNormalizedRelativePath(filePath);
+        const outgoing: EdgeMetadata[] = edges.map(edge => ({
+            targetPath: this.getNormalizedRelativePath(edge.to),
+            type: edge.type,
+            metadata: { what: edge.what, line: edge.line }
+        }));
+
+        const stats = await fs.promises.stat(filePath).catch(() => undefined);
+        const lastModified = stats?.mtimeMs ?? Date.now();
+
+        this.db.replaceDependencies({
+            relativePath: relPath,
+            lastModified,
+            outgoing,
+            unresolved: []
+        });
+        this.lastRebuiltAt = Date.now();
+    }
+
+
     public async build(): Promise<void> {
         const symbolMap = await this.symbolIndex.getAllSymbols();
         for (const [relativePath, symbols] of symbolMap) {

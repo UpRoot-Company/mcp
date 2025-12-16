@@ -47,6 +47,7 @@
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
+    "@types/debounce": "^1.2.4",
     "@types/fast-levenshtein": "^0.0.3",
     "@types/jest": "^29.5.12",
     "@types/node": "^20.11.16",

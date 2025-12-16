@@ -8,6 +8,9 @@ import { ModuleResolver } from '../ast/ModuleResolver.js';
 import { ConfigurationEvent, ConfigurationManager } from '../config/ConfigurationManager.js';
 import { metrics } from "../utils/MetricsCollector.js";
 
+import { ProjectIndexManager } from './ProjectIndexManager.js';
+import type { ProjectIndex, FileIndexEntry } from './ProjectIndex.js';
+
 export interface IncrementalIndexerOptions {
     watch?: boolean;
     initialScan?: boolean;
@@ -48,8 +51,11 @@ export class IncrementalIndexer {
 
     private moduleConfigReloadPromise?: Promise<void>;
     private configurationSubscriptions: Array<{ event: ConfigurationEvent; handler: (payload: any) => void }> = [];
-    private configEventsRegistered = false;
+        private configEventsRegistered = false;
     private activity?: { label: string; detail?: string; startedAt: number };
+
+    private indexManager: ProjectIndexManager;
+    private currentIndex: ProjectIndex | null = null;
 
     constructor(
         private readonly rootPath: string,
@@ -57,11 +63,25 @@ export class IncrementalIndexer {
         private readonly dependencyGraph: DependencyGraph,
         private readonly indexDatabase?: IndexDatabase,
         private readonly moduleResolver?: ModuleResolver,
-        private readonly configurationManager: ConfigurationManager,
-        private readonly options: IncrementalIndexerOptions = {}
-    ) {}
+        private readonly configurationManager?: ConfigurationManager,
+                private readonly options: IncrementalIndexerOptions = {}
+    ) {
+        this.indexManager = new ProjectIndexManager(rootPath);
+    }
 
-    public start(): void {
+    public async start(): Promise<void> {
+        console.log('[IncrementalIndexer] Starting with persistent index support...');
+        
+        // Step 1: Load existing index (if available)
+        this.currentIndex = await this.indexManager.loadPersistedIndex();
+        
+        // Step 2: If index exists, restore in-memory state
+        if (this.currentIndex) {
+            await this.restoreFromPersistedIndex(this.currentIndex);
+        } else {
+            this.currentIndex = this.indexManager.createEmptyIndex();
+        }
+
         if (this.options.initialScan !== false) {
             this.initialScanPromise = this.enqueueInitialScan();
         }
@@ -91,9 +111,29 @@ export class IncrementalIndexer {
         }
     }
 
+            private periodicPersistenceTimer?: NodeJS.Timeout;
+
     public async stop(): Promise<void> {
         this.stopped = true;
         this.unregisterConfigurationEvents();
+        
+        // Cancel pending persistence
+        if (this.debouncedPersist && typeof this.debouncedPersist.cancel === 'function') {
+            this.debouncedPersist.cancel();
+        }
+        
+        // Stop periodic persistence
+        if (this.periodicPersistenceTimer) {
+            clearInterval(this.periodicPersistenceTimer);
+            this.periodicPersistenceTimer = undefined;
+        }
+
+        // Final persist before closing
+        if (this.currentIndex) {
+            console.log('[IncrementalIndexer] Persisting index before shutdown...');
+            await this.indexManager.persistIndex(this.currentIndex);
+        }
+
         if (this.watcher) {
             await this.watcher.close();
         }
@@ -187,19 +227,38 @@ export class IncrementalIndexer {
                     continue;
                 }
 
-                try {
+                                try {
                     const symbols = await this.symbolIndex.getSymbolsForFile(filePath);
                     await this.dependencyGraph.updateFileDependencies(filePath, symbols);
+
+                    // Update persistent index
+                    if (this.currentIndex && !this.stopped) {
+                        const stat = await fs.promises.stat(filePath).catch(() => undefined);
+                        if (stat) {
+                            const entry: FileIndexEntry = {
+                                mtime: stat.mtimeMs,
+                                symbols,
+                                imports: [], // TODO: P1 will populate this
+                                exports: [], // TODO: P1 will populate this
+                                trigrams: {
+                                    wordCount: 0,
+                                    uniqueTrigramCount: 0
+                                }
+                            };
+                            this.indexManager.updateFileEntry(this.currentIndex, filePath, entry);
+                        }
+                    }
                 } catch (error) {
                     console.warn(`[IncrementalIndexer] failed to index ${filePath}:`, error);
                 }
             }
+            this.debouncedPersist();
         }
         this.clearActivity('queue_processing');
         this.processing = false;
     }
 
-    private async enqueueInitialScan(): Promise<void> {
+        private async enqueueInitialScan(): Promise<void> {
         const stack: string[] = [this.rootPath];
         while (stack.length > 0 && !this.stopped) {
             const current = stack.pop()!;
@@ -219,7 +278,12 @@ export class IncrementalIndexer {
                 if (entry.isDirectory()) {
                     stack.push(fullPath);
                 } else if (this.symbolIndex.isSupported(fullPath)) {
-                    this.enqueuePath(fullPath, 'low');
+                    // Check if file needs reindexing
+                    if (await this.shouldReindex(fullPath)) {
+                        this.enqueuePath(fullPath, 'low');
+                    } else {
+                        // console.debug(`[IncrementalIndexer] Skipping unchanged file: ${fullPath}`);
+                    }
                 }
             }
             await this.sleep(0);
@@ -316,7 +380,8 @@ export class IncrementalIndexer {
         return newFiles;
     }
 
-    private registerConfigurationEvents(): void {
+        private registerConfigurationEvents(): void {
+        if (!this.configurationManager) return;
         const ignoreHandler = () => void this.handleIgnoreChange();
         const tsconfigHandler = (payload: { filePath: string }) => void this.handleModuleConfigChange(payload.filePath);
         const packageHandler = (payload: { filePath: string }) => void this.handleModuleConfigChange(payload.filePath);
@@ -336,7 +401,8 @@ export class IncrementalIndexer {
         this.configEventsRegistered = true;
     }
 
-    private unregisterConfigurationEvents(): void {
+        private unregisterConfigurationEvents(): void {
+        if (!this.configurationManager) return;
         for (const subscription of this.configurationSubscriptions) {
             this.configurationManager.off(subscription.event as ConfigurationEvent, subscription.handler);
         }
@@ -378,11 +444,16 @@ export class IncrementalIndexer {
         }
     }
 
-    private async handleDeletion(filePath: string): Promise<void> {
+        private async handleDeletion(filePath: string): Promise<void> {
         if (!this.isWithinRoot(filePath)) return;
         this.removeFromQueues(path.resolve(filePath));
         try {
             await this.dependencyGraph.removeFile(filePath);
+            
+            if (this.currentIndex) {
+                this.indexManager.removeFileEntry(this.currentIndex, filePath);
+                this.debouncedPersist();
+            }
         } catch (error) {
             console.warn(`[IncrementalIndexer] failed to remove ${filePath}:`, error);
         }
@@ -481,9 +552,100 @@ export class IncrementalIndexer {
         this.activity = { label, detail, startedAt: Date.now() };
     }
 
-    private clearActivity(label?: string): void {
+        private clearActivity(label?: string): void {
         if (!label || (this.activity && this.activity.label === label)) {
             this.activity = undefined;
         }
     }
+
+    private async shouldReindex(filePath: string): Promise<boolean> {
+        if (!this.currentIndex) return true;
+        
+        // Normalize path to match keys in currentIndex.files
+        let normalized = path.resolve(filePath);
+        try {
+            const realpathSync = (fs as any).realpathSync?.native ?? fs.realpathSync;
+            normalized = realpathSync(normalized);
+        } catch {
+            // Fallback to resolved path when realpath fails
+        }
+        
+        const entry = this.currentIndex.files[normalized];
+        if (!entry) return true; // New file
+        
+        try {
+            const stat = await fs.promises.stat(filePath);
+            return stat.mtimeMs > entry.mtime; // Changed if mtime newer
+        } catch {
+            return true; // Stat failed → reindex to be safe
+        }
+    }
+
+    private async restoreFromPersistedIndex(index: ProjectIndex): Promise<void> {
+        console.log(`[IncrementalIndexer] Restoring from persisted index (${Object.keys(index.files).length} files)...`);
+        
+        // Restore symbols to SymbolIndex
+        for (const [filePath, entry] of Object.entries(index.files)) {
+            this.symbolIndex.restoreFromCache(filePath, entry.symbols, entry.mtime);
+        }
+        
+        // Restore dependencies to DependencyGraph
+        for (const [filePath, entry] of Object.entries(index.files)) {
+            if (entry.imports && entry.imports.length > 0) {
+                const edges = entry.imports.map(imp => ({
+                    from: filePath,
+                    to: imp.from,
+                    type: 'import' as const,
+                    what: imp.what.join(', '),
+                    line: imp.line
+                }));
+                await this.dependencyGraph.restoreEdges(filePath, edges);
+            }
+        }
+        
+        console.log('[IncrementalIndexer] Restore complete');
+    }
+
+    private debouncedPersist = debounce(async () => {
+        if (this.currentIndex) {
+            await this.indexManager.persistIndex(this.currentIndex);
+        }
+    }, 5000); // Wait 5 seconds after last change
+
+        private startPeriodicPersistence(): void {
+        if (this.periodicPersistenceTimer) {
+            clearInterval(this.periodicPersistenceTimer);
+        }
+        this.periodicPersistenceTimer = setInterval(async () => {
+            if (this.currentIndex && !this.stopped) {
+                await this.indexManager.persistIndex(this.currentIndex);
+            }
+        }, 5 * 60 * 1000); // Every 5 minutes
+    }
+}
+
+interface DebouncedFunction<T extends (...args: any[]) => any> {
+    (...args: Parameters<T>): void;
+    cancel: () => void;
+}
+
+function debounce<T extends (...args: any[]) => any>(
+    func: T,
+    wait: number
+): DebouncedFunction<T> {
+    let timeout: NodeJS.Timeout | null = null;
+    
+    const debounced = (...args: Parameters<T>) => {
+        if (timeout) clearTimeout(timeout);
+        timeout = setTimeout(() => func(...args), wait);
+    };
+
+    debounced.cancel = () => {
+        if (timeout) {
+            clearTimeout(timeout);
+            timeout = null;
+        }
+    };
+
+    return debounced;
 }

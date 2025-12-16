@@ -173,6 +173,12 @@ export class SymbolIndex {
         return this.rootPath;
     }
 
+    public restoreFromCache(filePath: string, symbols: SymbolInfo[], mtime: number): void {
+        const relativePath = this.toRelative(filePath);
+        this.cache.set(relativePath, { mtime, symbols });
+    }
+
+
     private async extractSymbols(filePath: string, content: string): Promise<SymbolInfo[]> {
         try {
             const structure = await this.skeletonGenerator.generateStructureJson(filePath, content);

@@ -1,4 +1,5 @@
 import path from "path";
+import * as fsp from "fs/promises";
 import ignore from "ignore";
 import { IFileSystem } from "../platform/FileSystem.js";
 
@@ -6,6 +7,8 @@ const createIgnore = () => {
     const factory = (ignore as any).default ?? ignore;
     return factory();
 };
+
+const TRIGRAM_INDEX_VERSION = 1;
 
 export interface TrigramIndexOptions {
     ignoreGlobs?: string[];
@@ -28,6 +31,20 @@ interface SearchCandidate {
     score: number;
 }
 
+interface SerializedFileEntry {
+    path: string;
+    mtime: number;
+    size: number;
+    trigramCount: number;
+    trigramFreq: Array<[string, number]>;
+}
+
+interface SerializedTrigramIndex {
+    version: number;
+    projectRoot: string;
+    entries: SerializedFileEntry[];
+}
+
 export class TrigramIndex {
     private readonly rootPath: string;
     private readonly fileSystem: IFileSystem;
@@ -37,6 +54,12 @@ export class TrigramIndex {
     private readonly postings = new Map<string, Map<string, number>>();
     private isReady = false;
     private buildPromise?: Promise<void>;
+    private readonly cacheDir: string;
+    private readonly persistPath: string;
+    private persistTimer?: NodeJS.Timeout;
+    private persistPromise?: Promise<void>;
+    private isBuilding = false;
+    private needsPersistAfterBuild = false;
 
     constructor(rootPath: string, fileSystem: IFileSystem, options: TrigramIndexOptions = {}) {
         this.rootPath = path.resolve(rootPath);
@@ -54,6 +77,8 @@ export class TrigramIndex {
             ]
         };
         this.ignoreFilter = createIgnore().add(this.options.ignoreGlobs);
+        this.cacheDir = path.join(this.rootPath, ".smart-context");
+        this.persistPath = path.join(this.cacheDir, "trigram-index.json");
     }
 
     public async ensureReady(): Promise<void> {
@@ -160,11 +185,24 @@ export class TrigramIndex {
     }
 
     private async buildIndex(): Promise<void> {
-        await this.walk(this.rootPath);
-        this.isReady = true;
+        this.isBuilding = true;
+        const visited = new Set<string>();
+        try {
+            await this.loadPersistedIndex();
+            await this.walk(this.rootPath, visited);
+            await this.pruneStaleEntries(visited);
+            this.isReady = true;
+        } finally {
+            this.isBuilding = false;
+        }
+
+        if (this.needsPersistAfterBuild) {
+            await this.persistIndex();
+            this.needsPersistAfterBuild = false;
+        }
     }
 
-    private async walk(absDir: string): Promise<void> {
+    private async walk(absDir: string, visited?: Set<string>): Promise<void> {
         let entries: string[] = [];
         try {
             entries = await this.fileSystem.readDir(absDir);
@@ -187,12 +225,13 @@ export class TrigramIndex {
                 continue;
             }
             if (stats.isDirectory()) {
-                await this.walk(absPath);
+                await this.walk(absPath, visited);
                 continue;
             }
             if (!this.shouldIndexFile(relative, stats.size)) {
                 continue;
             }
+            visited?.add(relative);
             await this.indexFile(absPath, relative, stats.mtime, stats.size);
         }
     }
@@ -248,6 +287,7 @@ export class TrigramIndex {
             }
             posting.set(relativePath, count);
         }
+        this.markDirty();
     }
 
     private removeEntry(relativePath: string): void {
@@ -262,6 +302,103 @@ export class TrigramIndex {
                 this.postings.delete(trigram);
             }
         }
+        this.markDirty();
+    }
+
+    private async loadPersistedIndex(): Promise<void> {
+        try {
+            const data = await fsp.readFile(this.persistPath, "utf-8");
+            const parsed = JSON.parse(data) as SerializedTrigramIndex;
+            if (parsed.version !== TRIGRAM_INDEX_VERSION) {
+                console.info(`[TrigramIndex] Ignoring persisted index (version ${parsed.version})`);
+                return;
+            }
+            if (path.resolve(parsed.projectRoot) !== this.rootPath) {
+                console.info("[TrigramIndex] Ignoring persisted index (project root changed)");
+                return;
+            }
+            this.fileEntries.clear();
+            this.postings.clear();
+            for (const entry of parsed.entries) {
+                const freq = new Map<string, number>(entry.trigramFreq);
+                this.fileEntries.set(entry.path, {
+                    path: entry.path,
+                    mtime: entry.mtime,
+                    size: entry.size,
+                    trigramCount: entry.trigramCount,
+                    trigramFreq: freq
+                });
+                for (const [trigram, count] of freq) {
+                    let posting = this.postings.get(trigram);
+                    if (!posting) {
+                        posting = new Map();
+                        this.postings.set(trigram, posting);
+                    }
+                    posting.set(entry.path, count);
+                }
+            }
+            console.info(`[TrigramIndex] Restored ${parsed.entries.length} files from persisted index`);
+        } catch (error) {
+            const code = (error as NodeJS.ErrnoException)?.code;
+            if (code && code !== "ENOENT") {
+                console.warn("[TrigramIndex] Failed to read persisted index:", error);
+            }
+        }
+    }
+
+    private async pruneStaleEntries(visited: Set<string>): Promise<void> {
+        for (const relativePath of Array.from(this.fileEntries.keys())) {
+            if (!visited.has(relativePath)) {
+                this.removeEntry(relativePath);
+            }
+        }
+    }
+
+    private markDirty(): void {
+        if (this.isBuilding) {
+            this.needsPersistAfterBuild = true;
+            return;
+        }
+        this.schedulePersist();
+    }
+
+    private schedulePersist(): void {
+        if (this.persistTimer) {
+            return;
+        }
+        this.persistTimer = setTimeout(() => {
+            this.persistTimer = undefined;
+            void this.persistIndex();
+        }, 2000);
+    }
+
+    private async persistIndex(): Promise<void> {
+        if (this.persistPromise) {
+            return this.persistPromise;
+        }
+        this.persistPromise = (async () => {
+            try {
+                await fsp.mkdir(this.cacheDir, { recursive: true });
+                const entries: SerializedFileEntry[] = Array.from(this.fileEntries.values()).map(entry => ({
+                    path: entry.path,
+                    mtime: entry.mtime,
+                    size: entry.size,
+                    trigramCount: entry.trigramCount,
+                    trigramFreq: Array.from(entry.trigramFreq.entries())
+                }));
+                const payload: SerializedTrigramIndex = {
+                    version: TRIGRAM_INDEX_VERSION,
+                    projectRoot: this.rootPath,
+                    entries
+                };
+                await fsp.writeFile(this.persistPath, JSON.stringify(payload));
+            } catch (error) {
+                console.warn("[TrigramIndex] Failed to persist trigram index:", error);
+            } finally {
+                this.persistPromise = undefined;
+            }
+        })();
+        return this.persistPromise;
     }
 
     public static extractTrigramCounts(content: string): Map<string, number> {

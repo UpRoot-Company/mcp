@@ -67,9 +67,10 @@ describe("IncrementalIndexer configuration integration", () => {
         const stubManager = new StubConfigurationManager() as unknown as ConfigurationManager;
         const { indexer, dependencyGraph, moduleResolver } = createIndexer(tempDir, stubManager);
 
-        indexer.start();
+        await indexer.start();
         (stubManager as unknown as EventEmitter).emit("tsconfigChanged", { filePath: path.join(tempDir, "tsconfig.json") });
-        await new Promise(resolve => setImmediate(resolve));
+        // Wait for async event handler and all microtasks to complete
+        await new Promise(resolve => setTimeout(resolve, 500));
 
         expect(moduleResolver.reloadConfig).toHaveBeenCalledTimes(1);
         expect((dependencyGraph.rebuildUnresolved as jest.Mock)).toHaveBeenCalledTimes(1);
