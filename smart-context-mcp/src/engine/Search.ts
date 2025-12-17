@@ -2,6 +2,7 @@ import path from "path";
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import * as fs from 'fs/promises';
+import { Dirent } from 'fs';
 import { QueryTokenizer } from "./QueryTokenizer.js";
 const execAsync = promisify(exec);
 import { BM25FRanking, BM25FConfig } from "./Ranking.js";
@@ -206,7 +207,19 @@ export class SearchEngine {
         const previewLength = this.normalizeSnippetLength(args.snippetLength);
         const matchesPerFile = this.normalizeMatchesPerFile(args.matchesPerFile);
 
-        const candidates = await this.collectHybridCandidates(normalizedKeywords);
+        let candidates = await this.collectHybridCandidates(normalizedKeywords);
+
+        if (candidates.size === 0) {
+            const fallbackCandidates = await this.collectFilesystemCandidates(
+                basePath ? path.resolve(basePath) : this.rootPath,
+                includeRegexes,
+                excludeRegexes
+            );
+            if (fallbackCandidates.size > 0) {
+                candidates = fallbackCandidates;
+                console.log(`[Search] Added ${fallbackCandidates.size} fallback candidates via filesystem scan, total: ${candidates.size}`);
+            }
+        }
 
         if (patterns && patterns.length > 0 && candidates.size < 1000) {
             const allFiles = this.trigramIndex.listFiles();
@@ -216,7 +229,7 @@ export class SearchEngine {
         console.log(`[Search] Collected ${candidates.size} candidates`);
 
         const contentCache = new Map<string, string>();
-        const scoredResults: ScoredMatch[] = [];
+        const fileSearchResults: FileSearchResult[] = [];
 
         for (const candidatePath of candidates) {
             const absPath = path.isAbsolute(candidatePath)
@@ -228,64 +241,135 @@ export class SearchEngine {
                 continue;
             }
 
-            if (shouldApplyKeywordFilter) {
-                const matchesConstraints = await this.matchesKeywordConstraints(
-                    absPath,
-                    relativeToBase,
-                    keywordConstraints,
-                    { wordBoundary },
-                    contentCache
-                );
-                if (!matchesConstraints) {
-                    continue;
-                }
+            const content = contentCache.get(absPath) ?? await this.fileSystem.readFile(absPath);
+            contentCache.set(absPath, content);
+            const contentLines = content.split(/\r?\n/);
+
+            const filenameMatchType = this.scoreFilename(relativeToBase, normalizedKeywords, { wordBoundary });
+            const keywordLines = normalizedKeywords.length > 0
+                ? this.findKeywordMatches(content, keywordConstraints, { wordBoundary, caseSensitive }, matchesPerFile)
+                : [];
+            const patternLines = patterns && patterns.length > 0
+                ? this.findPatternMatches(content, patterns, matchesPerFile)
+                : [];
+
+            if (shouldApplyKeywordFilter && keywordLines.length === 0 && filenameMatchType === 'none') {
+                continue;
             }
 
-            const scoreResult = await this.calculateHybridScore(absPath, normalizedKeywords, normalizedQuery, patterns);
+            if (keywordLines.length === 0 && patternLines.length === 0 && filenameMatchType === 'none') {
+                continue;
+            }
+            const filenameMultiplier = filenameMatchType === 'exact'
+                ? 10
+                : filenameMatchType === 'partial'
+                    ? 5
+                    : 1;
 
-            if (scoreResult.total > 0) {
-                scoredResults.push({
-                    path: relativeToBase,
-                    score: scoreResult.total,
-                    matchType: scoreResult.signals.join('+'),
-                    preview: await this.generatePreview(absPath, normalizedKeywords),
-                    breakdown: scoreResult.breakdown
+            const totalKeywordOccurrences = keywordLines.reduce((sum, entry) => sum + entry.occurrences, 0);
+            const keywordScore = totalKeywordOccurrences > 0
+                ? Math.max(1, totalKeywordOccurrences * 120 * filenameMultiplier)
+                : 0;
+            const patternScore = patternLines.length > 0
+                ? Math.max(1, patternLines.length * 200 * filenameMultiplier)
+                : 0;
+
+            const symbolScore = this.symbolIndex
+                ? await this.scoreSymbols(absPath, keywordConstraints.map(k => k.raw))
+                : 0;
+            const symbolBonus = symbolScore > 0 ? symbolScore * 20 * filenameMultiplier : 0;
+
+            if (keywordLines.length === 0 && patternLines.length === 0 && filenameMatchType !== 'none') {
+                const preview = this.extractLinePreview(content, 1, previewLength);
+                const typeSignals = ['filename'];
+                if (symbolBonus > 0) typeSignals.push('symbol');
+
+                const filenameScore = Math.max(1, 80 * filenameMultiplier + symbolBonus);
+                fileSearchResults.push({
+                    filePath: relativeToBase,
+                    lineNumber: 1,
+                    preview,
+                    score: filenameScore,
+                    scoreDetails: {
+                        type: typeSignals.join('+'),
+                        details: [
+                            { type: 'filename', score: filenameScore },
+                            ...(symbolBonus > 0 ? [{ type: 'symbol', score: symbolBonus }] : [])
+                        ],
+                        totalScore: filenameScore,
+                        contentScore: 0,
+                        filenameMultiplier,
+                        depthMultiplier: 1,
+                        fieldWeight: 1,
+                        filenameMatchType
+                    }
+                });
+                continue;
+            }
+
+            for (const lineNumber of patternLines) {
+                const preview = this.extractLinePreview(content, lineNumber, previewLength);
+                const totalScore = patternScore + symbolBonus;
+                const typeSignals = ['pattern'];
+                if (filenameMatchType !== 'none') typeSignals.push('filename');
+                if (symbolBonus > 0) typeSignals.push('symbol');
+
+                fileSearchResults.push({
+                    filePath: relativeToBase,
+                    lineNumber,
+                    preview,
+                    score: totalScore,
+                    scoreDetails: {
+                        type: typeSignals.join('+'),
+                        details: [
+                            { type: 'pattern', score: patternScore },
+                            ...(symbolBonus > 0 ? [{ type: 'symbol', score: symbolBonus }] : [])
+                        ],
+                        totalScore,
+                        contentScore: 0,
+                        filenameMultiplier,
+                        depthMultiplier: 1,
+                        fieldWeight: 1,
+                        filenameMatchType
+                    }
+                });
+            }
+
+            for (const { lineNumber, occurrences } of keywordLines) {
+                const preview = this.extractLinePreview(content, lineNumber, previewLength);
+                const totalScore = keywordScore + symbolBonus;
+                const typeSignals = ['content'];
+                const lineText = contentLines[lineNumber - 1]?.trim() ?? '';
+                if (this.isCommentLine(lineText)) {
+                    typeSignals.push('comment');
+                }
+                if (filenameMatchType !== 'none') typeSignals.push('filename');
+                if (symbolBonus > 0) typeSignals.push('symbol');
+
+                fileSearchResults.push({
+                    filePath: relativeToBase,
+                    lineNumber,
+                    preview,
+                    score: totalScore + occurrences,
+                    scoreDetails: {
+                        type: typeSignals.join('+'),
+                        details: [
+                            { type: 'content', score: keywordScore },
+                            ...(symbolBonus > 0 ? [{ type: 'symbol', score: symbolBonus }] : [])
+                        ],
+                        totalScore: totalScore + occurrences,
+                        contentScore: keywordScore,
+                        filenameMultiplier,
+                        depthMultiplier: 1,
+                        fieldWeight: 1,
+                        filenameMatchType
+                    }
                 });
             }
         }
 
-        scoredResults.sort((a, b) => b.score - a.score);
-
-        const topResults = scoredResults.slice(0, args.maxResults || 20);
-        console.log(`[Search] Returning ${topResults.length} results`);
-
-        const fileSearchResults: FileSearchResult[] = [];
-        for (const result of topResults) {
-            const breakdown = result.breakdown;
-            const filenameMatchType = breakdown?.filenameMatchType ?? "none";
-            const filenameMultiplier = filenameMatchType === "exact"
-                ? 10
-                : filenameMatchType === "partial"
-                    ? 5
-                    : 1;
-
-            fileSearchResults.push({
-                filePath: result.path,
-                lineNumber: 1,
-                preview: result.preview,
-                score: result.score,
-                scoreDetails: {
-                    type: result.matchType,
-                    details: [{ type: result.matchType, score: result.score }],
-                    totalScore: result.score,
-                    contentScore: breakdown?.content ?? 0,
-                    filenameMultiplier,
-                    depthMultiplier: 1,
-                    fieldWeight: 1,
-                    filenameMatchType
-                }
-            });
-        }
+        fileSearchResults.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+        console.log(`[Search] Returning ${fileSearchResults.length} results`);
 
         return this.postProcessResults(fileSearchResults, {
             fileTypes: args.fileTypes,
@@ -444,6 +528,45 @@ export class SearchEngine {
         return candidates;
     }
 
+    private async collectFilesystemCandidates(
+        rootDir: string,
+        includeRegexes?: RegExp[],
+        excludeRegexes?: RegExp[]
+    ): Promise<Set<string>> {
+        const candidates = new Set<string>();
+        const stack: string[] = [rootDir];
+
+        while (stack.length > 0) {
+            const current = stack.pop()!;
+            let entries: Dirent[];
+            try {
+                entries = await fs.readdir(current, { withFileTypes: true });
+            } catch {
+                continue;
+            }
+
+            for (const entry of entries) {
+                const absPath = path.join(current, entry.name);
+                if (entry.isDirectory()) {
+                    stack.push(absPath);
+                    continue;
+                }
+
+                const relativeToRoot = this.normalizeRelativePath(absPath, this.rootPath);
+                const relativeToBase = this.normalizeRelativePath(absPath, rootDir) ?? relativeToRoot;
+                if (!relativeToRoot || !relativeToBase) {
+                    continue;
+                }
+
+                if (this.shouldInclude(relativeToBase, includeRegexes, excludeRegexes)) {
+                    candidates.add(relativeToRoot);
+                }
+            }
+        }
+
+        return candidates;
+    }
+
     private buildKeywordConstraints(rawKeywords: string[], options: { caseSensitive: boolean; smartCase: boolean }): KeywordConstraint[] {
         const smartCase = options.smartCase !== false;
         return rawKeywords
@@ -485,7 +608,12 @@ export class SearchEngine {
             }
 
             const pathHaystack = keyword.requiresCaseSensitive ? canonicalPath : canonicalLowerPath;
-            if (pathHaystack.includes(needle)) {
+            if (options.wordBoundary) {
+                const boundaryRegex = new RegExp(this.escapeRegExp(needle, { wordBoundary: true }), keyword.requiresCaseSensitive ? '' : 'i');
+                if (boundaryRegex.test(pathHaystack)) {
+                    return true;
+                }
+            } else if (pathHaystack.includes(needle)) {
                 return true;
             }
 
@@ -579,8 +707,20 @@ export class SearchEngine {
                 signals.push('comment');
             }
         }
-        
-        // Signal 5: Patterns
+
+        // Signal 5: Direct content keyword matching (fallback when trigram score is zero)
+        if (keywords.length > 0 && breakdown.content === 0) {
+            const directContentScore = await this.scoreContentMatches(filePath, keywords);
+            if (directContentScore > 0) {
+                totalScore += directContentScore;
+                breakdown.content = directContentScore;
+                if (!signals.includes('content')) {
+                    signals.push('content');
+                }
+            }
+        }
+
+        // Signal 6: Patterns
         if (patterns && patterns.length > 0) {
             const patternScore = await this.scorePatterns(filePath, patterns);
             if (patternScore > 0) {
@@ -590,7 +730,7 @@ export class SearchEngine {
             }
         }
 
-        // Signal 6: Path depth penalty
+        // Signal 7: Path depth penalty
         const depthPenalty = this.calculateDepthPenalty(filePath);
         totalScore -= depthPenalty;
 
@@ -610,6 +750,108 @@ export class SearchEngine {
         } catch {
             return 0;
         }
+    }
+
+    private async scoreContentMatches(filePath: string, keywords: string[]): Promise<number> {
+        try {
+            const content = await this.fileSystem.readFile(filePath);
+            const lowerContent = content.toLowerCase();
+            let total = 0;
+
+            for (const keyword of keywords) {
+                const needle = keyword.toLowerCase();
+                let index = lowerContent.indexOf(needle);
+                while (index !== -1) {
+                    total += 50;
+                    index = lowerContent.indexOf(needle, index + needle.length);
+                }
+            }
+
+            return total;
+        } catch {
+            return 0;
+        }
+    }
+
+    private extractLinePreview(content: string, lineNumber: number, snippetLength: number): string {
+        const lines = content.split(/\r?\n/);
+        const line = lines[lineNumber - 1] ?? '';
+        if (snippetLength <= 0) {
+            return '';
+        }
+        if (line.length <= snippetLength) {
+            return line;
+        }
+        return line.slice(0, snippetLength);
+    }
+
+    private isCommentLine(line: string): boolean {
+        const trimmed = line.trim();
+        return trimmed.startsWith('//') || trimmed.startsWith('/*') || trimmed.startsWith('*');
+    }
+
+    private findKeywordMatches(
+        content: string,
+        keywords: KeywordConstraint[],
+        options: { wordBoundary: boolean; caseSensitive: boolean },
+        limit: number
+    ): { lineNumber: number; occurrences: number }[] {
+        if (keywords.length === 0) {
+            return [];
+        }
+
+        const lines = content.split(/\r?\n/);
+        const matches: { lineNumber: number; occurrences: number }[] = [];
+        const regexes = keywords.map(keyword => {
+            const needle = keyword.requiresCaseSensitive ? keyword.raw : keyword.normalized;
+            const flags = (keyword.requiresCaseSensitive || options.caseSensitive) ? 'g' : 'gi';
+            return new RegExp(this.escapeRegExp(needle, { wordBoundary: options.wordBoundary }), flags);
+        });
+
+        for (let index = 0; index < lines.length && matches.length < limit; index++) {
+            const line = lines[index];
+            let occurrences = 0;
+            for (const regex of regexes) {
+                regex.lastIndex = 0;
+                const lineMatches = [...line.matchAll(regex)];
+                occurrences += lineMatches.length;
+            }
+
+            if (occurrences > 0) {
+                matches.push({ lineNumber: index + 1, occurrences });
+            }
+        }
+
+        return matches;
+    }
+
+    private findPatternMatches(content: string, patterns: string[], limit: number): number[] {
+        if (!patterns || patterns.length === 0) {
+            return [];
+        }
+        const regexes: RegExp[] = [];
+        for (const pattern of patterns) {
+            try {
+                regexes.push(new RegExp(pattern, 'i'));
+            } catch {
+                continue;
+            }
+        }
+
+        const lines = content.split(/\r?\n/);
+        const matches: number[] = [];
+        for (let index = 0; index < lines.length && matches.length < limit; index++) {
+            const line = lines[index];
+            for (const regex of regexes) {
+                regex.lastIndex = 0;
+                if (regex.test(line)) {
+                    matches.push(index + 1);
+                    break;
+                }
+            }
+        }
+
+        return matches;
     }
 
     private findByFilename(keywords: string[]): string[] {
@@ -658,9 +900,10 @@ export class SearchEngine {
         return Array.from(matches);
     }
 
-    private scoreFilename(filePath: string, keywords: string[]): "exact" | "partial" | "none" {
+    private scoreFilename(filePath: string, keywords: string[], options?: { wordBoundary?: boolean }): "exact" | "partial" | "none" {
         const baseName = path.basename(filePath).toLowerCase();
         const stem = path.basename(filePath, path.extname(filePath)).toLowerCase();
+        const requireExact = options?.wordBoundary === true;
         let matchType: "exact" | "partial" | "none" = "none";
 
         for (const keyword of keywords) {
@@ -671,7 +914,7 @@ export class SearchEngine {
             if (baseName === normalized || stem === normalized) {
                 return "exact";
             }
-            if (baseName.includes(normalized) || stem.includes(normalized)) {
+            if (!requireExact && (baseName.includes(normalized) || stem.includes(normalized))) {
                 matchType = "partial";
             }
         }

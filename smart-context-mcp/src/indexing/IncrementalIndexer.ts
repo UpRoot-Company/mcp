@@ -21,6 +21,8 @@ export interface IncrementalIndexerOptions {
 
 const DEFAULT_BATCH_PAUSE_MS = 50;
 const MAX_BATCH_PAUSE_MS = 500;
+const IGNORE_FILE = '.gitignore';
+const CONFIG_FILES = ['tsconfig.json', 'jsconfig.json', 'package.json'];
 type PriorityLevel = 'high' | 'medium' | 'low';
 
 export interface IndexerStatusSnapshot {
@@ -54,7 +56,7 @@ export class IncrementalIndexer {
 
     private moduleConfigReloadPromise?: Promise<void>;
     private configurationSubscriptions: Array<{ event: ConfigurationEvent; handler: (payload: any) => void }> = [];
-        private configEventsRegistered = false;
+    private configEventsRegistered = false;
     private activity?: { label: string; detail?: string; startedAt: number };
 
     private indexManager: ProjectIndexManager;
@@ -69,7 +71,7 @@ export class IncrementalIndexer {
         private readonly indexDatabase?: IndexDatabase,
         private readonly moduleResolver?: ModuleResolver,
         private readonly configurationManager?: ConfigurationManager,
-                private readonly options: IncrementalIndexerOptions = {}
+        private readonly options: IncrementalIndexerOptions = {}
     ) {
         this.indexManager = new ProjectIndexManager(rootPath);
         this.importExtractor = new ImportExtractor(rootPath);
@@ -111,6 +113,20 @@ export class IncrementalIndexer {
                 },
                 atomic: true
             });
+
+            try {
+                this.watcher.add(path.join(this.rootPath, IGNORE_FILE));
+            } catch {
+                // ignore if .gitignore doesn't exist yet
+            }
+
+            for (const file of CONFIG_FILES) {
+                try {
+                    this.watcher.add(path.join(this.rootPath, file));
+                } catch {
+                    // config files are optional
+                }
+            }
 
             this.watcher.on('add', file => this.enqueuePath(file, 'medium'));
             this.watcher.on('change', file => void this.handleFileChange(file));
@@ -316,7 +332,19 @@ export class IncrementalIndexer {
     }
 
     private async handleFileChange(filePath: string): Promise<void> {
-        this.enqueuePath(filePath);
+        const basename = path.basename(filePath);
+
+        if (basename === IGNORE_FILE) {
+            await this.handleIgnoreChange();
+            return;
+        }
+
+        if (CONFIG_FILES.includes(basename)) {
+            await this.handleModuleConfigChange(filePath);
+            return;
+        }
+
+        this.enqueuePath(filePath, 'medium');
     }
 
     private async handleIgnoreChange(): Promise<void> {
@@ -405,7 +433,7 @@ export class IncrementalIndexer {
         return newFiles;
     }
 
-        private registerConfigurationEvents(): void {
+    private registerConfigurationEvents(): void {
         if (!this.configurationManager) return;
         const ignoreHandler = () => void this.handleIgnoreChange();
         const tsconfigHandler = (payload: { filePath: string }) => void this.handleModuleConfigChange(payload.filePath);
@@ -426,7 +454,7 @@ export class IncrementalIndexer {
         this.configEventsRegistered = true;
     }
 
-        private unregisterConfigurationEvents(): void {
+    private unregisterConfigurationEvents(): void {
         if (!this.configurationManager) return;
         for (const subscription of this.configurationSubscriptions) {
             this.configurationManager.off(subscription.event as ConfigurationEvent, subscription.handler);

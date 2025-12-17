@@ -77,6 +77,46 @@ describe("IncrementalIndexer configuration integration", () => {
         await indexer.stop();
     });
 
+    test(".gitignore 변경은 인덱스 정리를 트리거하고 일반 파일 처리 흐름을 우회한다", async () => {
+        const tempDir = createTempDir();
+        const { indexer } = createIndexer(tempDir);
+        const handleIgnoreChange = jest.spyOn(indexer as any, "handleIgnoreChange").mockResolvedValue(undefined);
+        const handleModuleConfigChange = jest.spyOn(indexer as any, "handleModuleConfigChange").mockResolvedValue(undefined);
+        const enqueuePath = jest.spyOn(indexer as any, "enqueuePath");
+
+        await (indexer as any).handleFileChange(path.join(tempDir, ".gitignore"));
+
+        expect(handleIgnoreChange).toHaveBeenCalledTimes(1);
+        expect(handleModuleConfigChange).not.toHaveBeenCalled();
+        expect(enqueuePath).not.toHaveBeenCalled();
+    });
+
+    test("구성 파일 변경은 모듈 리로드 흐름을 사용한다", async () => {
+        const tempDir = createTempDir();
+        const { indexer } = createIndexer(tempDir);
+        const handleIgnoreChange = jest.spyOn(indexer as any, "handleIgnoreChange").mockResolvedValue(undefined);
+        const handleModuleConfigChange = jest.spyOn(indexer as any, "handleModuleConfigChange").mockResolvedValue(undefined);
+        const enqueuePath = jest.spyOn(indexer as any, "enqueuePath");
+
+        await (indexer as any).handleFileChange(path.join(tempDir, "tsconfig.json"));
+
+        expect(handleModuleConfigChange).toHaveBeenCalledTimes(1);
+        expect(handleIgnoreChange).not.toHaveBeenCalled();
+        expect(enqueuePath).not.toHaveBeenCalled();
+    });
+
+    test("일반 파일 변경은 우선순위 큐에 enqueue된다", async () => {
+        const tempDir = createTempDir();
+        const { indexer } = createIndexer(tempDir);
+        const enqueuePath = jest.spyOn(indexer as any, "enqueuePath");
+
+        const filePath = createIndexedFile(tempDir, "regular.ts");
+        await (indexer as any).handleFileChange(filePath);
+
+        expect(enqueuePath).toHaveBeenCalledTimes(1);
+        expect(enqueuePath).toHaveBeenCalledWith(filePath, "medium");
+    });
+
     test("우선순위 큐 스냅샷이 high/low 대기열 상태를 구분한다", () => {
         const tempDir = createTempDir();
         const { indexer } = createIndexer(tempDir);
