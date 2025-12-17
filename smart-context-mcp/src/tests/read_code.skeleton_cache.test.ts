@@ -30,7 +30,9 @@ describe("SmartContextServer - read_code skeleton cache integration", () => {
         server = new SmartContextServer(testRootDir);
     });
 
-    afterEach(() => {
+    afterEach(async () => {
+        await (server as any)?.incrementalIndexer?.stop();
+        AstManager.resetForTesting();
         fs.rmSync(testRootDir, { recursive: true, force: true });
     });
 
