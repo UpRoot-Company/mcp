@@ -14,6 +14,9 @@ interface CachedSkeleton {
 export class SkeletonCache {
     private readonly memoryCache: LRUCache<string, CachedSkeleton>;
     private readonly diskCacheDir: string;
+    private l1Hits = 0;
+    private l2Hits = 0;
+    private misses = 0;
 
     constructor(
         projectRoot: string,
@@ -42,23 +45,24 @@ export class SkeletonCache {
 
         const memCached = this.memoryCache.get(cacheKey);
         if (memCached) {
+            this.l1Hits++;
             return memCached.skeleton;
         }
 
         const diskCached = await this.loadFromDisk(filePath, mtime, optionsHash);
         if (diskCached) {
+            this.l2Hits++;
             this.memoryCache.set(cacheKey, diskCached);
             return diskCached.skeleton;
         }
 
+        this.misses++;
         const skeleton = await generator(filePath, options);
         const cached: CachedSkeleton = { mtime, skeleton, optionsHash };
         this.memoryCache.set(cacheKey, cached);
-        try {
-            await this.saveToDisk(filePath, cached);
-        } catch (error) {
+        void this.saveToDisk(filePath, cached).catch(error => {
             console.warn(`[SkeletonCache] Failed to save cache for ${path.basename(filePath)}:`, error);
-        }
+        });
         return skeleton;
     }
 
@@ -77,6 +81,16 @@ export class SkeletonCache {
     public async clearAll(): Promise<void> {
         this.memoryCache.clear();
         await fs.rm(this.diskCacheDir, { recursive: true, force: true });
+    }
+
+    public getStats(): { memorySize: number; diskCacheDir: string; l1Hits: number; l2Hits: number; misses: number } {
+        return {
+            memorySize: this.memoryCache.size(),
+            diskCacheDir: this.diskCacheDir,
+            l1Hits: this.l1Hits,
+            l2Hits: this.l2Hits,
+            misses: this.misses
+        };
     }
 
     private async loadFromDisk(filePath: string, expectedMtime: number, optionsHash: string): Promise<CachedSkeleton | null> {

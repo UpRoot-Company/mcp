@@ -60,6 +60,10 @@ export class LRUCache<K, V> {
         this.performDelete(key);
     }
 
+    public size(): number {
+        return this.cache.size;
+    }
+
     private isExpired(entry: { lastAccess: number }): boolean {
         return Date.now() - entry.lastAccess > this.ttlMs;
     }

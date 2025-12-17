@@ -48,6 +48,8 @@ describe("SkeletonCache", () => {
         const first = await cache.getSkeleton(filePath, {}, generator);
         expect(first).toBe(mockSkeleton);
 
+        await new Promise(resolve => setTimeout(resolve, 20));
+
         const cache2 = new SkeletonCache(testDir, 100, 60_000);
         let generatorCalled = false;
         const secondGenerator = async (_path: string, _opts: any) => {
@@ -58,6 +60,42 @@ describe("SkeletonCache", () => {
         const second = await cache2.getSkeleton(filePath, {}, secondGenerator);
         expect(generatorCalled).toBe(false);
         expect(second).toBe(mockSkeleton);
+    });
+
+    test("hit/miss 집계를 getStats()로 확인할 수 있다", async () => {
+        const filePath = path.join(testDir, "stats.ts");
+        await fs.writeFile(filePath, "export const y = 2;\n");
+
+        let generatorCalls = 0;
+        const generator = async () => {
+            generatorCalls++;
+            return "stats";
+        };
+
+        // miss + L1 fill
+        await cache.getSkeleton(filePath, {}, generator);
+        // L1 hit
+        await cache.getSkeleton(filePath, {}, generator);
+
+        await new Promise(resolve => setTimeout(resolve, 20));
+
+        const cache2 = new SkeletonCache(testDir, 100, 60_000);
+        let generatorCalls2 = 0;
+        const generator2 = async () => {
+            generatorCalls2++;
+            return "stats";
+        };
+
+        // L2 hit
+        await cache2.getSkeleton(filePath, {}, generator2);
+
+        const { memorySize, l1Hits, l2Hits, misses } = cache2.getStats();
+        expect(memorySize).toBeGreaterThan(0);
+        expect(l1Hits).toBe(0); // new instance
+        expect(l2Hits).toBe(1);
+        expect(misses).toBe(0);
+        expect(generatorCalls).toBe(1);
+        expect(generatorCalls2).toBe(0);
     });
 
     test("파일 mtime이 변경되면 캐시를 무효화한다", async () => {
@@ -76,6 +114,23 @@ describe("SkeletonCache", () => {
         await cache.getSkeleton(filePath, {}, generator);
 
         expect(generatorCalls).toBe(2);
+    });
+
+    test("clearAll()은 메모리와 디스크 캐시를 모두 비운다", async () => {
+        const filePath = path.join(testDir, "clear.ts");
+        await fs.writeFile(filePath, "export const z = 3;\n");
+
+        const generator = async () => "clear";
+        await cache.getSkeleton(filePath, {}, generator);
+
+        // 저장이 완료될 시간을 잠시 준다
+        await new Promise(resolve => setTimeout(resolve, 20));
+
+        await cache.clearAll();
+
+        const hashed = (await fs.readdir(path.join(testDir, ".smart-context-cache"), { withFileTypes: true }).catch(() => []));
+        expect(hashed.length).toBe(0);
+        expect(cache.getStats().memorySize).toBe(0);
     });
 
     test("옵션 조합이 다르면 별도 캐시 엔트리를 유지한다", async () => {
