@@ -16,8 +16,8 @@ export class ProjectIndexManager {
   
   constructor(projectRoot: string) {
     this.projectRoot = projectRoot;
-    this.preferredIndexPath = path.join(projectRoot, '.smart-context-index', 'index.json');
-    this.legacyIndexPath = path.join(projectRoot, '.mcp', 'smart-context', 'index.json');
+    this.preferredIndexPath = path.join(projectRoot, '.mcp', 'smart-context', 'index.json');
+    this.legacyIndexPath = path.join(projectRoot, '.smart-context-index', 'index.json');
     this.indexPath = this.resolveExistingIndexPath();
   }
   

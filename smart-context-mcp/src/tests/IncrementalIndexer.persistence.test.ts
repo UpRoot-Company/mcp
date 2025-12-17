@@ -84,7 +84,7 @@ describe('Persistent Index', () => {
     await indexer.stop();
     
     // Verify index file exists
-    const indexPath = path.join(testProjectRoot, '.smart-context-index', 'index.json');
+    const indexPath = path.join(testProjectRoot, '.mcp', 'smart-context', 'index.json');
     try {
         await fs.access(indexPath);
     } catch {
