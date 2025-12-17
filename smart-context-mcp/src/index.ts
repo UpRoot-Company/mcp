@@ -161,7 +161,7 @@ export class SmartContextServer {
         });
         void this.recoverPendingTransactions();
         this.searchEngine = new SearchEngine(this.rootPath, this.fileSystem, this.ignoreGlobs, {
-            symbolMetadataProvider: this.symbolIndex,
+            symbolIndex: this.symbolIndex,
             callGraphBuilder: this.callGraphBuilder
         });
         const precomputeEnabled = process.env.SMART_CONTEXT_DISABLE_PRECOMPUTE === 'true' ? false : !isTestEnv;

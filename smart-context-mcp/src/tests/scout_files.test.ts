@@ -11,7 +11,6 @@ describe('SmartContextServer - scout_files', () => {
     const tieBreakerKeyword = 'keywordToken';
 
     beforeAll(() => {
-        server = new SmartContextServer(process.cwd());
         if (!fs.existsSync(testFilesDir)) {
             fs.mkdirSync(testFilesDir, { recursive: true });
         }
@@ -25,6 +24,8 @@ describe('SmartContextServer - scout_files', () => {
         fs.writeFileSync(path.join(testFilesDir, 'ranking3.txt'), `another ${tieBreakerKeyword}`);
         fs.writeFileSync(path.join(testFilesDir, 'User.ts'), 'export const User = { name: "User" };\n');
         fs.writeFileSync(path.join(testFilesDir, 'UserManager.ts'), 'export class UserManager {\n    constructor() {\n        console.log("UserManager ready");\n    }\n}\n');
+
+        server = new SmartContextServer(process.cwd());
     });
 
     afterAll(async () => {

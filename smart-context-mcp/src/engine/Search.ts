@@ -1,6 +1,11 @@
 import path from "path";
+import { exec } from 'child_process';
+import { promisify } from 'util';
+import * as fs from 'fs/promises';
+import { QueryTokenizer } from "./QueryTokenizer.js";
+const execAsync = promisify(exec);
 import { BM25FRanking, BM25FConfig } from "./Ranking.js";
-import { FileSearchResult, Document, SearchOptions, SearchFieldType, SymbolInfo, SearchProjectResultEntry } from "../types.js";
+import { FileSearchResult, Document, SearchOptions, SearchFieldType, SearchProjectResultEntry, SymbolInfo } from "../types.js";
 import { TrigramIndex, TrigramIndexOptions } from "./TrigramIndex.js";
 import { IFileSystem } from "../platform/FileSystem.js";
 import { CallGraphMetricsBuilder, CallGraphSignals } from "./CallGraphMetricsBuilder.js";
@@ -21,8 +26,10 @@ const DEFAULT_PREVIEW_LENGTH = 240;
 const DEFAULT_MATCHES_PER_FILE = 5;
 
 export interface ScoutArgs extends SearchOptions {
-    keywords?: string[];
-    patterns?: string[];
+    maxResults?: number;
+    query?: string;
+    keywords?: string[]; // Deprecated, use query
+    patterns?: string[]; // Deprecated, use query
     includeGlobs?: string[];
     excludeGlobs?: string[];
     gitDiffMode?: boolean;
@@ -40,18 +47,41 @@ interface SearchQuery {
     literalHint?: string;
 }
 
-export interface SymbolMetadataProvider {
+export interface SymbolIndex {
     getSymbolsForFile(filePath: string): Promise<SymbolInfo[]>;
-    getAllSymbols?(): Promise<Map<string, SymbolInfo[]>>;
+    getAllSymbols(): Promise<Map<string, SymbolInfo[]>>;
 }
 
 export interface SearchEngineOptions {
     maxPreviewLength?: number;
     maxMatchesPerFile?: number;
     trigram?: TrigramIndexOptions;
-    symbolMetadataProvider?: SymbolMetadataProvider;
+    symbolIndex?: SymbolIndex;
     fieldWeights?: BM25FConfig["fieldWeights"];
     callGraphBuilder?: CallGraphBuilder;
+}
+
+interface ScoredMatch {
+    path: string;
+    score: number;
+    matchType: string;
+    preview: string;
+    breakdown?: ScoreBreakdown;
+}
+
+interface ScoreBreakdown {
+    content: number;
+    filename: number;
+    symbol: number;
+    comment: number;
+    pattern: number;
+    filenameMatchType: "exact" | "partial" | "none";
+}
+
+interface KeywordConstraint {
+    raw: string;
+    normalized: string;
+    requiresCaseSensitive: boolean;
 }
 
 export class SearchEngine {
@@ -62,9 +92,8 @@ export class SearchEngine {
     private readonly trigramIndex: TrigramIndex;
     private readonly maxPreviewLength: number;
     private readonly maxMatchesPerFile: number;
-    private readonly symbolMetadataProvider?: SymbolMetadataProvider;
-    private readonly symbolCache = new Map<string, SymbolInfo[]>();
-    private readonly symbolLoaders = new Map<string, Promise<SymbolInfo[]>>();
+    private readonly symbolIndex?: SymbolIndex;
+    private readonly queryTokenizer: QueryTokenizer;
     private readonly callGraphMetricsBuilder?: CallGraphMetricsBuilder;
     private callGraphSignals?: Map<string, CallGraphSignals>;
 
@@ -76,10 +105,11 @@ export class SearchEngine {
         this.defaultExcludeGlobs = Array.from(new Set(combined));
         this.maxPreviewLength = options.maxPreviewLength ?? DEFAULT_PREVIEW_LENGTH;
         this.maxMatchesPerFile = options.maxMatchesPerFile ?? DEFAULT_MATCHES_PER_FILE;
-        this.symbolMetadataProvider = options.symbolMetadataProvider;
+        this.symbolIndex = options.symbolIndex;
         this.callGraphMetricsBuilder = options.callGraphBuilder
             ? new CallGraphMetricsBuilder(options.callGraphBuilder)
             : undefined;
+        this.queryTokenizer = new QueryTokenizer();
         this.trigramIndex = new TrigramIndex(this.rootPath, this.fileSystem, {
             ignoreGlobs: this.defaultExcludeGlobs,
             ...options.trigram
@@ -98,20 +128,18 @@ export class SearchEngine {
 
     public async rebuild(): Promise<void> {
         await this.trigramIndex.rebuild();
-        this.symbolCache.clear();
-        this.symbolLoaders.clear();
         this.callGraphSignals = undefined;
     }
 
     public async invalidateFile(absPath: string): Promise<void> {
         await this.trigramIndex.refreshFile(absPath);
-        this.dropSymbolMetadata(absPath);
+        // No longer dropping symbol metadata here, as symbolIndex handles its own caching/invalidation
         this.callGraphSignals = undefined;
     }
 
     public async invalidateDirectory(absDir: string): Promise<void> {
         await this.trigramIndex.refreshDirectory(absDir);
-        this.dropSymbolMetadata(absDir, true);
+        // No longer dropping symbol metadata here, as symbolIndex handles its own caching/invalidation
         this.callGraphSignals = undefined;
     }
 
@@ -145,103 +173,121 @@ export class SearchEngine {
     }
 
     public async scout(args: ScoutArgs): Promise<FileSearchResult[]> {
-        const { keywords, patterns, includeGlobs, excludeGlobs, gitDiffMode, basePath, wordBoundary, caseSensitive, smartCase } = args;
+        const { query, includeGlobs, excludeGlobs, basePath, patterns } = args;
 
-        if ((!keywords || keywords.length === 0) && (!patterns || patterns.length === 0)) {
-            throw new Error("At least one keyword or pattern is required.");
+        if (!query && (!args.keywords || args.keywords.length === 0) && (!patterns || patterns.length === 0)) {
+            throw new Error("A query string, keyword, or pattern is required.");
         }
 
-        if (gitDiffMode) {
-            console.warn("gitDiffMode is not yet fully implemented.");
-        }
+        const smartCase = args.smartCase ?? true;
+        const caseSensitive = Boolean(args.caseSensitive);
+        const wordBoundary = Boolean(args.wordBoundary);
 
-        const queries = this.buildSearchQueries({ keywords, patterns, wordBoundary, caseSensitive, smartCase });
-        const baseCwd = basePath ? path.resolve(basePath) : this.rootPath;
-        const normalizedBase = baseCwd.startsWith(this.rootPath) ? baseCwd : this.rootPath;
+        const keywordSource = query && query.trim().length > 0
+            ? this.queryTokenizer.tokenize(query)
+            : (args.keywords ?? []).filter((kw): kw is string => typeof kw === "string" && kw.trim().length > 0);
+
+        const keywordConstraints = this.buildKeywordConstraints(keywordSource, { caseSensitive, smartCase });
+        const normalizedKeywords = keywordConstraints.map(keyword => keyword.normalized);
+        const keywordLabels = keywordConstraints.map(keyword => keyword.raw);
+        const shouldApplyKeywordFilter = keywordConstraints.length > 0 && (!patterns || patterns.length === 0);
+
+        const effectiveQuery = query || keywordSource.join(' ');
+        const normalizedQuery = effectiveQuery ? this.queryTokenizer.normalize(effectiveQuery) : '';
+
+        console.log(`[Search] Hybrid search for query: "${effectiveQuery}" (keywords: ${keywordLabels.join(', ')})`);
+
         const combinedExcludeGlobs = [...this.defaultExcludeGlobs, ...(excludeGlobs || [])];
         const includeRegexes = includeGlobs && includeGlobs.length > 0
             ? includeGlobs.map(glob => this.globToRegExp(glob))
             : undefined;
         const excludeRegexes = combinedExcludeGlobs.map(glob => this.globToRegExp(glob));
+
         const previewLength = this.normalizeSnippetLength(args.snippetLength);
         const matchesPerFile = this.normalizeMatchesPerFile(args.matchesPerFile);
 
-        const candidateScores = await this.collectCandidateFiles(queries);
-        const matchesById = new Map<string, FileSearchResult>();
-        const matchOrigins = new Map<string, string>();
+        const candidates = await this.collectHybridCandidates(normalizedKeywords);
 
-        for (const [relativePath] of candidateScores) {
-            const normalizedRelative = relativePath.replace(/\\/g, "/");
-            const absPath = path.isAbsolute(relativePath)
-                ? relativePath
-                : path.join(this.rootPath, relativePath);
-            let content: string;
-            try {
-                content = await this.fileSystem.readFile(absPath);
-            } catch {
+        if (patterns && patterns.length > 0 && candidates.size < 1000) {
+            const allFiles = this.trigramIndex.listFiles();
+            for (const file of allFiles) candidates.add(file);
+        }
+
+        console.log(`[Search] Collected ${candidates.size} candidates`);
+
+        const contentCache = new Map<string, string>();
+        const scoredResults: ScoredMatch[] = [];
+
+        for (const candidatePath of candidates) {
+            const absPath = path.isAbsolute(candidatePath)
+                ? candidatePath
+                : path.join(this.rootPath, candidatePath);
+
+            const relativeToBase = this.normalizeRelativePath(absPath, basePath ? path.resolve(basePath) : this.rootPath);
+            if (!relativeToBase || !this.shouldInclude(relativeToBase, includeRegexes, excludeRegexes)) {
                 continue;
             }
-            const fileMatches = this.collectMatchesFromFile(normalizedRelative, content, queries, previewLength, matchesPerFile);
-            for (const match of fileMatches) {
-                const absMatchPath = path.join(this.rootPath, match.filePath);
-                const relativeToBase = this.normalizeRelativePath(absMatchPath, normalizedBase);
-                if (!relativeToBase) {
+
+            if (shouldApplyKeywordFilter) {
+                const matchesConstraints = await this.matchesKeywordConstraints(
+                    absPath,
+                    relativeToBase,
+                    keywordConstraints,
+                    { wordBoundary },
+                    contentCache
+                );
+                if (!matchesConstraints) {
                     continue;
                 }
-                if (!this.shouldInclude(relativeToBase, includeRegexes, excludeRegexes)) {
-                    continue;
-                }
-                const normalizedMatch: FileSearchResult = {
-                    ...match,
-                    filePath: relativeToBase
-                };
-                const docId = `${normalizedMatch.filePath}:${normalizedMatch.lineNumber}`;
-                matchesById.set(docId, normalizedMatch);
-                matchOrigins.set(docId, normalizedRelative);
+            }
+
+            const scoreResult = await this.calculateHybridScore(absPath, normalizedKeywords, normalizedQuery, patterns);
+
+            if (scoreResult.total > 0) {
+                scoredResults.push({
+                    path: relativeToBase,
+                    score: scoreResult.total,
+                    matchType: scoreResult.signals.join('+'),
+                    preview: await this.generatePreview(absPath, normalizedKeywords),
+                    breakdown: scoreResult.breakdown
+                });
             }
         }
 
-        if (matchesById.size === 0) {
-            return [];
+        scoredResults.sort((a, b) => b.score - a.score);
+
+        const topResults = scoredResults.slice(0, args.maxResults || 20);
+        console.log(`[Search] Returning ${topResults.length} results`);
+
+        const fileSearchResults: FileSearchResult[] = [];
+        for (const result of topResults) {
+            const breakdown = result.breakdown;
+            const filenameMatchType = breakdown?.filenameMatchType ?? "none";
+            const filenameMultiplier = filenameMatchType === "exact"
+                ? 10
+                : filenameMatchType === "partial"
+                    ? 5
+                    : 1;
+
+            fileSearchResults.push({
+                filePath: result.path,
+                lineNumber: 1,
+                preview: result.preview,
+                score: result.score,
+                scoreDetails: {
+                    type: result.matchType,
+                    details: [{ type: result.matchType, score: result.score }],
+                    totalScore: result.score,
+                    contentScore: breakdown?.content ?? 0,
+                    filenameMultiplier,
+                    depthMultiplier: 1,
+                    fieldWeight: 1,
+                    filenameMatchType
+                }
+            });
         }
 
-        const fieldAssignments = await this.assignFieldTypes(matchesById);
-
-        const documents: Document[] = Array.from(matchesById.entries()).map(([docId, match]) => {
-            const originPath = matchOrigins.get(docId);
-            const originScore = originPath ? candidateScores.get(originPath) ?? 0 : 0;
-            const meta = fieldAssignments.get(docId);
-            return {
-                id: docId,
-                text: match.preview,
-                score: originScore,
-                filePath: match.filePath,
-                fieldType: meta?.fieldType,
-                symbolId: meta?.symbolId
-            };
-        });
-        const queryText = queries.map(q => q.raw).join(" ");
-        const callGraphSignals = await this.getCallGraphSignals();
-        const rankedDocuments = this.bm25Ranking.rank(documents, queryText, callGraphSignals);
-        const rankedResults = rankedDocuments.map(doc => {
-            const match = matchesById.get(doc.id);
-            if (!match) {
-                const [filePath, line] = this.splitDocId(doc.id);
-                return {
-                    filePath,
-                    lineNumber: line,
-                    preview: "",
-                    score: doc.score,
-                    scoreDetails: doc.scoreDetails
-                };
-            }
-            return {
-                ...match,
-                score: doc.score,
-                scoreDetails: doc.scoreDetails
-            };
-        });
-        return this.postProcessResults(rankedResults, {
+        return this.postProcessResults(fileSearchResults, {
             fileTypes: args.fileTypes,
             snippetLength: previewLength,
             groupByFile: args.groupByFile,
@@ -358,299 +404,402 @@ export class SearchEngine {
         });
     }
 
-    private buildSearchQueries(args: { keywords?: string[]; patterns?: string[]; wordBoundary?: boolean; caseSensitive?: boolean; smartCase?: boolean }): SearchQuery[] {
-        const queries: SearchQuery[] = [];
-        const useSmartCase = args.smartCase ?? true;
-        for (const keyword of args.keywords ?? []) {
-            const escaped = this.escapeRegExp(keyword, { wordBoundary: args.wordBoundary });
-            const flags = this.getKeywordRegexFlags(keyword, args.caseSensitive, useSmartCase);
-            queries.push({
-                raw: keyword,
-                regex: new RegExp(escaped, flags),
-                literalHint: keyword.toLowerCase()
-            });
+    private async collectHybridCandidates(keywords: string[]): Promise<Set<string>> {
+        const candidates = new Set<string>();
+
+        // Source 1: Trigram index (existing)
+        const trigramQuery = keywords.join(' ');
+        const trigramResults = await this.trigramIndex.search(trigramQuery, MAX_CANDIDATE_FILES * 2);
+        for (const result of trigramResults) {
+            candidates.add(result.filePath);
         }
-        for (const pattern of args.patterns ?? []) {
-            let regex: RegExp;
-            try {
-                const flags = this.getPatternRegexFlags(args.caseSensitive, useSmartCase);
-                regex = new RegExp(pattern, flags);
-            } catch (error) {
-                throw new Error(`Invalid search pattern '${pattern}': ${(error as Error).message}`);
+        console.log(`[Search] Trigram candidates: ${trigramResults.length}`);
+
+        // Source 2: Filename matching
+        const filenameMatches = this.findByFilename(keywords);
+        for (const path of filenameMatches) {
+            candidates.add(path);
+        }
+        console.log(`[Search] Filename matches: ${filenameMatches.length}`);
+
+        // Source 3: Symbol index
+        if (this.symbolIndex) {
+            const symbolMatches = await this.findBySymbolName(keywords);
+            for (const path of symbolMatches) {
+                candidates.add(path);
             }
-            queries.push({
-                raw: pattern,
-                regex,
-                literalHint: this.extractLiteralHint(pattern)
-            });
+            console.log(`[Search] Symbol matches: ${symbolMatches.length}`);
         }
-        return queries;
-    }
 
-    private getKeywordRegexFlags(keyword: string, caseSensitive?: boolean, smartCase: boolean = true): string {
-        const isCaseSensitive = this.shouldUseCaseSensitive(keyword, caseSensitive, smartCase);
-        return isCaseSensitive ? "g" : "gi";
-    }
-
-    private getPatternRegexFlags(caseSensitive?: boolean, smartCase: boolean = true): string {
-        if (typeof caseSensitive === "boolean") {
-            return caseSensitive ? "g" : "gi";
-        }
-        if (smartCase === false) {
-            return "gi";
-        }
-        return "g";
-    }
-
-    private shouldUseCaseSensitive(sample: string, caseSensitive?: boolean, smartCase: boolean = true): boolean {
-        if (typeof caseSensitive === "boolean") {
-            return caseSensitive;
-        }
-        if (!smartCase) {
-            return false;
-        }
-        return /[A-Z]/.test(sample);
-    }
-
-    private extractLiteralHint(pattern: string): string | undefined {
-        const literalSegments = pattern
-            .split(/[^a-zA-Z0-9]+/)
-            .filter(segment => segment.length >= 3);
-        if (literalSegments.length === 0) {
-            return undefined;
-        }
-        return literalSegments.reduce((longest, current) => current.length > longest.length ? current : longest).toLowerCase();
-    }
-
-    private async collectCandidateFiles(queries: SearchQuery[]): Promise<Map<string, number>> {
-        const candidates = new Map<string, number>();
-        for (const query of queries) {
-            if (!query.literalHint || query.literalHint.length === 0) {
-                continue;
+        // Source 4: Fallback
+        if (candidates.size < 20) {
+            const allFiles = this.trigramIndex.listFiles();
+            const fallback = allFiles.slice(0, MAX_CANDIDATE_FILES * 3);
+            for (const file of fallback) {
+                candidates.add(file);
             }
-            const matches = await this.trigramIndex.search(query.literalHint, MAX_CANDIDATE_FILES);
-            for (const candidate of matches) {
-                const normalizedPath = candidate.filePath.replace(/\\/g, "/");
-                const previous = candidates.get(normalizedPath) ?? 0;
-                candidates.set(normalizedPath, Math.max(previous, candidate.score));
-            }
+            console.log(`[Search] Added ${fallback.length} fallback candidates, total: ${candidates.size}`);
         }
-        if (candidates.size === 0) {
-            const fallback = this.trigramIndex.listFiles().slice(0, MAX_CANDIDATE_FILES);
-            for (const filePath of fallback) {
-                const normalizedPath = filePath.replace(/\\/g, "/");
-                candidates.set(normalizedPath, 0);
-            }
-        }
+
         return candidates;
     }
 
-    private collectMatchesFromFile(
+    private buildKeywordConstraints(rawKeywords: string[], options: { caseSensitive: boolean; smartCase: boolean }): KeywordConstraint[] {
+        const smartCase = options.smartCase !== false;
+        return rawKeywords
+            .map(keyword => keyword.trim())
+            .filter(keyword => keyword.length > 0)
+            .map(raw => {
+                const requiresCaseSensitive = options.caseSensitive || (smartCase && /[A-Z]/.test(raw));
+                return {
+                    raw,
+                    normalized: raw.toLowerCase(),
+                    requiresCaseSensitive
+                };
+            });
+    }
+
+    private async matchesKeywordConstraints(
+        filePath: string,
         relativePath: string,
-        content: string,
-        queries: SearchQuery[],
-        previewLength: number,
-        matchesPerFile: number
-    ): FileSearchResult[] {
-        const matches: FileSearchResult[] = [];
-        const lines = content.split(/\r?\n/);
-        for (let index = 0; index < lines.length; index++) {
-            const line = lines[index];
-            for (const query of queries) {
-                query.regex.lastIndex = 0;
-                if (query.regex.test(line)) {
-                    matches.push({
-                        filePath: relativePath,
-                        lineNumber: index + 1,
-                        preview: this.formatPreview(line, previewLength)
-                    });
-                    break;
-                }
-            }
-            if (matches.length >= matchesPerFile) {
-                break;
-            }
-        }
-        return matches;
-    }
-
-    private formatPreview(line: string, previewLength: number): string {
-        if (previewLength <= 0) {
-            return "";
-        }
-        const trimmed = line.trim();
-        if (trimmed.length <= previewLength) {
-            return trimmed;
-        }
-        const sliceLength = Math.max(1, previewLength - 1);
-        return `${trimmed.slice(0, sliceLength)}…`;
-    }
-
-    private async assignFieldTypes(matches: Map<string, FileSearchResult>): Promise<Map<string, { fieldType: SearchFieldType; symbolId?: string }>> {
-        const assignments = new Map<string, { fieldType: SearchFieldType; symbolId?: string }>();
-        const tasks = Array.from(matches.entries()).map(async ([docId, match]) => {
-            const meta = await this.classifyField(match.filePath, match.lineNumber, match.preview);
-            assignments.set(docId, meta);
-        });
-        await Promise.all(tasks);
-        return assignments;
-    }
-
-    private async classifyField(relativePath: string, lineNumber: number, preview: string): Promise<{ fieldType: SearchFieldType; symbolId?: string }> {
-        if (this.isCommentLine(preview)) {
-            return { fieldType: "comment" };
-        }
-        const symbol = await this.findSymbolForLine(relativePath, lineNumber);
-        if (symbol && symbol.range) {
-            const startLine = symbol.range.startLine + 1;
-            const endLine = symbol.range.endLine + 1;
-            const exportFlag = this.isExportedSymbol(symbol);
-            const symbolId = this.makeSymbolId(relativePath, symbol.name);
-            if (lineNumber === startLine) {
-                return { fieldType: "symbol-definition", symbolId };
-            }
-            const signatureBoundary = Math.min(endLine, startLine + 2);
-            if (lineNumber > startLine && lineNumber <= signatureBoundary) {
-                return { fieldType: "signature", symbolId };
-            }
-            if (exportFlag) {
-                return { fieldType: "exported-member", symbolId };
-            }
-        }
-        if (/^\s*export\s+/i.test(preview)) {
-            return { fieldType: "exported-member" };
-        }
-        return { fieldType: "code-body" };
-    }
-
-    private async findSymbolForLine(relativePath: string, lineNumber: number): Promise<SymbolInfo | undefined> {
-        const symbols = await this.getSymbolsForRelativePath(relativePath);
-        if (!symbols) {
-            return undefined;
-        }
-        return symbols.find(symbol => {
-            if (!symbol.range) {
-                return false;
-            }
-            const start = symbol.range.startLine + 1;
-            const end = symbol.range.endLine + 1;
-            return lineNumber >= start && lineNumber <= end;
-        });
-    }
-
-    private async getSymbolsForRelativePath(relativePath: string): Promise<SymbolInfo[] | undefined> {
-        if (!this.symbolMetadataProvider) {
-            return undefined;
-        }
-        const key = this.normalizeCacheKey(relativePath);
-        if (this.symbolCache.has(key)) {
-            return this.symbolCache.get(key);
-        }
-        let loader = this.symbolLoaders.get(key);
-        if (!loader) {
-            const absPath = path.isAbsolute(relativePath)
-                ? relativePath
-                : path.join(this.rootPath, relativePath);
-            loader = this.symbolMetadataProvider.getSymbolsForFile(absPath).catch(() => []);
-            this.symbolLoaders.set(key, loader);
-        }
-        const symbols = await loader;
-        this.symbolCache.set(key, symbols);
-        this.symbolLoaders.delete(key);
-        return symbols;
-    }
-
-    private dropSymbolMetadata(targetPath: string, includeDescendants: boolean = false): void {
-        const relative = this.normalizeRelativePath(targetPath, this.rootPath);
-        if (!relative) {
-            return;
-        }
-        const normalized = this.normalizeCacheKey(relative);
-        const predicate = (key: string) => key === normalized || (includeDescendants && key.startsWith(`${normalized}/`));
-        for (const key of Array.from(this.symbolCache.keys())) {
-            if (predicate(key)) {
-                this.symbolCache.delete(key);
-            }
-        }
-        for (const key of Array.from(this.symbolLoaders.keys())) {
-            if (predicate(key)) {
-                this.symbolLoaders.delete(key);
-            }
-        }
-    }
-
-    private normalizeCacheKey(relativePath: string): string {
-        return relativePath.replace(/\\/g, "/");
-    }
-
-    private makeSymbolId(relativePath: string, symbolName: string): string {
-        const normalized = this.normalizeCacheKey(relativePath);
-        return `${normalized}::${symbolName}`;
-    }
-
-    private async getCallGraphSignals(): Promise<Map<string, CallGraphSignals> | undefined> {
-        if (!this.callGraphMetricsBuilder || !this.symbolMetadataProvider?.getAllSymbols) {
-            return undefined;
-        }
-        if (this.callGraphSignals) {
-            return this.callGraphSignals;
-        }
-        const entries = await this.collectEntrySymbols(25);
-        if (entries.length === 0) {
-            return undefined;
-        }
-        this.callGraphSignals = await this.callGraphMetricsBuilder.buildMetrics(entries);
-        return this.callGraphSignals;
-    }
-
-    private async collectEntrySymbols(limit: number): Promise<Array<{ symbolName: string; filePath: string }>> {
-        if (!this.symbolMetadataProvider?.getAllSymbols) {
-            return [];
-        }
-        let symbolMap: Map<string, SymbolInfo[]> | undefined;
-        try {
-            symbolMap = await this.symbolMetadataProvider.getAllSymbols();
-        } catch (error) {
-            console.warn("[Search] Failed to load symbol metadata for call graph metrics:", error);
-            return [];
-        }
-
-        const entries: Array<{ symbolName: string; filePath: string }> = [];
-        for (const [filePath, symbols] of symbolMap.entries()) {
-            for (const symbol of symbols) {
-                if (!symbol.name || !this.isDefinitionSymbol(symbol)) {
-                    continue;
-                }
-                if (!this.isExportedSymbol(symbol)) {
-                    continue;
-                }
-                entries.push({ symbolName: symbol.name, filePath });
-                if (entries.length >= limit) {
-                    return entries;
-                }
-            }
-        }
-        return entries;
-    }
-
-    private isExportedSymbol(symbol: SymbolInfo): boolean {
-        if ((symbol as any).exportKind) {
+        keywords: KeywordConstraint[],
+        options: { wordBoundary: boolean },
+        cache: Map<string, string>
+    ): Promise<boolean> {
+        if (keywords.length === 0) {
             return true;
         }
-        if (Array.isArray(symbol.modifiers)) {
-            return symbol.modifiers.some(mod => mod.toLowerCase() === "export");
+
+        const relativeSegment = relativePath && relativePath.length > 0
+            ? relativePath
+            : path.relative(this.rootPath, filePath) || path.basename(filePath);
+        const canonicalPath = relativeSegment.replace(/\\/g, '/');
+        const canonicalLowerPath = canonicalPath.toLowerCase();
+
+        let content = cache.get(filePath);
+
+        for (const keyword of keywords) {
+            const needle = keyword.requiresCaseSensitive ? keyword.raw : keyword.normalized;
+            if (!needle) {
+                continue;
+            }
+
+            const pathHaystack = keyword.requiresCaseSensitive ? canonicalPath : canonicalLowerPath;
+            if (pathHaystack.includes(needle)) {
+                return true;
+            }
+
+            if (!content) {
+                try {
+                    content = await this.fileSystem.readFile(filePath);
+                    cache.set(filePath, content);
+                } catch {
+                    return false;
+                }
+            }
+
+            const pattern = this.escapeRegExp(needle, { wordBoundary: options.wordBoundary });
+            const flags = keyword.requiresCaseSensitive ? '' : 'i';
+            const regex = new RegExp(pattern, flags);
+            if (regex.test(content)) {
+                return true;
+            }
         }
+
         return false;
     }
 
-    private isDefinitionSymbol(symbol: SymbolInfo): boolean {
-        const type = (symbol as any).type;
-        return type !== "import" && type !== "export";
+    private async calculateHybridScore(
+        filePath: string,
+        keywords: string[],
+        normalizedQuery: string,
+        patterns?: string[]
+    ): Promise<{
+        total: number;
+        signals: string[];
+        breakdown: {
+            content: number;
+            filename: number;
+            symbol: number;
+            comment: number;
+            pattern: number;
+            filenameMatchType: "exact" | "partial" | "none";
+        }
+    }> {
+        let totalScore = 0;
+        const signals: string[] = [];
+        const breakdown = {
+            content: 0,
+            filename: 0,
+            symbol: 0,
+            comment: 0,
+            pattern: 0,
+            filenameMatchType: "none" as "exact" | "partial" | "none"
+        };
+
+        // Signal 1: Trigram content similarity
+        if (normalizedQuery) {
+            const trigramScore = await this.getTrigramScore(filePath, normalizedQuery);
+            if (trigramScore > 0) {
+                totalScore += trigramScore * 0.5;
+                breakdown.content = trigramScore * 0.5;
+                signals.push('content');
+            }
+        }
+
+        // Signal 2: Filename matching
+        if (keywords.length > 0) {
+            const matchType = this.scoreFilename(filePath, keywords);
+            if (matchType !== "none") {
+                const filenameWeight = matchType === "exact" ? 2 : 1;
+                const filenameScore = filenameWeight * 10;
+                totalScore += filenameScore;
+                breakdown.filename = filenameScore;
+                breakdown.filenameMatchType = matchType;
+                signals.push('filename');
+            }
+        }
+
+        // Signal 3: Symbol name matching
+        if (this.symbolIndex && keywords.length > 0) {
+            const symbolScore = await this.scoreSymbols(filePath, keywords);
+            if (symbolScore > 0) {
+                totalScore += symbolScore * 8;
+                breakdown.symbol = symbolScore * 8;
+                signals.push('symbol');
+            }
+        }
+
+        // Signal 4: Comment matching
+        if (keywords.length > 0) {
+            const commentScore = await this.scoreComments(filePath, keywords);
+            if (commentScore > 0) {
+                totalScore += commentScore * 3;
+                breakdown.comment = commentScore * 3;
+                signals.push('comment');
+            }
+        }
+        
+        // Signal 5: Patterns
+        if (patterns && patterns.length > 0) {
+            const patternScore = await this.scorePatterns(filePath, patterns);
+            if (patternScore > 0) {
+                totalScore += patternScore;
+                breakdown.pattern = patternScore;
+                signals.push('pattern');
+            }
+        }
+
+        // Signal 6: Path depth penalty
+        const depthPenalty = this.calculateDepthPenalty(filePath);
+        totalScore -= depthPenalty;
+
+        return { total: totalScore, signals, breakdown };
     }
 
-    private isCommentLine(line: string): boolean {
-        const trimmed = line.trim();
-        return /^(\/\/|\/\*|\*|#)/.test(trimmed);
+    private async scorePatterns(filePath: string, patterns: string[]): Promise<number> {
+        try {
+            let total = 0;
+            for (const pattern of patterns) {
+                const matches = await this.runFileGrep(pattern, filePath);
+                if (matches.length > 0) {
+                    total += 100 * matches.length;
+                }
+            }
+            return total;
+        } catch {
+            return 0;
+        }
+    }
+
+    private findByFilename(keywords: string[]): string[] {
+        const allFiles = this.trigramIndex.listFiles();
+        const matches: string[] = [];
+
+        for (const filePath of allFiles) {
+            const basename = path.basename(filePath).toLowerCase();
+            const dirname = path.dirname(filePath).toLowerCase();
+            const fullPath = filePath.toLowerCase();
+
+            const allMatch = keywords.every(kw => {
+                const lowerKw = kw.toLowerCase();
+                return basename.includes(lowerKw) ||
+                    dirname.includes(lowerKw) ||
+                    fullPath.includes(lowerKw);
+            });
+
+            if (allMatch) {
+                matches.push(filePath);
+            }
+        }
+
+        return matches;
+    }
+
+    private async findBySymbolName(keywords: string[]): Promise<string[]> {
+        const matches = new Set<string>();
+        if (!this.symbolIndex) {
+            return [];
+        }
+
+        const allSymbols = await this.symbolIndex.getAllSymbols();
+        for (const [filePath, symbols] of allSymbols.entries()) {
+            for (const symbol of symbols) {
+                const lowerSymbol = symbol.name.toLowerCase();
+                for (const keyword of keywords) {
+                    if (lowerSymbol.includes(keyword.toLowerCase())) {
+                        matches.add(filePath);
+                        break;
+                    }
+                }
+            }
+        }
+
+        return Array.from(matches);
+    }
+
+    private scoreFilename(filePath: string, keywords: string[]): "exact" | "partial" | "none" {
+        const baseName = path.basename(filePath).toLowerCase();
+        const stem = path.basename(filePath, path.extname(filePath)).toLowerCase();
+        let matchType: "exact" | "partial" | "none" = "none";
+
+        for (const keyword of keywords) {
+            const normalized = keyword.toLowerCase().trim();
+            if (!normalized) {
+                continue;
+            }
+            if (baseName === normalized || stem === normalized) {
+                return "exact";
+            }
+            if (baseName.includes(normalized) || stem.includes(normalized)) {
+                matchType = "partial";
+            }
+        }
+
+        return matchType;
+    }
+
+    private async scoreSymbols(filePath: string, keywords: string[]): Promise<number> {
+        if (!this.symbolIndex) {
+            return 0;
+        }
+        try {
+            const symbols = await this.symbolIndex.getSymbolsForFile(filePath);
+            let score = 0;
+
+            for (const symbol of symbols) {
+                const lowerSymbol = symbol.name.toLowerCase();
+                for (const keyword of keywords) {
+                    const lowerKw = keyword.toLowerCase();
+                    if (lowerSymbol === lowerKw) {
+                        score += 8;
+                    } else if (lowerSymbol.includes(lowerKw)) {
+                        score += 4;
+                    }
+                }
+            }
+
+            return score;
+        } catch (error) {
+            return 0;
+        }
+    }
+
+    private async scoreComments(filePath: string, keywords: string[]): Promise<number> {
+        try {
+            const content = await this.fileSystem.readFile(filePath);
+            const comments = this.extractComments(content, filePath);
+
+            let score = 0;
+            for (const comment of comments) {
+                const lowerComment = comment.toLowerCase();
+                for (const keyword of keywords) {
+                    if (lowerComment.includes(keyword.toLowerCase())) {
+                        score += 3;
+                    }
+                }
+            }
+
+            return score;
+        } catch (error) {
+            return 0;
+        }
+    }
+
+    private extractComments(content: string, filePath: string): string[] {
+        const comments: string[] = [];
+        const ext = path.extname(filePath);
+
+        if (['.ts', '.tsx', '.js', '.jsx'].includes(ext)) {
+            const singleLineRegex = /\/\/(.+)$/gm;
+            let match;
+            while ((match = singleLineRegex.exec(content)) !== null) {
+                comments.push(match[1].trim());
+            }
+
+            const multiLineRegex = /\/\*([\s\S]*?)\*\//g;
+            while ((match = multiLineRegex.exec(content)) !== null) {
+                comments.push(match[1].trim());
+            }
+        }
+
+        return comments;
+    }
+
+    private calculateDepthPenalty(filePath: string): number {
+        const relativePath = path.relative(this.rootPath, filePath);
+        const depth = relativePath.split(path.sep).length;
+        return Math.max(0, (depth - 3) * 0.5);
+    }
+
+    private async getTrigramScore(filePath: string, query: string): Promise<number> {
+        const content = await this.fileSystem.readFile(filePath);
+        const document: Document = {
+            id: filePath,
+            text: content,
+            filePath: filePath,
+            score: 0
+        };
+        const ranked = this.bm25Ranking.rank([document], query);
+        return ranked[0]?.score || 0;
+    }
+
+    private async generatePreview(filePath: string, keywords: string[]): Promise<string> {
+        try {
+            const content = await this.fileSystem.readFile(filePath);
+            const lines = content.split('\n');
+
+            let bestLine = '';
+            let bestScore = -1;
+
+            for (let i = 0; i < lines.length; i++) {
+                const line = lines[i];
+                const lowerLine = line.toLowerCase();
+                let score = 0;
+                for (const keyword of keywords) {
+                    if (lowerLine.includes(keyword.toLowerCase())) {
+                        score++;
+                    }
+                }
+                if (score > bestScore) {
+                    bestScore = score;
+                    bestLine = line.trim();
+                }
+            }
+            if (bestScore === -1) {
+                for (let i = 0; i < lines.length; i++) {
+                    const line = lines[i].trim();
+                    if (line.length > 0) {
+                        bestLine = line;
+                        break;
+                    }
+                }
+            }
+
+            return bestLine.substring(0, this.maxPreviewLength);
+        } catch (error) {
+            return '';
+        }
     }
 
     private globToRegExp(glob: string): RegExp {

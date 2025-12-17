@@ -26,14 +26,16 @@ export interface SearchOptions {
 export type SearchFieldType = "symbol-definition" | "signature" | "exported-member" | "comment" | "code-body";
 
 export interface ScoreDetails {
-    contentScore: number;
-    filenameMultiplier: number;
-    depthMultiplier: number;
-    fieldWeight: number;
-    totalScore: number;
-    filenameMatchType: "exact" | "partial" | "none";
+    contentScore?: number;
+    filenameMultiplier?: number;
+    depthMultiplier?: number;
+    fieldWeight?: number;
+    totalScore?: number;
+    filenameMatchType?: "exact" | "partial" | "none";
     fieldType?: SearchFieldType;
     callGraphBoost?: number;
+    type?: string;
+    details?: Array<{ type: string; score: number }>;
 }
 
 export type CallType = "direct" | "method" | "constructor" | "callback" | "optional" | "unknown";
