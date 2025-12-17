@@ -352,7 +352,8 @@ export class SmartContextServer {
             this.dependencyGraph.getDependencies(absPath, 'downstream').then(edges => edges.map(e => e.to)),
             this.dependencyGraph.getDependencies(absPath, 'upstream').then(edges => edges.map(e => e.from))
         ]);
-
+        const normalizedOutgoingDeps = outgoingDeps.map(dep => this.normalizeRelativePath(dep));
+        const normalizedIncomingRefs = incomingRefs.map(ref => this.normalizeRelativePath(ref));
 
         let skeleton = '// Skeleton generation failed or not applicable for this file type.';
         try {
@@ -402,12 +403,12 @@ export class SmartContextServer {
 
         const complexity = this.computeComplexity(content, symbols, metaAnalysis.indentSize, metaAnalysis.usesTabs);
         const usage: SmartFileProfile['usage'] = {
-            incomingCount: incomingRefs.length,
-            incomingFiles: incomingRefs.slice(0, 10),
-            outgoingCount: outgoingDeps.length,
-            outgoingFiles: outgoingDeps.slice(0, 10)
+            incomingCount: normalizedIncomingRefs.length,
+            incomingFiles: normalizedIncomingRefs.slice(0, 10),
+            outgoingCount: normalizedOutgoingDeps.length,
+            outgoingFiles: normalizedOutgoingDeps.slice(0, 10)
         };
-        const testFiles = this.detectTestFiles(incomingRefs);
+        const testFiles = this.detectTestFiles(normalizedIncomingRefs);
         if (testFiles.length > 0) {
             usage.testFiles = testFiles;
         }

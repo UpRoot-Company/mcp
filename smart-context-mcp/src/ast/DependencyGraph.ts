@@ -109,12 +109,27 @@ export class DependencyGraph {
 
         // Convert imports to dependency edges
         for (const imp of imports) {
-            const targetRelative = this.getNormalizedRelativePath(imp.from);
-            outgoing.push({
-                targetPath: targetRelative,
-                type: imp.importType,
-                metadata: { what: imp.what.join(', '), line: imp.line }
-            });
+            if (imp.resolvedPath) {
+                const targetRelative = this.getNormalizedRelativePath(imp.resolvedPath);
+                outgoing.push({
+                    targetPath: targetRelative,
+                    type: imp.importType,
+                    metadata: {
+                        what: imp.what.join(', '),
+                        line: imp.line,
+                        specifier: imp.specifier
+                    }
+                });
+            } else {
+                unresolved.push({
+                    specifier: imp.specifier,
+                    error: 'Module resolution failed',
+                    metadata: {
+                        what: imp.what.join(', '),
+                        line: imp.line
+                    }
+                });
+            }
         }
         
         // Store in database
@@ -128,7 +143,8 @@ export class DependencyGraph {
         // Update reverse index
         this.reverseIndex.removeImporter(relPath);
         for (const imp of imports) {
-            const targetRelative = this.getNormalizedRelativePath(imp.from);
+            if (!imp.resolvedPath) continue;
+            const targetRelative = this.getNormalizedRelativePath(imp.resolvedPath);
             this.reverseIndex.addImport(relPath, targetRelative);
         }
         this.lastRebuiltAt = Date.now();
@@ -144,13 +160,22 @@ export class DependencyGraph {
     ): Promise<DependencyEdge[]> {
         const relPath = this.getNormalizedRelativePath(filePath);
         const edges: DependencyEdge[] = [];
+        const wantsAbsolute = path.isAbsolute(filePath);
+
+        const formatPathValue = (p: string): string => {
+            const normalized = this.normalizePath(p);
+            if (!wantsAbsolute || path.isAbsolute(normalized) || !normalized) {
+                return normalized;
+            }
+            return this.normalizePath(path.join(this.rootPath, normalized));
+        };
 
         // Downstream (outgoing) - files this file imports
         if (direction === 'downstream' || direction === 'both') {
             const records = this.db.getDependencies(relPath, 'outgoing');
             edges.push(...records.map(r => ({
-                from: this.normalizePath(r.source),
-                to: this.normalizePath(r.target),
+                from: formatPathValue(r.source),
+                to: formatPathValue(r.target),
                 type: r.type,
                 what: (r.metadata?.what as string) || undefined,
                 line: (r.metadata?.line as number) || undefined
@@ -161,8 +186,8 @@ export class DependencyGraph {
         if (direction === 'upstream' || direction === 'both') {
             const records = this.db.getDependencies(relPath, 'incoming');
             edges.push(...records.map(r => ({
-                from: this.normalizePath(r.source),
-                to: this.normalizePath(r.target),
+                from: formatPathValue(r.source),
+                to: formatPathValue(r.target),
                 type: r.type,
                 what: (r.metadata?.what as string) || undefined,
                 line: (r.metadata?.line as number) || undefined

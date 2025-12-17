@@ -41,7 +41,7 @@ export class LanguageConfigLoader {
     private readonly configPath: string;
 
     constructor(private readonly rootPath: string) {
-                this.configPath = path.join(this.rootPath, ".mcp", "smart-context", "languages.json");
+        this.configPath = this.resolveConfigPath();
         this.config = this.loadConfig();
     }
 
@@ -73,6 +73,20 @@ export class LanguageConfigLoader {
     public dispose(): void {
         this.watcher?.close();
         this.watcher = undefined;
+    }
+
+    private resolveConfigPath(): string {
+        const primaryDir = path.join(this.rootPath, ".mcp", "smart-context");
+        const primary = path.join(primaryDir, "languages.json");
+        const legacy = path.join(this.rootPath, ".smart-context", "languages.json");
+
+        if (fs.existsSync(primary)) {
+            return primary;
+        }
+        if (fs.existsSync(legacy)) {
+            return legacy;
+        }
+        return primary;
     }
 
     private loadConfig(): LanguageConfig {

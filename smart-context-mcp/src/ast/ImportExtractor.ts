@@ -22,6 +22,11 @@ export class ImportExtractor {
    * Automatically detects TypeScript vs JavaScript
    */
   async extractImports(filePath: string): Promise<ImportInfo[]> {
+    const ext = path.extname(filePath).toLowerCase();
+    if (ext === '.json') {
+      return [];
+    }
+
     const source = await fs.promises.readFile(filePath, 'utf-8');
     const isTypeScript = this.isTypeScriptFile(filePath);
     
@@ -93,13 +98,8 @@ export class ImportExtractor {
     // Get module specifier (e.g., './foo', 'lodash')
     const moduleSpecifier = (node.moduleSpecifier as ts.StringLiteral).text;
     
-    // Resolve to absolute path
-    // Corrected argument order: resolve(contextPath, importPath)
+    // Resolve to absolute path (may be undefined if module not found)
     const resolvedPath = this.moduleResolver.resolve(contextPath, moduleSpecifier);
-    if (!resolvedPath) {
-      // console.warn(`[ImportExtractor] Could not resolve: ${moduleSpecifier} from ${contextPath}`);
-      return null;
-    }
     
     // Get line number
     const { line } = sourceFile.getLineAndCharacterOfPosition(node.getStart());
@@ -109,7 +109,8 @@ export class ImportExtractor {
     if (!importClause) {
       // Side-effect import: import './foo'
       return {
-        from: resolvedPath,
+        specifier: moduleSpecifier,
+        resolvedPath: resolvedPath ?? undefined,
         what: [],
         line: line + 1,
         importType: 'side-effect'
@@ -133,9 +134,15 @@ export class ImportExtractor {
         importType = 'namespace';
       } else if (ts.isNamedImports(importClause.namedBindings)) {
         // Named imports: import { a, b as c } from './foo'
+        const typeOnlyBindings: string[] = [];
+        const valueBindings: string[] = [];
         for (const element of importClause.namedBindings.elements) {
-          what.push(element.name.text);
+          const targetBucket = (importClause.isTypeOnly || element.isTypeOnly)
+            ? typeOnlyBindings
+            : valueBindings;
+          targetBucket.push(element.name.text);
         }
+        what.push(...typeOnlyBindings, ...valueBindings);
         if (importType !== 'default') {
           importType = 'named';
         }
@@ -143,7 +150,8 @@ export class ImportExtractor {
     }
     
     return {
-      from: resolvedPath,
+      specifier: moduleSpecifier,
+      resolvedPath: resolvedPath ?? undefined,
       what,
       line: line + 1,
       importType
@@ -170,12 +178,12 @@ export class ImportExtractor {
     
     const moduleSpecifier = expr.text;
     const resolvedPath = this.moduleResolver.resolve(contextPath, moduleSpecifier);
-    if (!resolvedPath) return null;
     
     const { line } = sourceFile.getLineAndCharacterOfPosition(node.getStart());
     
     return {
-      from: resolvedPath,
+      specifier: moduleSpecifier,
+      resolvedPath: resolvedPath ?? undefined,
       what: [node.name.text],
       line: line + 1,
       importType: 'default'
@@ -206,7 +214,6 @@ export class ImportExtractor {
           
           const moduleSpecifier = (callExpr.arguments[0] as ts.StringLiteral).text;
           const resolvedPath = this.moduleResolver.resolve(contextPath, moduleSpecifier);
-          if (!resolvedPath) continue;
           
           const { line } = sourceFile.getLineAndCharacterOfPosition(node.getStart());
           
@@ -223,7 +230,8 @@ export class ImportExtractor {
           }
           
           imports.push({
-            from: resolvedPath,
+            specifier: moduleSpecifier,
+            resolvedPath: resolvedPath ?? undefined,
             what,
             line: line + 1,
             importType: what.length > 1 ? 'named' : 'default'
@@ -240,6 +248,49 @@ export class ImportExtractor {
    */
   private extractJavaScriptImports(source: string, filePath: string): ImportInfo[] {
     const imports: ImportInfo[] = [];
+
+    const appendBindingNames = (binding: t.Node | null | undefined, bucket: string[]): void => {
+      if (!binding) return;
+      if (t.isIdentifier(binding)) {
+        bucket.push(binding.name);
+        return;
+      }
+      if (t.isObjectPattern(binding)) {
+        for (const prop of binding.properties) {
+          if (t.isObjectProperty(prop)) {
+            const value = prop.value;
+            if (t.isIdentifier(value)) {
+              bucket.push(value.name);
+            } else if (t.isAssignmentPattern(value) && t.isIdentifier(value.left)) {
+              bucket.push(value.left.name);
+            }
+          } else if (t.isRestElement(prop) && t.isIdentifier(prop.argument)) {
+            bucket.push(prop.argument.name);
+          }
+        }
+        return;
+      }
+      if (t.isArrayPattern(binding)) {
+        for (const element of binding.elements) {
+          if (!element) continue;
+          if (t.isIdentifier(element)) {
+            bucket.push(element.name);
+          } else if (t.isRestElement(element) && t.isIdentifier(element.argument)) {
+            bucket.push(element.argument.name);
+          } else if (t.isAssignmentPattern(element) && t.isIdentifier(element.left)) {
+            bucket.push(element.left.name);
+          }
+        }
+        return;
+      }
+      if (t.isAssignmentPattern(binding) && t.isIdentifier(binding.left)) {
+        bucket.push(binding.left.name);
+        return;
+      }
+      if (t.isRestElement(binding) && t.isIdentifier(binding.argument)) {
+        bucket.push(binding.argument.name);
+      }
+    };
     
     try {
       // Parse JavaScript/JSX with Babel
@@ -256,9 +307,8 @@ export class ImportExtractor {
         // Handle ES6 imports
         ImportDeclaration: (path: any) => {
           const node = path.node;
-          const moduleSpecifier = node.source.value;
+          const moduleSpecifier = node.source.value as string;
           const resolvedPath = this.moduleResolver.resolve(filePath, moduleSpecifier);
-          if (!resolvedPath) return;
           
           const what: string[] = [];
           let importType: ImportInfo['importType'] = 'named';
@@ -277,7 +327,8 @@ export class ImportExtractor {
           }
           
           imports.push({
-            from: resolvedPath,
+            specifier: moduleSpecifier,
+            resolvedPath: resolvedPath ?? undefined,
             what,
             line: node.loc?.start.line || 0,
             importType
@@ -294,22 +345,23 @@ export class ImportExtractor {
             
             const moduleSpecifier = node.arguments[0].value;
             const resolvedPath = this.moduleResolver.resolve(filePath, moduleSpecifier);
-            if (!resolvedPath) return;
             
-            // Try to extract variable name from parent
+            // Try to extract variable name(s) from parent
             const what: string[] = [];
-            const parent = path.parent;
-            
-            if (t.isVariableDeclarator(parent) &&
-                t.isIdentifier(parent.id)) {
-              what.push(parent.id.name);
+            const parentNode = path.parentPath?.node ?? path.parent;
+            if (t.isVariableDeclarator(parentNode)) {
+              appendBindingNames(parentNode.id, what);
             }
             
+            const isDestructured = t.isVariableDeclarator(parentNode) && !t.isIdentifier(parentNode.id);
+            const importType: ImportInfo['importType'] = (isDestructured || what.length > 1) ? 'named' : 'default';
+            
             imports.push({
-              from: resolvedPath,
+              specifier: moduleSpecifier,
+              resolvedPath: resolvedPath ?? undefined,
               what,
               line: node.loc?.start.line || 0,
-              importType: 'default'
+              importType
             });
           }
         }

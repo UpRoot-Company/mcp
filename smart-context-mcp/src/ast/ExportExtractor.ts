@@ -1,5 +1,6 @@
 import * as ts from 'typescript';
 import * as fs from 'fs';
+import * as path from 'path';
 import type { ExportInfo } from '../indexing/ProjectIndex.js';
 import { ModuleResolver } from './ModuleResolver.js';
 
@@ -17,6 +18,11 @@ export class ExportExtractor {
    * Extract all exports from a file
    */
   async extractExports(filePath: string): Promise<ExportInfo[]> {
+    const ext = path.extname(filePath).toLowerCase();
+    if (ext === '.json') {
+      return [];
+    }
+
     const source = await fs.promises.readFile(filePath, 'utf-8');
     return this.extractTypeScriptExports(source, filePath);
   }

@@ -61,10 +61,10 @@ describe('IndexDatabase', () => {
         });
 
         const outgoing = db.getDependencies('src/main.ts', 'outgoing');
-        expect(outgoing).toContain('src/utils.ts');
+        expect(outgoing.map(dep => dep.target)).toContain('src/utils.ts');
 
         const incoming = db.getDependencies('src/utils.ts', 'incoming');
-        expect(incoming).toContain('src/main.ts');
+        expect(incoming.map(dep => dep.source)).toContain('src/main.ts');
 
         const unresolved = db.listUnresolved();
         expect(unresolved).toHaveLength(1);

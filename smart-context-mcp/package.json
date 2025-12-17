@@ -41,7 +41,9 @@
     "testPathIgnorePatterns": [
       "/node_modules/",
       "/backup/",
-      "/dist/tests/performance/"
+      "/dist/tests/performance/",
+      "/dist/tests/fixtures/",
+      "/src/tests/fixtures/"
     ],
     "testEnvironment": "node"
   },

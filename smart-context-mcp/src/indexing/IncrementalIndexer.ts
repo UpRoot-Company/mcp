@@ -44,6 +44,7 @@ export class IncrementalIndexer {
     private processing = false;
     private watcher?: chokidar.FSWatcher;
     private stopped = false;
+    private started = false;
     private initialScanPromise?: Promise<void>;
     private currentPauseMs = DEFAULT_BATCH_PAUSE_MS;
     private recentEventCount = 0;
@@ -76,6 +77,12 @@ export class IncrementalIndexer {
     }
 
     public async start(): Promise<void> {
+        if (this.started) {
+            console.warn('[IncrementalIndexer] start() called while already running');
+            return;
+        }
+
+        this.stopped = false;
         console.log('[IncrementalIndexer] Starting with persistent index support...');
         
         // Step 1: Load existing index (if available)
@@ -87,6 +94,8 @@ export class IncrementalIndexer {
         } else {
             this.currentIndex = this.indexManager.createEmptyIndex();
         }
+
+        this.started = true;
 
         if (this.options.initialScan !== false) {
             this.initialScanPromise = this.enqueueInitialScan();
@@ -120,7 +129,12 @@ export class IncrementalIndexer {
             private periodicPersistenceTimer?: NodeJS.Timeout;
 
     public async stop(): Promise<void> {
+        if (this.stopped) {
+            return;
+        }
+
         this.stopped = true;
+        this.started = false;
         this.unregisterConfigurationEvents();
         
         // Cancel pending persistence
@@ -213,7 +227,9 @@ export class IncrementalIndexer {
             console.info(`[IncrementalIndexer] High queue depth: ${totalDepth} (pause=${this.currentPauseMs}ms)`);
             this.lastDepthLogAt = now;
         }
-        void this.processQueue();
+        if (this.started) {
+            void this.processQueue();
+        }
     }
 
     private async processQueue(): Promise<void> {
@@ -483,7 +499,13 @@ export class IncrementalIndexer {
         if (!this.isWithinRoot(absolutePath)) return true;
         const relative = path.relative(this.rootPath, absolutePath);
         if (!relative) return false;
-                if (relative.startsWith('.mcp')) return true;
+
+        const normalized = relative.split(path.sep).join('/');
+        const ignoredRoots = ['.mcp', '.smart-context', '.smart-context-index'];
+        if (ignoredRoots.some(root => normalized === root || normalized.startsWith(`${root}/`))) {
+            return true;
+        }
+
         return this.symbolIndex.shouldIgnore(relative);
     }
 
@@ -600,15 +622,18 @@ export class IncrementalIndexer {
         
         // Restore dependencies to DependencyGraph
         for (const [filePath, entry] of Object.entries(index.files)) {
-            if (entry.imports && entry.imports.length > 0) {
-                const edges = entry.imports.map(imp => ({
+            const resolvedEdges = entry.imports
+                ?.filter(imp => !!imp.resolvedPath)
+                .map(imp => ({
                     from: filePath,
-                    to: imp.from,
+                    to: imp.resolvedPath!,
                     type: 'import' as const,
                     what: imp.what.join(', '),
                     line: imp.line
-                }));
-                await this.dependencyGraph.restoreEdges(filePath, edges);
+                })) ?? [];
+
+            if (resolvedEdges.length > 0) {
+                await this.dependencyGraph.restoreEdges(filePath, resolvedEdges);
             }
         }
         

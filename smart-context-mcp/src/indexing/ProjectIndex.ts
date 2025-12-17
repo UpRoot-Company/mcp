@@ -48,8 +48,11 @@ export interface FileIndexEntry {
 }
 
 export interface ImportInfo {
-  /** Resolved absolute path to imported file */
-  from: string;
+  /** Raw specifier exactly as it appeared in source (e.g., './foo') */
+  specifier: string;
+  
+  /** Resolved absolute path to imported file if it could be resolved */
+  resolvedPath?: string;
   
   /** Imported identifiers (e.g., ["Foo", "Bar"] for named imports) */
   what: string[];

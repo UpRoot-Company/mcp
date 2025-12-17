@@ -1,8 +1,9 @@
 import * as fs from 'fs/promises';
+import * as fssync from 'fs';
 import * as path from 'path';
 import { ProjectIndex, FileIndexEntry } from './ProjectIndex.js';
 
-const CURRENT_INDEX_VERSION = '1.0.0';
+const CURRENT_INDEX_VERSION = '1.1.0';
 
 /**
  * Manages persistent project index storage and retrieval
@@ -10,18 +11,35 @@ const CURRENT_INDEX_VERSION = '1.0.0';
 export class ProjectIndexManager {
   private projectRoot: string;
   private indexPath: string;
+  private readonly preferredIndexPath: string;
+  private readonly legacyIndexPath: string;
   
   constructor(projectRoot: string) {
     this.projectRoot = projectRoot;
-        this.indexPath = path.join(projectRoot, '.mcp', 'smart-context', 'index.json');
+    this.preferredIndexPath = path.join(projectRoot, '.smart-context-index', 'index.json');
+    this.legacyIndexPath = path.join(projectRoot, '.mcp', 'smart-context', 'index.json');
+    this.indexPath = this.resolveExistingIndexPath();
   }
   
+  private resolveExistingIndexPath(): string {
+    if (fssync.existsSync(this.preferredIndexPath)) {
+      return this.preferredIndexPath;
+    }
+    if (fssync.existsSync(this.legacyIndexPath)) {
+      return this.legacyIndexPath;
+    }
+    return this.preferredIndexPath;
+  }
+
   /**
    * Load persisted index from disk
    * Returns null if index doesn't exist or version mismatch
    */
   async loadPersistedIndex(): Promise<ProjectIndex | null> {
     try {
+      // Determine which index to load (prefer new path)
+      this.indexPath = this.resolveExistingIndexPath();
+
       // Check if index file exists
       await fs.access(this.indexPath);
       
@@ -59,12 +77,15 @@ export class ProjectIndexManager {
    */
   async persistIndex(index: ProjectIndex): Promise<void> {
     try {
+      const targetPath = this.preferredIndexPath;
+
       // Ensure directory exists
-      await fs.mkdir(path.dirname(this.indexPath), { recursive: true });
+      await fs.mkdir(path.dirname(targetPath), { recursive: true });
       
       // Write JSON with pretty formatting (for debugging)
       const json = JSON.stringify(index, null, 2);
-      await fs.writeFile(this.indexPath, json, 'utf-8');
+      await fs.writeFile(targetPath, json, 'utf-8');
+      this.indexPath = targetPath;
       
       console.log(`[ProjectIndex] Persisted index with ${Object.keys(index.files).length} files`);
       
@@ -156,13 +177,16 @@ export class ProjectIndexManager {
       }
     }
     
-    // Update reverse imports
+    // Update reverse imports (resolved entries only)
     for (const imp of entry.imports) {
-      if (!index.reverseImports[imp.from]) {
-        index.reverseImports[imp.from] = [];
+      if (!imp.resolvedPath) {
+        continue;
       }
-      if (!index.reverseImports[imp.from].includes(filePath)) {
-        index.reverseImports[imp.from].push(filePath);
+      if (!index.reverseImports[imp.resolvedPath]) {
+        index.reverseImports[imp.resolvedPath] = [];
+      }
+      if (!index.reverseImports[imp.resolvedPath].includes(filePath)) {
+        index.reverseImports[imp.resolvedPath].push(filePath);
       }
     }
   }
@@ -190,11 +214,14 @@ export class ProjectIndexManager {
     
     // Remove from reverse imports
     for (const imp of entry.imports) {
-      const paths = index.reverseImports[imp.from];
+      if (!imp.resolvedPath) {
+        continue;
+      }
+      const paths = index.reverseImports[imp.resolvedPath];
       if (paths) {
-        index.reverseImports[imp.from] = paths.filter(p => p !== filePath);
-        if (index.reverseImports[imp.from].length === 0) {
-          delete index.reverseImports[imp.from];
+        index.reverseImports[imp.resolvedPath] = paths.filter(p => p !== filePath);
+        if (index.reverseImports[imp.resolvedPath].length === 0) {
+          delete index.reverseImports[imp.resolvedPath];
         }
       }
     }

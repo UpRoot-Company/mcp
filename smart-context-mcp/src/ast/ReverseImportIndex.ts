@@ -18,10 +18,13 @@ export class ReverseImportIndex {
     
     for (const [filePath, imports] of projectFiles.entries()) {
       for (const imp of imports) {
-        if (!this.index.has(imp.from)) {
-          this.index.set(imp.from, new Set());
+        if (!imp.resolvedPath) {
+          continue;
         }
-        this.index.get(imp.from)!.add(filePath);
+        if (!this.index.has(imp.resolvedPath)) {
+          this.index.set(imp.resolvedPath, new Set());
+        }
+        this.index.get(imp.resolvedPath)!.add(filePath);
       }
     }
     
