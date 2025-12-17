@@ -265,7 +265,7 @@ export class IncrementalIndexer {
                     continue;
                 }
 
-                                try {
+                try {
                     const symbols = await this.symbolIndex.getSymbolsForFile(filePath);
                     const imports = await this.importExtractor.extractImports(filePath);
                     const exports = await this.exportExtractor.extractExports(filePath);
@@ -299,7 +299,7 @@ export class IncrementalIndexer {
         this.processing = false;
     }
 
-        private async enqueueInitialScan(): Promise<void> {
+    private async enqueueInitialScan(): Promise<void> {
         const stack: string[] = [this.rootPath];
         while (stack.length > 0 && !this.stopped) {
             const current = stack.pop()!;
@@ -310,6 +310,7 @@ export class IncrementalIndexer {
                 continue;
             }
 
+            const supportedFiles: string[] = [];
             for (const entry of entries) {
                 const fullPath = path.join(current, entry.name);
 
@@ -319,14 +320,17 @@ export class IncrementalIndexer {
                 if (entry.isDirectory()) {
                     stack.push(fullPath);
                 } else if (this.symbolIndex.isSupported(fullPath)) {
-                    // Check if file needs reindexing
-                    if (await this.shouldReindex(fullPath)) {
-                        this.enqueuePath(fullPath, 'low');
-                    } else {
-                        // console.debug(`[IncrementalIndexer] Skipping unchanged file: ${fullPath}`);
-                    }
+                    supportedFiles.push(fullPath);
                 }
             }
+
+            if (supportedFiles.length > 0) {
+                const filesToIndex = await this.batchShouldReindex(supportedFiles);
+                for (const filePath of filesToIndex) {
+                    this.enqueuePath(filePath, 'low');
+                }
+            }
+
             await this.sleep(0);
         }
     }
@@ -617,21 +621,35 @@ export class IncrementalIndexer {
         }
     }
 
+    private async batchShouldReindex(files: string[]): Promise<string[]> {
+        const results = await Promise.all(
+            files.map(async file => {
+                if (this.stopped) {
+                    return null;
+                }
+
+                const needsReindex = await this.shouldReindex(file);
+                return needsReindex ? file : null;
+            })
+        );
+
+        return results.filter((filePath): filePath is string => filePath !== null);
+    }
+
     private async shouldReindex(filePath: string): Promise<boolean> {
         if (!this.currentIndex) return true;
-        
+
         // Normalize path to match keys in currentIndex.files
         let normalized = path.resolve(filePath);
         try {
-            const realpathSync = (fs as any).realpathSync?.native ?? fs.realpathSync;
-            normalized = realpathSync(normalized);
+            normalized = await fs.promises.realpath(normalized);
         } catch {
-            // Fallback to resolved path when realpath fails
+            normalized = path.resolve(filePath);
         }
-        
+
         const entry = this.currentIndex.files[normalized];
         if (!entry) return true; // New file
-        
+
         try {
             const stat = await fs.promises.stat(filePath);
             return stat.mtimeMs > entry.mtime; // Changed if mtime newer
@@ -642,14 +660,8 @@ export class IncrementalIndexer {
 
     private async restoreFromPersistedIndex(index: ProjectIndex): Promise<void> {
         console.log(`[IncrementalIndexer] Restoring from persisted index (${Object.keys(index.files).length} files)...`);
-        
-        // Restore symbols to SymbolIndex
-        for (const [filePath, entry] of Object.entries(index.files)) {
-            this.symbolIndex.restoreFromCache(filePath, entry.symbols, entry.mtime);
-        }
-        
-        // Restore dependencies to DependencyGraph
-        for (const [filePath, entry] of Object.entries(index.files)) {
+
+        const restorePromises = Object.entries(index.files).map(([filePath, entry]) => {
             const resolvedEdges = entry.imports
                 ?.filter(imp => !!imp.resolvedPath)
                 .map(imp => ({
@@ -660,11 +672,16 @@ export class IncrementalIndexer {
                     line: imp.line
                 })) ?? [];
 
-            if (resolvedEdges.length > 0) {
-                await this.dependencyGraph.restoreEdges(filePath, resolvedEdges);
-            }
-        }
-        
+            return Promise.all([
+                Promise.resolve(this.symbolIndex.restoreFromCache(filePath, entry.symbols, entry.mtime)),
+                resolvedEdges.length > 0
+                    ? this.dependencyGraph.restoreEdges(filePath, resolvedEdges)
+                    : Promise.resolve()
+            ]);
+        });
+
+        await Promise.all(restorePromises);
+
         console.log('[IncrementalIndexer] Restore complete');
     }
 
