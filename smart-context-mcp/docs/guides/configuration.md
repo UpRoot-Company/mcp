@@ -18,6 +18,9 @@ Control Smart Context behavior via environment variables.
 | `SMART_CONTEXT_DEBUG` | boolean | `false` | Enable debug logging to console |
 | `SMART_CONTEXT_ENGINE_PROFILE` | enum | `production` | `production` \| `ci` \| `test` (see below) |
 | `SMART_CONTEXT_LOG_LEVEL` | enum | `info` | `debug` \| `info` \| `warn` \| `error` |
+| `SMART_CONTEXT_ALLOW_STDOUT_LOGS` | boolean | `false` | Write logs to stdout (disables MCP-safe log redirection). Use only outside MCP hosts. |
+
+> **Stdout guard:** By default Smart Context routes `console.log`/`console.info`/`console.debug` output to `stderr` so MCP transports can use stdout exclusively for protocol frames. Set `SMART_CONTEXT_ALLOW_STDOUT_LOGS=true` only when you need legacy stdout logging (for example when running the CLI outside an MCP host).
 
 ### Performance Tuning
 
