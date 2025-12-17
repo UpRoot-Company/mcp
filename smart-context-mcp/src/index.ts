@@ -19,6 +19,7 @@ import { EditorEngine, AmbiguousMatchError } from "./engine/Editor.js";
 import { HistoryEngine } from "./engine/History.js";
 import { EditCoordinator } from "./engine/EditCoordinator.js";
 import { SkeletonGenerator } from "./ast/SkeletonGenerator.js";
+import { SkeletonCache } from "./ast/SkeletonCache.js";
 import { FallbackResolver } from "./resolution/FallbackResolver.js";
 import { ErrorEnhancer } from "./errors/ErrorEnhancer.js";
 import { AstManager } from "./ast/AstManager.js";
@@ -33,7 +34,7 @@ import { FileProfiler, FileMetadataAnalysis } from "./engine/FileProfiler.js";
 import { AgentWorkflowGuidance } from "./engine/AgentPlaybook.js";
 import { ClusterSearchEngine, ClusterSearchOptions, ClusterExpansionOptions } from "./engine/ClusterSearch/index.js";
 import { BuildClusterOptions, ExpandableRelationship } from "./engine/ClusterSearch/ClusterBuilder.js";
-import { FileSearchResult, ReadFragmentResult, EditResult, Edit, EngineConfig, SmartFileProfile, SymbolInfo, ToolSuggestion, ImpactPreview, BatchEditGuidance, ReadCodeResult, ReadCodeArgs, SearchProjectResult, SearchProjectArgs, AnalyzeRelationshipResult, EditCodeArgs, EditCodeResult, EditCodeEdit, ManageProjectResult, ManageProjectArgs, AnalyzeRelationshipArgs, ReadCodeView, SearchProjectType, ResolvedRelationshipTarget, AnalyzeRelationshipDirection, AnalyzeRelationshipNode, AnalyzeRelationshipEdge, LineRange, DiffMode, SafetyLevel, RefactoringContext, NextActionHint, BatchOpportunity, SuggestedBatchEdit } from "./types.js";
+import { FileSearchResult, ReadFragmentResult, EditResult, Edit, EngineConfig, SmartFileProfile, SymbolInfo, ToolSuggestion, ImpactPreview, BatchEditGuidance, ReadCodeResult, ReadCodeArgs, SearchProjectResult, SearchProjectArgs, AnalyzeRelationshipResult, EditCodeArgs, EditCodeResult, EditCodeEdit, ManageProjectResult, ManageProjectArgs, AnalyzeRelationshipArgs, ReadCodeView, SearchProjectType, ResolvedRelationshipTarget, AnalyzeRelationshipDirection, AnalyzeRelationshipNode, AnalyzeRelationshipEdge, LineRange, DiffMode, SafetyLevel, RefactoringContext, NextActionHint, BatchOpportunity, SuggestedBatchEdit, SkeletonOptions } from "./types.js";
 import { FileStats, IFileSystem, NodeFileSystem } from "./platform/FileSystem.js";
 import { AstAwareDiff } from "./engine/AstAwareDiff.js";
 import { IndexDatabase } from "./indexing/IndexDatabase.js";
@@ -62,6 +63,7 @@ export class SmartContextServer {
     private historyEngine: HistoryEngine;
     private editCoordinator: EditCoordinator;
     private skeletonGenerator: SkeletonGenerator;
+    private skeletonCache: SkeletonCache;
     private fallbackResolver: FallbackResolver;
     private astManager: AstManager;
     private symbolIndex: SymbolIndex;
@@ -139,6 +141,7 @@ export class SmartContextServer {
         this.pathNormalizer = new PathNormalizer(this.rootPath);
 
         this.skeletonGenerator = new SkeletonGenerator();
+        this.skeletonCache = new SkeletonCache(this.rootPath);
         this.astManager = AstManager.getInstance();
         this.indexDatabase = new IndexDatabase(this.rootPath);
         this.transactionLog = new TransactionLog(this.indexDatabase.getHandle());
@@ -346,6 +349,16 @@ export class SmartContextServer {
         return relative.replace(/\\/g, '/');
     }
 
+    private async generateSkeletonWithCache(
+        absPath: string,
+        content: string,
+        options: SkeletonOptions = {}
+    ): Promise<string> {
+        return this.skeletonCache.getSkeleton(absPath, options, (filePath, opts) =>
+            this.skeletonGenerator.generateSkeleton(filePath, content, opts)
+        );
+    }
+
     private async buildSmartFileProfile(absPath: string, content: string, stats: FileStats | fs.Stats): Promise<SmartFileProfile> {
         await this.dependencyGraph.ensureBuilt();
         const relativePath = path.relative(this.rootPath, absPath) || path.basename(absPath);
@@ -358,7 +371,7 @@ export class SmartContextServer {
 
         let skeleton = '// Skeleton generation failed or not applicable for this file type.';
         try {
-            skeleton = await this.skeletonGenerator.generateSkeleton(absPath, content);
+            skeleton = await this.generateSkeletonWithCache(absPath, content);
         } catch (error: any) {
             if (content.length < 5000) {
                 skeleton = `// Skeleton generation failed: ${error?.message || 'unknown error'}.\n${content}`;
@@ -1001,7 +1014,7 @@ export class SmartContextServer {
                 break;
             }
             case "skeleton": {
-                payload = await this.skeletonGenerator.generateSkeleton(absPath, content, args.skeletonOptions);
+                payload = await this.generateSkeletonWithCache(absPath, content, args.skeletonOptions);
                 break;
             }
             case "fragment": {
@@ -1819,6 +1832,7 @@ export class SmartContextServer {
                     this.symbolIndex.clearCache();
                     this.callGraphBuilder.clearCaches();
                     this.typeDependencyTracker.clearCaches();
+                    await this.skeletonCache.clearAll();
 
                     if (shouldRestartIndexer) {
                         console.debug('[SmartContextServer] Starting incremental indexer for full scan...');
@@ -2449,7 +2463,7 @@ export class SmartContextServer {
                         const structure = await this.skeletonGenerator.generateStructureJson(absPath, content);
                         return { content: [{ type: "text", text: JSON.stringify(structure, null, 2) }] };
                     } else {
-                        const skeleton = await this.skeletonGenerator.generateSkeleton(absPath, content);
+                        const skeleton = await this.generateSkeletonWithCache(absPath, content);
                         return { content: [{ type: "text", text: skeleton }] };
                     }
                 }
