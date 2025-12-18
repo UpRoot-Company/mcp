@@ -1,8 +1,8 @@
 import * as path from "path";
 import { performance } from "perf_hooks";
 import { MemoryFileSystem } from "../platform/FileSystem.js";
-import { SearchEngine, SymbolIndex } from "../engine/Search.js";
-import { SymbolInfo } from "../types.js";
+import { SearchEngine } from "../engine/Search.js";
+import { SymbolInfo, SymbolIndex } from "../types.js";
 
 const joinLines = (lines: string[]): string => lines.join("\n");
 

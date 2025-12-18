@@ -24,7 +24,7 @@ export class SkeletonCache {
         ttlMs = 60_000
     ) {
         this.memoryCache = new LRUCache(memoryCacheSize, ttlMs);
-        this.diskCacheDir = path.join(projectRoot, '.smart-context-cache', 'skeletons');
+        this.diskCacheDir = path.join(projectRoot, '.mcp', 'smart-context', 'skeletons');
     }
 
     public async getSkeleton(

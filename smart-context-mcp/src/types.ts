@@ -366,6 +366,11 @@ export interface ExportSymbol extends BaseSymbolInfo {
 
 export type SymbolInfo = DefinitionSymbol | ImportSymbol | ExportSymbol;
 
+export interface SymbolIndex {
+    getSymbolsForFile(filePath: string): Promise<SymbolInfo[]>;
+    getAllSymbols(): Promise<Map<string, SymbolInfo[]>>;
+}
+
 export type CallConfidence = "definite" | "possible" | "inferred";
 
 export interface CallGraphEdge {
