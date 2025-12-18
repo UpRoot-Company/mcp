@@ -41,6 +41,7 @@ interface Match {
     matchType: 'exact' | 'whitespace-fuzzy' | 'levenshtein' | 'normalization';
     normalizationLevel?: NormalizationLevel;
     confidence?: MatchConfidence;
+    escapeVariant?: EscapeVariantMode;
 }
 
 export class AmbiguousMatchError extends Error {
@@ -69,6 +70,13 @@ export class MatchNotFoundError extends Error {
 
 interface ApplyEditsOptions {
     diffMode?: DiffMode;
+}
+
+type EscapeVariantMode = "raw" | "decoded" | "encoded";
+
+interface EditVariant {
+    edit: Edit;
+    mode: EscapeVariantMode;
 }
 
 export class EditorEngine {
@@ -132,6 +140,175 @@ export class EditorEngine {
 
     private escapeRegExp(value: string): string {
         return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    }
+
+    private decodeEscapeSequences(value: string): string {
+        if (!value.includes("\\")) {
+            return value;
+        }
+        let result = "";
+        for (let i = 0; i < value.length; i++) {
+            const char = value[i];
+            if (char !== "\\" || i === value.length - 1) {
+                result += char;
+                continue;
+            }
+            const next = value[i + 1];
+            switch (next) {
+                case "n":
+                    result += "\n";
+                    i++;
+                    break;
+                case "r":
+                    result += "\r";
+                    i++;
+                    break;
+                case "t":
+                    result += "\t";
+                    i++;
+                    break;
+                case "0":
+                    result += "\0";
+                    i++;
+                    break;
+                case "b":
+                    result += "\b";
+                    i++;
+                    break;
+                case "f":
+                    result += "\f";
+                    i++;
+                    break;
+                case "v":
+                    result += "\v";
+                    i++;
+                    break;
+                case "\\":
+                    result += "\\";
+                    i++;
+                    break;
+                case "\"":
+                    result += "\"";
+                    i++;
+                    break;
+                case "'":
+                    result += "'";
+                    i++;
+                    break;
+                case "`":
+                    result += "`";
+                    i++;
+                    break;
+                case "u": {
+                    const hex = value.substring(i + 2, i + 6);
+                    if (/^[0-9a-fA-F]{4}$/.test(hex)) {
+                        result += String.fromCharCode(parseInt(hex, 16));
+                        i += 5;
+                        break;
+                    }
+                    result += "\\" + next;
+                    break;
+                }
+                case "x": {
+                    const hex = value.substring(i + 2, i + 4);
+                    if (/^[0-9a-fA-F]{2}$/.test(hex)) {
+                        result += String.fromCharCode(parseInt(hex, 16));
+                        i += 3;
+                        break;
+                    }
+                    result += "\\" + next;
+                    break;
+                }
+                default:
+                    result += "\\" + next;
+                    i++;
+                    break;
+            }
+        }
+        return result;
+    }
+
+    private encodeEscapeSequences(value: string): string {
+        let changed = false;
+        let result = "";
+        for (const char of value) {
+            switch (char) {
+                case "\n":
+                    result += "\\n";
+                    changed = true;
+                    break;
+                case "\r":
+                    result += "\\r";
+                    changed = true;
+                    break;
+                case "\t":
+                    result += "\\t";
+                    changed = true;
+                    break;
+                case "\0":
+                    result += "\\0";
+                    changed = true;
+                    break;
+                default:
+                    result += char;
+                    break;
+            }
+        }
+        return changed ? result : value;
+    }
+
+    private generateEscapeAwareVariants(edit: Edit): EditVariant[] {
+        const variants: EditVariant[] = [{ edit, mode: "raw" }];
+
+        const decodedTarget = this.decodeEscapeSequences(edit.targetString);
+        const decodedBefore = typeof edit.beforeContext === "string"
+            ? this.decodeEscapeSequences(edit.beforeContext)
+            : undefined;
+        const decodedAfter = typeof edit.afterContext === "string"
+            ? this.decodeEscapeSequences(edit.afterContext)
+            : undefined;
+
+        if (
+            decodedTarget !== edit.targetString ||
+            decodedBefore !== edit.beforeContext ||
+            decodedAfter !== edit.afterContext
+        ) {
+            variants.push({
+                edit: {
+                    ...edit,
+                    targetString: decodedTarget,
+                    beforeContext: decodedBefore,
+                    afterContext: decodedAfter
+                },
+                mode: "decoded"
+            });
+        }
+
+        const encodedTarget = this.encodeEscapeSequences(edit.targetString);
+        const encodedBefore = typeof edit.beforeContext === "string"
+            ? this.encodeEscapeSequences(edit.beforeContext)
+            : undefined;
+        const encodedAfter = typeof edit.afterContext === "string"
+            ? this.encodeEscapeSequences(edit.afterContext)
+            : undefined;
+
+        if (
+            encodedTarget !== edit.targetString ||
+            encodedBefore !== edit.beforeContext ||
+            encodedAfter !== edit.afterContext
+        ) {
+            variants.push({
+                edit: {
+                    ...edit,
+                    targetString: encodedTarget,
+                    beforeContext: encodedBefore,
+                    afterContext: encodedAfter
+                },
+                mode: "encoded"
+            });
+        }
+
+        return variants;
     }
 
     private trigramKeys(value: string): Set<string> {
@@ -284,7 +461,14 @@ export class EditorEngine {
             case "structural":
             default: {
                 const tokens = normalizedTarget.replace(/([^a-zA-Z0-9_])/g, " $1 ").split(/\s+/).filter(t => t.length > 0);
-                const pattern = tokens.map(t => this.escapeRegExp(t)).join("\\s*");
+                const pattern = tokens
+                    .map(token => {
+                        if (token === '"' || token === "'" || token === "`") {
+                            return "[\"'`]";
+                        }
+                        return this.escapeRegExp(token);
+                    })
+                    .join("\\s*");
                 return new RegExp(pattern, "g");
             }
         }
@@ -642,6 +826,41 @@ export class EditorEngine {
         });
     }
 
+    private findMatchWithEscapeVariants(content: string, edit: Edit, lineCounter: LineCounter): Match {
+        const variants = this.generateEscapeAwareVariants(edit);
+        const attemptedModes: EscapeVariantMode[] = [];
+        let primaryError: MatchNotFoundError | undefined;
+        let lastError: MatchNotFoundError | undefined;
+
+        for (const variant of variants) {
+            attemptedModes.push(variant.mode);
+            try {
+                const match = this.findMatch(content, variant.edit, lineCounter);
+                match.escapeVariant = variant.mode;
+                return match;
+            } catch (error) {
+                if (error instanceof MatchNotFoundError) {
+                    if (!primaryError) {
+                        primaryError = error;
+                    }
+                    lastError = error;
+                    continue;
+                }
+                throw error;
+            }
+        }
+
+        const failure = primaryError ?? lastError;
+        if (failure) {
+            const suffix = `\n\nTried escape-aware variants (modes: ${attemptedModes.join(", ")}), but none matched the target string.`;
+            throw new MatchNotFoundError(`${failure.message}${suffix}`);
+        }
+
+        throw new MatchNotFoundError(
+            `Unable to locate target "${edit.targetString}" even after trying escape-aware variants.`
+        );
+    }
+
     private findMatch(content: string, edit: Edit, lineCounter: LineCounter): Match {
         let matches: Match[] = [];
         const normalizationDiagnostics: { level: NormalizationLevel; matchCount: number }[] = [];
@@ -843,7 +1062,7 @@ export class EditorEngine {
             contextFuzziness: edit.contextFuzziness
         };
 
-        const anchorMatch = this.findMatch(content, anchorEdit, lineCounter);
+        const anchorMatch = this.findMatchWithEscapeVariants(content, anchorEdit, lineCounter);
         const anchorLine = anchorMatch.lineNumber;
         let insertIndex: number;
         let lineNumber = anchorLine;
@@ -1006,7 +1225,7 @@ export class EditorEngine {
                 }
             } else {
                 try {
-                    const match = this.findMatch(originalContent, edit, lineCounter);
+                    const match = this.findMatchWithEscapeVariants(originalContent, edit, lineCounter);
                     this.validateExpectedHash(edit, originalContent, match, lineCounter);
                     plannedMatches.push(match);
                 } catch (error) {
