@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { SymbolInfo } from '../types.js';
 import { MigrationRunner } from "./MigrationRunner.js";
+import { PathManager } from "../utils/PathManager.js";
 
 export interface FileRecord {
     id: number;
@@ -57,7 +58,7 @@ export class IndexDatabase {
             dbPath = this.ensureDataDir();
             this.db = new Database(dbPath);
         } catch (error) {
-            console.error(`[IndexDatabase] Failed to open database at ${path.join(this.rootPath, '.mcp', 'smart-context')}:`, error);
+            console.error(`[IndexDatabase] Failed to open database:`, error);
             console.error('[IndexDatabase] Falling back to in-memory database. Persistence will be disabled.');
             this.db = new Database(':memory:');
         }
@@ -93,7 +94,7 @@ export class IndexDatabase {
     }
 
     private ensureDataDir(): string {
-        const dataDir = path.join(this.rootPath, '.mcp', 'smart-context');
+        const dataDir = PathManager.getIndexDir();
         fs.mkdirSync(dataDir, { recursive: true });
         return path.join(dataDir, 'index.db');
     }

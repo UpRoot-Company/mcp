@@ -7,6 +7,7 @@ import { IndexDatabase } from './IndexDatabase.js';
 import { ModuleResolver } from '../ast/ModuleResolver.js';
 import { ConfigurationEvent, ConfigurationManager } from '../config/ConfigurationManager.js';
 import { metrics } from "../utils/MetricsCollector.js";
+import { PathManager } from "../utils/PathManager.js";
 
 import { ProjectIndexManager } from './ProjectIndexManager.js';
 import type { ProjectIndex, FileIndexEntry } from './ProjectIndex.js';
@@ -83,25 +84,27 @@ export class IncrementalIndexer {
             console.warn('[IncrementalIndexer] start() called while already running');
             return;
         }
-
+        this.started = true;
         this.stopped = false;
+
         console.log('[IncrementalIndexer] Starting with persistent index support...');
-        
-        // Step 1: Load existing index (if available)
+
+        // 1. Try to load existing index
         this.currentIndex = await this.indexManager.loadPersistedIndex();
-        
-        // Step 2: If index exists, restore in-memory state
+
         if (this.currentIndex) {
+            // Restore in-memory state
             await this.restoreFromPersistedIndex(this.currentIndex);
         } else {
             this.currentIndex = this.indexManager.createEmptyIndex();
         }
 
-        this.started = true;
-
+        // 2. Initial scan
         if (this.options.initialScan !== false) {
             this.initialScanPromise = this.enqueueInitialScan();
         }
+
+        // 3. Start watcher
         if (this.options.watch !== false) {
             this.watcher = chokidar.watch(this.rootPath, {
                 ignoreInitial: true,
@@ -114,18 +117,12 @@ export class IncrementalIndexer {
                 atomic: true
             });
 
-            try {
-                this.watcher.add(path.join(this.rootPath, IGNORE_FILE));
-            } catch {
-                // ignore if .gitignore doesn't exist yet
-            }
+            // Watch ignore file
+            this.watcher.add(path.join(this.rootPath, IGNORE_FILE));
 
+            // Watch config files
             for (const file of CONFIG_FILES) {
-                try {
-                    this.watcher.add(path.join(this.rootPath, file));
-                } catch {
-                    // config files are optional
-                }
+                this.watcher.add(path.join(this.rootPath, file));
             }
 
             this.watcher.on('add', file => this.enqueuePath(file, 'medium'));
@@ -137,34 +134,27 @@ export class IncrementalIndexer {
             });
         }
 
-        if (this.configurationManager && !this.configEventsRegistered) {
-            this.registerConfigurationEvents();
-        }
+        this.registerConfigurationEvents();
+        this.startPeriodicPersistence();
     }
 
-            private periodicPersistenceTimer?: NodeJS.Timeout;
+    private periodicPersistenceTimer?: NodeJS.Timeout;
 
     public async stop(): Promise<void> {
-        if (this.stopped) {
-            return;
-        }
-
         this.stopped = true;
         this.started = false;
+
         this.unregisterConfigurationEvents();
-        
-        // Cancel pending persistence
-        if (this.debouncedPersist && typeof this.debouncedPersist.cancel === 'function') {
+
+        if (this.debouncedPersist) {
             this.debouncedPersist.cancel();
         }
-        
-        // Stop periodic persistence
+
         if (this.periodicPersistenceTimer) {
             clearInterval(this.periodicPersistenceTimer);
-            this.periodicPersistenceTimer = undefined;
         }
 
-        // Final persist before closing
+        // Final persist before stop
         if (this.currentIndex) {
             console.log('[IncrementalIndexer] Persisting index before shutdown...');
             await this.indexManager.persistIndex(this.currentIndex);
@@ -176,7 +166,9 @@ export class IncrementalIndexer {
     }
 
     public async waitForInitialScan(): Promise<void> {
-        await this.initialScanPromise;
+        if (this.initialScanPromise) {
+            await this.initialScanPromise;
+        }
     }
 
     public getQueueStats(): { currentDepth: number; maxDepthSeen: number; currentPauseMs: number } {
@@ -195,62 +187,65 @@ export class IncrementalIndexer {
             currentPauseMs: this.currentPauseMs,
             maxQueueDepthSeen: this.maxQueueDepthSeen,
             processing: this.processing,
-            activity: this.activity
-                ? {
-                    label: this.activity.label,
-                    detail: this.activity.detail,
-                    startedAt: new Date(this.activity.startedAt).toISOString()
-                }
-                : undefined
+            activity: this.activity ? {
+                label: this.activity.label,
+                detail: this.activity.detail,
+                startedAt: new Date(this.activity.startedAt).toISOString()
+            } : undefined
         };
     }
 
     private enqueuePath(filePath: string, priority: PriorityLevel = 'medium') {
         if (!this.isWithinRoot(filePath)) return;
         if (!this.symbolIndex.isSupported(filePath)) return;
-        let normalized = path.resolve(filePath);
-        try {
-            const realpathSync = (fs as any).realpathSync?.native ?? fs.realpathSync;
-            normalized = realpathSync(normalized);
-        } catch {
-            // Fallback to resolved path when realpath fails (e.g., transient deletes).
-        }
-        const now = Date.now();
 
-        if (now - this.lastEventBurst < 1000) {
+        const normalized = path.resolve(filePath);
+        const realpathSync = (fs as any).realpathSync?.native ?? fs.realpathSync;
+        let finalPath = normalized;
+        try {
+            finalPath = realpathSync(normalized);
+        } catch {
+            // Ignore if path doesn't exist
+        }
+
+        const now = Date.now();
+        const burstLimit = 1000; // 1 second
+        if (now - this.lastEventBurst < burstLimit) {
             this.recentEventCount++;
         } else {
             this.recentEventCount = 1;
             this.lastEventBurst = now;
         }
 
-        if (this.recentEventCount > 10) {
+        // Adaptive pacing based on event frequency
+        if (this.recentEventCount > 50) {
             this.currentPauseMs = Math.min(this.currentPauseMs * 1.5, MAX_BATCH_PAUSE_MS);
-        } else if (this.recentEventCount <= 2) {
+        } else if (this.recentEventCount < 10) {
             this.currentPauseMs = Math.max(DEFAULT_BATCH_PAUSE_MS, this.currentPauseMs / 1.5);
         }
 
-        this.removeFromQueues(normalized);
-        this.queues[priority].set(normalized, now);
+        this.removeFromQueues(finalPath);
+        this.queues[priority].set(finalPath, now);
+
         const totalDepth = this.getTotalQueueSize();
-        if (totalDepth > this.maxQueueDepthSeen) {
-            this.maxQueueDepthSeen = totalDepth;
-        }
+        this.maxQueueDepthSeen = Math.max(this.maxQueueDepthSeen, totalDepth);
+
         metrics.inc("indexer.events");
         metrics.gauge("indexer.queue_depth", totalDepth);
         metrics.gauge("indexer.pause_ms", this.currentPauseMs);
-        if (totalDepth >= 200 && now - this.lastDepthLogAt > 5000) {
+
+        if (totalDepth > 100 && (now - this.lastDepthLogAt > 5000)) {
             console.info(`[IncrementalIndexer] High queue depth: ${totalDepth} (pause=${this.currentPauseMs}ms)`);
             this.lastDepthLogAt = now;
         }
-        if (this.started) {
-            void this.processQueue();
-        }
+
+        void this.processQueue();
     }
 
     private async processQueue(): Promise<void> {
         if (this.processing || this.stopped) return;
         this.processing = true;
+
         while (this.getTotalQueueSize() > 0 && !this.stopped) {
             const batchDelay = Math.max(this.options.batchPauseMs ?? this.currentPauseMs, 50);
             await this.sleep(batchDelay);
@@ -258,11 +253,10 @@ export class IncrementalIndexer {
 
             const batchEntries = this.pullNextBatch();
             
-            // Process batch in smaller parallel chunks to avoid overwhelming system
+            // Phase 1 (ADR-029): Parallel processing within batch
             const PARALLEL_LIMIT = 8;
             for (let i = 0; i < batchEntries.length; i += PARALLEL_LIMIT) {
                 const chunk = batchEntries.slice(i, i + PARALLEL_LIMIT);
-                
                 await Promise.all(chunk.map(async (filePath) => {
                     if (this.stopped) {
                         return;
@@ -300,14 +294,17 @@ export class IncrementalIndexer {
                     }
                 }));
             }
+            
             this.debouncedPersist();
         }
+
         this.clearActivity('queue_processing');
         this.processing = false;
     }
 
     private async enqueueInitialScan(): Promise<void> {
         const stack: string[] = [this.rootPath];
+        
         while (stack.length > 0 && !this.stopped) {
             const current = stack.pop()!;
             let entries: fs.Dirent[];
@@ -320,10 +317,8 @@ export class IncrementalIndexer {
             const supportedFiles: string[] = [];
             for (const entry of entries) {
                 const fullPath = path.join(current, entry.name);
+                if (this.shouldIgnore(fullPath)) continue;
 
-                if (this.shouldIgnore(fullPath)) {
-                    continue;
-                }
                 if (entry.isDirectory()) {
                     stack.push(fullPath);
                 } else if (this.symbolIndex.isSupported(fullPath)) {
@@ -331,20 +326,21 @@ export class IncrementalIndexer {
                 }
             }
 
-            if (supportedFiles.length > 0) {
-                const filesToIndex = await this.batchShouldReindex(supportedFiles);
-                for (const filePath of filesToIndex) {
-                    this.enqueuePath(filePath, 'low');
-                }
+            // Phase 1 (ADR-029): Parallel check for reindexing
+            const filesToIndex = await this.batchShouldReindex(supportedFiles);
+            for (const filePath of filesToIndex) {
+                this.enqueuePath(filePath, 'low');
             }
 
+            // Yield control back to event loop periodically
             await this.sleep(0);
         }
     }
 
     private async handleFileChange(filePath: string): Promise<void> {
         const basename = path.basename(filePath);
-
+        
+        // If ignore file changed, we might need a full re-scan or at least re-evaluate current index
         if (basename === IGNORE_FILE) {
             await this.handleIgnoreChange();
             return;
@@ -352,21 +348,21 @@ export class IncrementalIndexer {
 
         if (CONFIG_FILES.includes(basename)) {
             await this.handleModuleConfigChange(filePath);
-            return;
         }
 
         this.enqueuePath(filePath, 'medium');
     }
 
     private async handleIgnoreChange(): Promise<void> {
-        if (!this.indexDatabase) {
-            console.warn('[IncrementalIndexer] IndexDatabase not provided; skipping gitignore reindex');
-            return;
-        }
-
-        console.info('[IncrementalIndexer] Detected .gitignore change; re-evaluating indexed files...');
-        this.setActivity('gitignore_reindex', 'Re-evaluating ignore rules');
         try {
+            if (!this.indexDatabase) {
+                console.warn('[IncrementalIndexer] IndexDatabase not provided; skipping gitignore reindex');
+                return;
+            }
+
+            console.info('[IncrementalIndexer] Detected .gitignore change; re-evaluating indexed files...');
+            this.setActivity('gitignore_reindex', 'Re-evaluating ignore rules');
+
             const indexedFiles = this.indexDatabase.listFiles();
             const filesToRemove: string[] = [];
 
@@ -400,10 +396,6 @@ export class IncrementalIndexer {
     }
 
     private async scanForNewFiles(): Promise<string[]> {
-        if (!this.indexDatabase) {
-            return [];
-        }
-
         const newFiles: string[] = [];
         const stack: string[] = [this.rootPath];
 
@@ -418,34 +410,27 @@ export class IncrementalIndexer {
 
             for (const entry of entries) {
                 const fullPath = path.join(current, entry.name);
-                if (this.shouldIgnore(fullPath)) {
-                    continue;
-                }
+                if (this.shouldIgnore(fullPath)) continue;
 
                 if (entry.isDirectory()) {
                     stack.push(fullPath);
-                    continue;
-                }
-
-                if (!this.symbolIndex.isSupported(fullPath)) {
-                    continue;
-                }
-
-                const relPath = path.relative(this.rootPath, fullPath);
-                const existing = this.indexDatabase.getFile(relPath);
-                if (!existing) {
-                    newFiles.push(fullPath);
+                } else if (this.symbolIndex.isSupported(fullPath)) {
+                    // Check if already in index
+                    const relPath = path.relative(this.rootPath, fullPath);
+                    const existing = this.indexDatabase?.getFile(relPath);
+                    if (!existing) {
+                        newFiles.push(fullPath);
+                    }
                 }
             }
-
             await this.sleep(0);
         }
-
         return newFiles;
     }
 
     private registerConfigurationEvents(): void {
-        if (!this.configurationManager) return;
+        if (!this.configurationManager || this.configEventsRegistered) return;
+
         const ignoreHandler = () => void this.handleIgnoreChange();
         const tsconfigHandler = (payload: { filePath: string }) => void this.handleModuleConfigChange(payload.filePath);
         const packageHandler = (payload: { filePath: string }) => void this.handleModuleConfigChange(payload.filePath);
@@ -480,17 +465,11 @@ export class IncrementalIndexer {
             return;
         }
 
-        if (!this.moduleConfigReloadPromise) {
-            this.moduleConfigReloadPromise = this.performModuleConfigReload(filePath).finally(() => {
-                this.moduleConfigReloadPromise = undefined;
-            });
-        }
-
-        try {
-            await this.moduleConfigReloadPromise;
-        } catch {
-            // Errors already logged in performModuleConfigReload
-        }
+        // Debounce config reload
+        if (this.moduleConfigReloadPromise) return;
+        this.moduleConfigReloadPromise = this.performModuleConfigReload(filePath).finally(() => {
+            this.moduleConfigReloadPromise = undefined;
+        });
     }
 
     private async performModuleConfigReload(filePath: string): Promise<void> {
@@ -508,12 +487,13 @@ export class IncrementalIndexer {
         }
     }
 
-        private async handleDeletion(filePath: string): Promise<void> {
-        if (!this.isWithinRoot(filePath)) return;
-        this.removeFromQueues(path.resolve(filePath));
+    private async handleDeletion(filePath: string): Promise<void> {
         try {
+            if (!this.isWithinRoot(filePath)) return;
+            this.removeFromQueues(path.resolve(filePath));
+
             await this.dependencyGraph.removeFile(filePath);
-            
+
             if (this.currentIndex) {
                 this.indexManager.removeFileEntry(this.currentIndex, filePath);
                 this.debouncedPersist();
@@ -524,10 +504,11 @@ export class IncrementalIndexer {
     }
 
     private async handleDirectoryDeletion(dirPath: string): Promise<void> {
-        if (!this.isWithinRoot(dirPath)) return;
-        const normalizedDir = path.resolve(dirPath);
-        this.removeMatchingFromQueues(queued => queued.startsWith(normalizedDir));
         try {
+            if (!this.isWithinRoot(dirPath)) return;
+            const normalizedDir = path.resolve(dirPath);
+            this.removeMatchingFromQueues(queued => queued.startsWith(normalizedDir));
+
             await this.dependencyGraph.removeDirectory(dirPath);
         } catch (error) {
             console.warn(`[IncrementalIndexer] failed to remove directory ${dirPath}:`, error);
@@ -537,8 +518,8 @@ export class IncrementalIndexer {
     private shouldIgnore(absolutePath: string): boolean {
         if (!this.isWithinRoot(absolutePath)) return true;
         const relative = path.relative(this.rootPath, absolutePath);
-        if (!relative) return false;
-
+        
+        // HardcodedMCP ignore
         const normalized = relative.split(path.sep).join('/');
         const ignoredRoots = ['.mcp', '.smart-context', '.smart-context-index'];
         if (ignoredRoots.some(root => normalized === root || normalized.startsWith(`${root}/`))) {
@@ -567,16 +548,16 @@ export class IncrementalIndexer {
     }
 
     private pullNextBatch(): string[] {
-        if (this.queues.high.size > 0) {
-            return this.flushQueue('high');
-        }
-        if (this.queues.medium.size > 0) {
-            return this.flushQueue('medium');
-        }
-        if (this.queues.low.size > 0) {
-            return this.flushQueue('low');
-        }
-        return [];
+        let entries: string[] = [];
+        
+        entries = entries.concat(this.flushQueue('high'));
+        if (entries.length >= 50) return entries;
+
+        entries = entries.concat(this.flushQueue('medium'));
+        if (entries.length >= 100) return entries;
+
+        entries = entries.concat(this.flushQueue('low'));
+        return entries;
     }
 
     private flushQueue(priority: PriorityLevel): string[] {
@@ -594,12 +575,7 @@ export class IncrementalIndexer {
         const high = this.queues.high.size;
         const medium = this.queues.medium.size;
         const low = this.queues.low.size;
-        return {
-            high,
-            medium,
-            low,
-            total: high + medium + low
-        };
+        return { high, medium, low, total: high + medium + low };
     }
 
     private removeFromQueues(filePath: string): void {
@@ -622,7 +598,7 @@ export class IncrementalIndexer {
         this.activity = { label, detail, startedAt: Date.now() };
     }
 
-        private clearActivity(label?: string): void {
+    private clearActivity(label?: string): void {
         if (!label || (this.activity && this.activity.label === label)) {
             this.activity = undefined;
         }
@@ -698,7 +674,8 @@ export class IncrementalIndexer {
         }
     }, 5000); // Wait 5 seconds after last change
 
-        private startPeriodicPersistence(): void {
+    private startPeriodicPersistence(): void {
+        // Wait 5 seconds after last change
         if (this.periodicPersistenceTimer) {
             clearInterval(this.periodicPersistenceTimer);
         }
@@ -706,7 +683,7 @@ export class IncrementalIndexer {
             if (this.currentIndex && !this.stopped) {
                 await this.indexManager.persistIndex(this.currentIndex);
             }
-        }, 5 * 60 * 1000); // Every 5 minutes
+        }, 5 * 60 * 1000);
     }
 }
 
@@ -720,17 +697,14 @@ function debounce<T extends (...args: any[]) => any>(
     wait: number
 ): DebouncedFunction<T> {
     let timeout: NodeJS.Timeout | null = null;
-    
+
     const debounced = (...args: Parameters<T>) => {
         if (timeout) clearTimeout(timeout);
         timeout = setTimeout(() => func(...args), wait);
     };
 
     debounced.cancel = () => {
-        if (timeout) {
-            clearTimeout(timeout);
-            timeout = null;
-        }
+        if (timeout) clearTimeout(timeout);
     };
 
     return debounced;

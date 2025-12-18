@@ -123,7 +123,7 @@ describe("SearchEngine trigram index integration", () => {
     });
 
     it("prioritizes exported definitions via field weights", async () => {
-        const stubProvider = {
+        const stubProvider: SymbolIndex = {
             async getSymbolsForFile(filePath: string): Promise<SymbolInfo[]> {
                 if (path.normalize(filePath) !== path.normalize(alphaPath)) {
                     return [];
@@ -138,6 +138,12 @@ describe("SearchEngine trigram index integration", () => {
             },
             async getAllSymbols(): Promise<Map<string, SymbolInfo[]>> {
                 return new Map();
+            },
+            async findFilesBySymbolName(keywords: string[]): Promise<string[]> {
+                if (keywords.includes("alphaMark")) {
+                    return ["src/utils/alpha.ts"];
+                }
+                return [];
             }
         };
 

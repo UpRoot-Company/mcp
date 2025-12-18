@@ -369,6 +369,7 @@ export type SymbolInfo = DefinitionSymbol | ImportSymbol | ExportSymbol;
 export interface SymbolIndex {
     getSymbolsForFile(filePath: string): Promise<SymbolInfo[]>;
     getAllSymbols(): Promise<Map<string, SymbolInfo[]>>;
+    findFilesBySymbolName(keywords: string[]): Promise<string[]>;
 }
 
 export type CallConfidence = "definite" | "possible" | "inferred";

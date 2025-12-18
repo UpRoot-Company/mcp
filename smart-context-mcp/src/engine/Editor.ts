@@ -21,6 +21,7 @@ import {
 } from "../types.js";
 import { LineCounter } from "./LineCounter.js";
 import { IFileSystem } from "../platform/FileSystem.js";
+import { PathManager } from "../utils/PathManager.js";
 import { TrigramIndex } from "./TrigramIndex.js";
 const require = createRequire(import.meta.url);
 let importedXxhash: any = null;
@@ -78,7 +79,7 @@ export class EditorEngine {
 
     constructor(rootPath: string, fileSystem: IFileSystem, semanticDiffProvider?: SemanticDiffProvider) {
         this.rootPath = rootPath;
-        this.backupsDir = path.join(rootPath, ".mcp", "backups");
+        this.backupsDir = PathManager.getBackupDir();
         this.fileSystem = fileSystem;
         this.semanticDiffProvider = semanticDiffProvider;
     }
@@ -132,8 +133,6 @@ export class EditorEngine {
     private escapeRegExp(value: string): string {
         return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     }
-
-
 
     private trigramKeys(value: string): Set<string> {
         return new Set(TrigramIndex.extractTrigramCounts(value).keys());
@@ -284,8 +283,9 @@ export class EditorEngine {
             }
             case "structural":
             default: {
-                const escaped = this.escapeRegExp(normalizedTarget);
-                return new RegExp(escaped.replace(/\\s+/g, "\\s+"), "g");
+                const tokens = normalizedTarget.replace(/([^a-zA-Z0-9_])/g, " $1 ").split(/\s+/).filter(t => t.length > 0);
+                const pattern = tokens.map(t => this.escapeRegExp(t)).join("\\s*");
+                return new RegExp(pattern, "g");
             }
         }
     }
@@ -306,7 +306,6 @@ export class EditorEngine {
         
         const needsStart = /^[a-zA-Z0-9_]/.test(words[0]);
         const needsEnd = /[a-zA-Z0-9_]$/.test(words[words.length - 1]);
-        
         const supportsLookbehind = (() => { try { new RegExp('(?<=a)'); return true; } catch { return false; } })();
         
         let finalPattern = corePattern;
@@ -563,7 +562,6 @@ export class EditorEngine {
     }
 
     private generateMatchFailureDiagnostics(
-
         edit: Edit,
         matches: Match[],
         filteredMatches: Match[],
@@ -1182,6 +1180,7 @@ export class EditorEngine {
             const relativePath = path.relative(this.rootPath, filePath);
             return {
                 success: true,
+                message: diffText,
                 originalContent,
                 newContent,
                 diff: diffText,

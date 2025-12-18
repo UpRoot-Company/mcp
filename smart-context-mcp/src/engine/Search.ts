@@ -23,6 +23,8 @@ const BUILTIN_EXCLUDE_GLOBS = [
     "**/node_modules/**",
     "**/.git/**",
     "**/.mcp/**",
+    "**/.smart-context/**",
+    ".smart-context/**",
     "**/dist/**",
     "**/coverage/**",
     "**/*.test.*",
@@ -178,7 +180,7 @@ export class SearchEngine {
     }
 
     public escapeRegExp(value: string, options: SearchOptions = {}): string {
-        const escaped = value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        const escaped = value.replace(/[.*+?^${}()|[\\]\\]/g, "\\$&");
         return options.wordBoundary ? `\\b${escaped}\\b` : escaped;
     }
 
@@ -376,7 +378,7 @@ export class SearchEngine {
     private globToRegExp(glob: string): RegExp {
         const normalized = glob.replace(/\\/g, '/').replace(/^\.\//, '');
         if (!normalized.includes('/') && !/[?*]/.test(normalized)) {
-            const escaped = normalized.replace(/[-/\\^$+?.()|[\]{}]/g, '\\$&');
+            const escaped = normalized.replace(/[-/\\^$+?.()|[\\]{}]/g, "\\$&");
             return new RegExp(`(^|/)${escaped}(/|$)`);
         }
 
@@ -394,7 +396,7 @@ export class SearchEngine {
             .replace(/\*\*/g, doubleStarPlaceholder)
             .replace(/\*/g, singleStarPlaceholder)
             .replace(/\?/g, questionPlaceholder)
-            .replace(/([.+^${}()|[\]\\])/g, '\\$1')
+            .replace(/([.+^${}()|[\]\\])/g, "\\$1")
             .replace(new RegExp(doubleStarPlaceholder, 'g'), '.*')
             .replace(new RegExp(singleStarPlaceholder, 'g'), '[^/]*')
             .replace(new RegExp(questionPlaceholder, 'g'), '.');

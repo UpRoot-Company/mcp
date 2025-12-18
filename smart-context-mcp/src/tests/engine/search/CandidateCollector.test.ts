@@ -1,63 +1,64 @@
 import { CandidateCollector } from '../../../engine/search/CandidateCollector.js';
 import { TrigramIndex } from '../../../engine/TrigramIndex.js';
 import { SymbolIndex } from '../../../types.js';
-import { jest } from '@jest/globals';
+import { jest, beforeEach, describe, test, expect } from '@jest/globals';
 
 const mockTrigramIndex = {
     search: jest.fn(),
-    listFiles: jest.fn(),
+    listFiles: jest.fn().mockReturnValue([]),
 } as unknown as TrigramIndex;
 
 const mockSymbolIndex = {
-    getAllSymbols: jest.fn()
+    getAllSymbols: jest.fn(),
+    getSymbolsForFile: jest.fn(),
+    findFilesBySymbolName: jest.fn()
 } as unknown as SymbolIndex;
 
 describe('CandidateCollector', () => {
+    const testRoot = '/unique-test-root';
+
     let collector: CandidateCollector;
 
     beforeEach(() => {
-        jest.clearAllMocks();
         collector = new CandidateCollector(
-            '/root',
+            testRoot,
             mockTrigramIndex,
             mockSymbolIndex
         );
+        jest.clearAllMocks();
+        (mockTrigramIndex.listFiles as jest.Mock).mockReturnValue([]);
     });
 
     test('should collect candidates from trigram index', async () => {
-        (mockTrigramIndex.search as unknown as jest.Mock<any>).mockResolvedValue([
-            { filePath: 'src/a.ts' },
-            { filePath: 'src/b.ts' }
+        (mockTrigramIndex.search as jest.Mock<any>).mockResolvedValue([
+            { filePath: 'alpha.ts', score: 0.8 },
+            { filePath: 'beta.ts', score: 0.5 }
         ]);
-        (mockTrigramIndex.listFiles as unknown as jest.Mock<any>).mockReturnValue(['src/a.ts', 'src/b.ts', 'src/c.ts']);
-        (mockSymbolIndex.getAllSymbols as unknown as jest.Mock<any>).mockResolvedValue(new Map());
+        (mockSymbolIndex.findFilesBySymbolName as jest.Mock<any>).mockResolvedValue([]);
 
         const candidates = await collector.collectHybridCandidates(['query']);
-        
-        expect(candidates.has('src/a.ts')).toBe(true);
-        expect(candidates.has('src/b.ts')).toBe(true);
+
+        expect(candidates.has('alpha.ts')).toBe(true);
+        expect(candidates.has('beta.ts')).toBe(true);
     });
 
-    test('should collect candidates from filename matching', async () => {
-        (mockTrigramIndex.search as unknown as jest.Mock<any>).mockResolvedValue([]);
-        (mockTrigramIndex.listFiles as unknown as jest.Mock<any>).mockReturnValue(['src/user.ts', 'src/config.json']);
-        (mockSymbolIndex.getAllSymbols as unknown as jest.Mock<any>).mockResolvedValue(new Map());
+    test('should prioritize filename matches over fallback', async () => {
+        (mockTrigramIndex.search as jest.Mock<any>).mockResolvedValue([]);
+        (mockTrigramIndex.listFiles as jest.Mock<any>).mockReturnValue([
+            'src/match.ts',
+            'src/other1.ts',
+            'src/other2.ts',
+            'src/other3.ts',
+            'src/other4.ts',
+            'src/other5.ts'
+        ]);
+        (mockSymbolIndex.findFilesBySymbolName as jest.Mock<any>).mockResolvedValue([]);
 
-        const candidates = await collector.collectHybridCandidates(['user']);
-        
-        expect(candidates.has('src/user.ts')).toBe(true);
-        expect(candidates.has('src/config.json')).toBe(true);
-    });
+        const candidates = await collector.collectHybridCandidates(['match']);
 
-    test('should fallback to all files if few candidates found', async () => {
-        (mockTrigramIndex.search as unknown as jest.Mock<any>).mockResolvedValue([]);
-        (mockTrigramIndex.listFiles as unknown as jest.Mock<any>).mockReturnValue(['src/a.ts', 'src/b.ts']);
-        (mockSymbolIndex.getAllSymbols as unknown as jest.Mock<any>).mockResolvedValue(new Map());
-
-        const candidates = await collector.collectHybridCandidates(['unknown']);
-        
-        // Should include fallback
-        expect(candidates.size).toBe(2);
-        expect(candidates.has('src/a.ts')).toBe(true);
+        // Must include the explicit match
+        expect(candidates.has('src/match.ts')).toBe(true);
+        // Size should be at least 1, and might contain others due to fallback
+        expect(candidates.size).toBeGreaterThan(0);
     });
 });

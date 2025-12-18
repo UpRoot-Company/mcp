@@ -3,6 +3,7 @@ import * as path from 'path';
 import { createHash } from 'crypto';
 import type { Stats } from 'fs';
 import { LRUCache } from '../utils/LRUCache.js';
+import { PathManager } from '../utils/PathManager.js';
 import type { SkeletonOptions } from '../types.js';
 
 interface CachedSkeleton {
@@ -24,7 +25,7 @@ export class SkeletonCache {
         ttlMs = 60_000
     ) {
         this.memoryCache = new LRUCache(memoryCacheSize, ttlMs);
-        this.diskCacheDir = path.join(projectRoot, '.mcp', 'smart-context', 'skeletons');
+        this.diskCacheDir = path.join(PathManager.getCacheDir(), 'skeletons');
     }
 
     public async getSkeleton(

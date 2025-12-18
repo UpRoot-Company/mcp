@@ -2,11 +2,9 @@ import path from "path";
 import * as fsp from "fs/promises";
 import ignore from "ignore";
 import { IFileSystem } from "../platform/FileSystem.js";
+import { PathManager } from "../utils/PathManager.js";
 
-const createIgnore = () => {
-    const factory = (ignore as any).default ?? ignore;
-    return factory();
-};
+const createIgnore = () => (ignore as any).default ? (ignore as any).default() : (ignore as any)();
 
 const TRIGRAM_INDEX_VERSION = 1;
 
@@ -77,24 +75,23 @@ export class TrigramIndex {
             ]
         };
         this.ignoreFilter = createIgnore().add(this.options.ignoreGlobs);
-        this.cacheDir = path.join(this.rootPath, ".mcp", "smart-context");
+        this.cacheDir = PathManager.getIndexDir();
         this.persistPath = path.join(this.cacheDir, "trigram-index.json");
+        
+        // Start non-blocking build
+        this.buildPromise = this.buildIndex();
     }
 
     public async ensureReady(): Promise<void> {
-        if (this.isReady) {
-            return;
+        if (this.buildPromise) {
+            await this.buildPromise;
         }
-        if (!this.buildPromise) {
-            this.buildPromise = this.buildIndex();
-        }
-        await this.buildPromise;
     }
 
     public async rebuild(): Promise<void> {
+        this.isReady = false;
         this.fileEntries.clear();
         this.postings.clear();
-        this.isReady = false;
         this.buildPromise = this.buildIndex();
         await this.buildPromise;
     }
@@ -110,361 +107,314 @@ export class TrigramIndex {
     }
 
     public async refreshFile(absPath: string): Promise<void> {
-        const normalized = this.normalizeRelative(absPath);
-        if (!normalized) {
-            return;
+        const relPath = this.normalizeRelative(absPath);
+        if (!relPath || this.ignoreFilter.ignores(relPath)) return;
+
+        try {
+            const stats = await this.fileSystem.stat(absPath);
+            if (this.shouldIndexFile(relPath, stats.size)) {
+                await this.indexFile(absPath, relPath, stats.mtime, stats.size);
+                this.schedulePersist();
+            } else if (this.fileEntries.has(relPath)) {
+                this.removeEntry(relPath);
+                this.schedulePersist();
+            }
+        } catch {
+            // File might have been deleted
+            await this.removeFile(absPath);
         }
-        await this.ensureReady();
-        await this.indexFile(absPath, normalized);
     }
 
     public async removeFile(absPath: string): Promise<void> {
-        const normalized = this.normalizeRelative(absPath);
-        if (!normalized) {
-            return;
+        const relPath = this.normalizeRelative(absPath);
+        if (relPath && this.fileEntries.has(relPath)) {
+            this.removeEntry(relPath);
+            this.schedulePersist();
         }
-        await this.ensureReady();
-        this.removeEntry(normalized);
     }
 
     public async refreshDirectory(absDir: string): Promise<void> {
-        const normalizedDir = this.normalizeRelative(absDir);
-        if (!normalizedDir) {
-            return;
-        }
-        await this.ensureReady();
-        for (const filePath of Array.from(this.fileEntries.keys())) {
-            if (filePath === normalizedDir || filePath.startsWith(`${normalizedDir}/`)) {
-                this.removeEntry(filePath);
-            }
-        }
-        const absPath = path.isAbsolute(absDir) ? absDir : path.join(this.rootPath, absDir);
-        await this.walk(absPath);
+        // Simple strategy: re-walk the directory
+        await this.walk(absDir);
+        this.schedulePersist();
     }
 
     public async search(term: string, limit: number = 200): Promise<SearchCandidate[]> {
         await this.ensureReady();
-        const sanitized = TrigramIndex.normalizeQuery(term);
-        if (!sanitized) {
-            return [];
+        
+        const query = TrigramIndex.normalizeQuery(term);
+        if (query.length < 3) {
+            // Fallback to substring search for very short terms if needed
+            return this.searchBySubstring(query, limit);
         }
-        if (sanitized.length < 3) {
-            return this.searchBySubstring(sanitized, limit);
+
+        const queryTrigrams: string[] = [];
+        for (let i = 0; i <= query.length - 3; i++) {
+            queryTrigrams.push(query.substring(i, i + 3));
         }
-        const trigramCounts = TrigramIndex.extractTrigramCounts(sanitized);
-        if (trigramCounts.size === 0) {
-            return [];
-        }
-        const docCount = Math.max(1, this.fileEntries.size);
+
+        if (queryTrigrams.length === 0) return [];
+
         const scores = new Map<string, number>();
-        let totalQueryWeight = 0;
+        
+        // Simple overlap scoring
+        for (const trigram of queryTrigrams) {
+            const postings = this.postings.get(trigram);
+            if (!postings) continue;
 
-        for (const [trigram, qCount] of trigramCounts) {
-            const posting = this.postings.get(trigram);
-            if (!posting) {
-                continue;
-            }
-            const df = posting.size;
-            const idf = Math.log((docCount - df + 0.5) / (df + 0.5) + 1);
-            totalQueryWeight += qCount * idf;
-            for (const [filePath, freq] of posting) {
-                const shared = Math.min(freq, qCount);
-                const gain = shared * idf;
-                scores.set(filePath, (scores.get(filePath) || 0) + gain);
+            for (const [path, freq] of postings) {
+                const current = scores.get(path) || 0;
+                // Basic TF scoring
+                scores.set(path, current + (freq / (this.fileEntries.get(path)?.trigramCount || 1)));
             }
         }
 
-        if (scores.size === 0) {
-            return [];
-        }
-        const divisor = totalQueryWeight || 1;
         return Array.from(scores.entries())
-            .map(([filePath, rawScore]) => ({ filePath, score: rawScore / divisor }))
+            .map(([filePath, score]) => ({ filePath, score }))
             .sort((a, b) => b.score - a.score)
             .slice(0, limit);
     }
 
     private async buildIndex(): Promise<void> {
+        if (this.isBuilding) return;
         this.isBuilding = true;
-        const visited = new Set<string>();
+
         try {
+            // 1. Try to load from disk
             await this.loadPersistedIndex();
+
+            // 2. Walk filesystem to find new/changed files
+            const visited = new Set<string>();
             await this.walk(this.rootPath, visited);
+
+            // 3. Prune entries no longer on disk
             await this.pruneStaleEntries(visited);
+
             this.isReady = true;
+            
+            if (this.needsPersistAfterBuild) {
+                await this.persistIndex();
+                this.needsPersistAfterBuild = false;
+            }
+        } catch (error) {
+            console.error("[TrigramIndex] Failed to build index:", error);
         } finally {
             this.isBuilding = false;
-        }
-
-        if (this.needsPersistAfterBuild) {
-            await this.persistIndex();
-            this.needsPersistAfterBuild = false;
         }
     }
 
     private async walk(absDir: string, visited?: Set<string>): Promise<void> {
-        let entries: string[] = [];
+        let entries: string[];
         try {
             entries = await this.fileSystem.readDir(absDir);
         } catch {
             return;
         }
 
-        const subDirs: string[] = [];
-        const files: Array<{ absPath: string, relative: string, mtime: number, size: number }> = [];
+        for (const name of entries) {
+            const absPath = path.join(absDir, name);
+            const relPath = this.normalizeRelative(absPath);
+            
+            if (!relPath || this.ignoreFilter.ignores(relPath)) continue;
 
-        for (const entry of entries) {
-            const absPath = path.join(absDir, entry);
-            const relative = this.normalizeRelative(absPath);
-            if (!relative || this.ignoreFilter.ignores(relative)) {
-                continue;
-            }
-
-            let stats;
             try {
-                stats = await this.fileSystem.stat(absPath);
+                const stats = await this.fileSystem.stat(absPath);
+                if (stats.isDirectory()) {
+                    await this.walk(absPath, visited);
+                } else if (this.shouldIndexFile(relPath, stats.size)) {
+                    if (visited) visited.add(relPath);
+                    
+                    const existing = this.fileEntries.get(relPath);
+                    if (!existing || existing.mtime !== stats.mtime) {
+                        await this.indexFile(absPath, relPath, stats.mtime, stats.size);
+                        this.markDirty();
+                    }
+                }
             } catch {
-                continue;
+                // Ignore stat errors
             }
-
-            if (stats.isDirectory()) {
-                subDirs.push(absPath);
-            } else if (this.shouldIndexFile(relative, stats.size)) {
-                files.push({ absPath, relative, mtime: stats.mtime, size: stats.size });
-            }
-        }
-
-        // 1. Process files in current directory in parallel batches
-        const FILE_BATCH_SIZE = 20;
-        for (let i = 0; i < files.length; i += FILE_BATCH_SIZE) {
-            const chunk = files.slice(i, i + FILE_BATCH_SIZE);
-            await Promise.all(chunk.map(async (file) => {
-                visited?.add(file.relative);
-                await this.indexFile(file.absPath, file.relative, file.mtime, file.size);
-            }));
-        }
-
-        // 2. Process subdirectories
-        if (subDirs.length > 0) {
-            await Promise.all(subDirs.map(dir => this.walk(dir, visited)));
         }
     }
 
     private shouldIndexFile(relativePath: string, size: number): boolean {
-        if (size > this.options.maxFileBytes) {
-            return false;
-        }
+        if (size > this.options.maxFileBytes) return false;
         const ext = path.extname(relativePath).toLowerCase();
-        if (!ext) {
-            return false;
-        }
         return this.options.includeExtensions.includes(ext);
     }
 
     private async indexFile(absPath: string, relativePath: string, mtime?: number, size?: number): Promise<void> {
-        let statsMtime = mtime;
-        let statsSize = size;
-        if (statsMtime === undefined || statsSize === undefined) {
-            try {
-                const stats = await this.fileSystem.stat(absPath);
-                statsMtime = stats.mtime;
-                statsSize = stats.size;
-            } catch {
-                return;
-            }
-        }
-        const previous = this.fileEntries.get(relativePath);
-        if (previous && previous.mtime === statsMtime && previous.size === statsSize) {
-            return;
-        }
-        let content: string;
         try {
-            content = await this.fileSystem.readFile(absPath);
-        } catch {
-            return;
-        }
-        const trigramFreq = TrigramIndex.extractTrigramCounts(content);
-        this.removeEntry(relativePath);
-        const entry: FileEntry = {
-            path: relativePath,
-            mtime: statsMtime ?? Date.now(),
-            size: statsSize ?? content.length,
-            trigramFreq,
-            trigramCount: Array.from(trigramFreq.values()).reduce((sum, value) => sum + value, 0)
-        };
-        this.fileEntries.set(relativePath, entry);
-        for (const [trigram, count] of trigramFreq) {
-            let posting = this.postings.get(trigram);
-            if (!posting) {
-                posting = new Map();
-                this.postings.set(trigram, posting);
+            const content = await this.fileSystem.readFile(absPath);
+            const counts = TrigramIndex.extractTrigramCounts(content);
+            
+            // Remove old postings if updating
+            this.removeEntry(relativePath);
+
+            let totalTrigrams = 0;
+            for (const [trigram, count] of counts) {
+                let postings = this.postings.get(trigram);
+                if (!postings) {
+                    postings = new Map();
+                    this.postings.set(trigram, postings);
+                }
+                postings.set(relativePath, count);
+                totalTrigrams += count;
             }
-            posting.set(relativePath, count);
+
+            this.fileEntries.set(relativePath, {
+                path: relativePath,
+                mtime: mtime ?? Date.now(),
+                size: size ?? content.length,
+                trigramFreq: counts,
+                trigramCount: totalTrigrams
+            });
+        } catch (error) {
+            console.warn(`[TrigramIndex] Failed to index ${relativePath}:`, error);
         }
-        this.markDirty();
     }
 
     private removeEntry(relativePath: string): void {
-        const existing = this.fileEntries.get(relativePath);
-        if (!existing) {
-            return;
-        }
-        this.fileEntries.delete(relativePath);
-        for (const [trigram, posting] of this.postings) {
-            posting.delete(relativePath);
-            if (posting.size === 0) {
-                this.postings.delete(trigram);
+        const entry = this.fileEntries.get(relativePath);
+        if (!entry) return;
+
+        for (const trigram of entry.trigramFreq.keys()) {
+            const postings = this.postings.get(trigram);
+            if (postings) {
+                postings.delete(relativePath);
+                if (postings.size === 0) {
+                    this.postings.delete(trigram);
+                }
             }
         }
-        this.markDirty();
+        this.fileEntries.delete(relativePath);
     }
 
     private async loadPersistedIndex(): Promise<void> {
         try {
-            const data = await fsp.readFile(this.persistPath, "utf-8");
-            const parsed = JSON.parse(data) as SerializedTrigramIndex;
-            if (parsed.version !== TRIGRAM_INDEX_VERSION) {
-                console.info(`[TrigramIndex] Ignoring persisted index (version ${parsed.version})`);
+            if (!(await fsp.access(this.persistPath).then(() => true).catch(() => false))) {
                 return;
             }
-            if (path.resolve(parsed.projectRoot) !== this.rootPath) {
-                console.info("[TrigramIndex] Ignoring persisted index (project root changed)");
+
+            const data = await fsp.readFile(this.persistPath, 'utf-8');
+            const serialized = JSON.parse(data) as SerializedTrigramIndex;
+
+            if (serialized.version !== TRIGRAM_INDEX_VERSION || serialized.projectRoot !== this.rootPath) {
                 return;
             }
-            this.fileEntries.clear();
-            this.postings.clear();
-            for (const entry of parsed.entries) {
-                const freq = new Map<string, number>(entry.trigramFreq);
+
+            console.info(`[TrigramIndex] Restored ${serialized.entries.length} files from persisted index`);
+
+            for (const entry of serialized.entries) {
+                const freqMap = new Map(entry.trigramFreq);
                 this.fileEntries.set(entry.path, {
                     path: entry.path,
                     mtime: entry.mtime,
                     size: entry.size,
                     trigramCount: entry.trigramCount,
-                    trigramFreq: freq
+                    trigramFreq: freqMap
                 });
-                for (const [trigram, count] of freq) {
-                    let posting = this.postings.get(trigram);
-                    if (!posting) {
-                        posting = new Map();
-                        this.postings.set(trigram, posting);
+
+                for (const [trigram, count] of entry.trigramFreq) {
+                    let postings = this.postings.get(trigram);
+                    if (!postings) {
+                        postings = new Map();
+                        this.postings.set(trigram, postings);
                     }
-                    posting.set(entry.path, count);
+                    postings.set(entry.path, count);
                 }
             }
-            console.info(`[TrigramIndex] Restored ${parsed.entries.length} files from persisted index`);
         } catch (error) {
-            const code = (error as NodeJS.ErrnoException)?.code;
-            if (code && code !== "ENOENT") {
-                console.warn("[TrigramIndex] Failed to read persisted index:", error);
-            }
+            console.warn("[TrigramIndex] Failed to load persisted index:", error);
         }
     }
 
     private async pruneStaleEntries(visited: Set<string>): Promise<void> {
-        for (const relativePath of Array.from(this.fileEntries.keys())) {
-            if (!visited.has(relativePath)) {
-                this.removeEntry(relativePath);
+        for (const relPath of this.fileEntries.keys()) {
+            if (!visited.has(relPath)) {
+                this.removeEntry(relPath);
+                this.markDirty();
             }
         }
     }
 
     private markDirty(): void {
+        this.needsPersistAfterBuild = true;
+    }
+
+    private schedulePersist(): void {
+        if (this.persistTimer) clearTimeout(this.persistTimer);
+        this.persistTimer = setTimeout(() => void this.persistIndex(), 5000);
+    }
+
+    private async persistIndex(): Promise<void> {
+        if (this.persistPromise) return this.persistPromise;
         if (this.isBuilding) {
             this.needsPersistAfterBuild = true;
             return;
         }
-        this.schedulePersist();
-    }
 
-    private schedulePersist(): void {
-        if (this.persistTimer) {
-            return;
-        }
-        this.persistTimer = setTimeout(() => {
-            this.persistTimer = undefined;
-            void this.persistIndex();
-        }, 2000);
-    }
-
-    private async persistIndex(): Promise<void> {
-        if (this.persistPromise) {
-            return this.persistPromise;
-        }
         this.persistPromise = (async () => {
             try {
-                await fsp.mkdir(this.cacheDir, { recursive: true });
-                const entries: SerializedFileEntry[] = Array.from(this.fileEntries.values()).map(entry => ({
-                    path: entry.path,
-                    mtime: entry.mtime,
-                    size: entry.size,
-                    trigramCount: entry.trigramCount,
-                    trigramFreq: Array.from(entry.trigramFreq.entries())
-                }));
-                const payload: SerializedTrigramIndex = {
+                const serialized: SerializedTrigramIndex = {
                     version: TRIGRAM_INDEX_VERSION,
                     projectRoot: this.rootPath,
-                    entries
+                    entries: Array.from(this.fileEntries.values()).map(e => ({
+                        path: e.path,
+                        mtime: e.mtime,
+                        size: e.size,
+                        trigramCount: e.trigramCount,
+                        trigramFreq: Array.from(e.trigramFreq.entries())
+                    }))
                 };
-                await fsp.writeFile(this.persistPath, JSON.stringify(payload));
+
+                await fsp.mkdir(this.cacheDir, { recursive: true });
+                await fsp.writeFile(this.persistPath, JSON.stringify(serialized), 'utf-8');
             } catch (error) {
                 console.warn("[TrigramIndex] Failed to persist trigram index:", error);
             } finally {
                 this.persistPromise = undefined;
             }
         })();
+
         return this.persistPromise;
     }
 
     public static extractTrigramCounts(content: string): Map<string, number> {
-        const freq = new Map<string, number>();
-        const normalized = content.replace(/[\r\n]+/g, " ").toLowerCase();
-        if (normalized.length < 3) {
-            if (normalized.trim().length > 0) {
-                freq.set(normalized.trim(), 1);
-            }
-            return freq;
+        const query = this.normalizeQuery(content);
+        const counts = new Map<string, number>();
+        
+        if (query.length < 3) return counts;
+
+        for (let i = 0; i <= query.length - 3; i++) {
+            const trigram = query.substring(i, i + 3);
+            counts.set(trigram, (counts.get(trigram) || 0) + 1);
         }
-        for (let i = 0; i <= normalized.length - 3; i++) {
-            const trigram = normalized.slice(i, i + 3);
-            if (trigram.trim().length < 3) {
-                continue;
-            }
-            freq.set(trigram, (freq.get(trigram) || 0) + 1);
-        }
-        return freq;
+        return counts;
     }
 
     private async searchBySubstring(term: string, limit: number): Promise<SearchCandidate[]> {
-        const normalizedTerm = term.toLowerCase();
-        const results: SearchCandidate[] = [];
-        for (const [filePath] of this.fileEntries) {
-            const absPath = path.join(this.rootPath, filePath);
-            let content: string;
-            try {
-                content = await this.fileSystem.readFile(absPath);
-            } catch {
-                continue;
+        const matches: SearchCandidate[] = [];
+        const lowerTerm = term.toLowerCase();
+
+        for (const [path, entry] of this.fileEntries) {
+            if (path.toLowerCase().includes(lowerTerm)) {
+                matches.push({ filePath: path, score: 1.0 });
             }
-            if (content.toLowerCase().includes(normalizedTerm)) {
-                results.push({ filePath, score: 1 });
-                if (results.length >= limit) {
-                    break;
-                }
-            }
+            if (matches.length >= limit) break;
         }
-        return results;
+        return matches;
     }
 
     public static normalizeQuery(input: string): string {
-        return input.normalize("NFKC").trim().toLowerCase();
+        return input.toLowerCase().replace(/[^a-z0-9]/g, ' ').replace(/\s+/g, ' ').trim();
     }
 
     private normalizeRelative(absPath: string): string | null {
-        const absolute = path.isAbsolute(absPath) ? absPath : path.join(this.rootPath, absPath);
-        if (!absolute.startsWith(this.rootPath)) {
+        try {
+            const rel = path.relative(this.rootPath, absPath);
+            return rel.startsWith('..') ? null : rel.replace(/\\/g, '/');
+        } catch {
             return null;
         }
-        const relative = path.relative(this.rootPath, absolute);
-        return relative.replace(/\\/g, "/");
     }
 }

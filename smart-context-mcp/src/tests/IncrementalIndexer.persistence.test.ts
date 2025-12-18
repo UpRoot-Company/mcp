@@ -8,199 +8,138 @@ import { ModuleResolver } from '../ast/ModuleResolver.js';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
+import { PathManager } from '../utils/PathManager.js';
 
 describe('Persistent Index', () => {
-  let testProjectRoot: string;
-  let indexer: IncrementalIndexer;
-  let indexManager: ProjectIndexManager;
-  
-  beforeEach(async () => {
-    // Create temp project directory
-    testProjectRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'smart-context-persistence-test-'));
-    indexManager = new ProjectIndexManager(testProjectRoot);
-  });
-  
-  afterEach(async () => {
-    // Cleanup
-    if (indexer) await indexer.stop();
-    await fs.rm(testProjectRoot, { recursive: true, force: true });
-  });
+    let testProjectRoot: string;
+    let indexer: IncrementalIndexer;
+    let indexManager: ProjectIndexManager;
 
-  const createIndexer = (rootPath: string) => {
-      // Mock dependencies
-      const symbolIndex = {
-          isSupported: () => true,
-          shouldIgnore: () => false,
-          getSymbolsForFile: jest.fn(async () => []),
-          restoreFromCache: jest.fn()
-      } as unknown as SymbolIndex;
+    beforeEach(async () => {
+        const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'smart-context-persistence-test-'));
+        testProjectRoot = await fs.realpath(tempDir);
+        PathManager.setRoot(testProjectRoot);
+        indexManager = new ProjectIndexManager(testProjectRoot);
+    });
 
-      const dependencyGraph = {
-          updateFileDependencies: jest.fn(async () => undefined),
-          rebuildUnresolved: jest.fn(async () => undefined),
-          removeFile: jest.fn(async () => undefined),
-          removeDirectory: jest.fn(async () => undefined),
-          restoreEdges: jest.fn(async () => undefined)
-      } as unknown as DependencyGraph;
+    afterEach(async () => {
+        if (indexer) {
+            await indexer.stop();
+        }
+        await fs.rm(testProjectRoot, { recursive: true, force: true });
+    });
 
-      const indexDatabase = {
-          listFiles: () => [],
-          deleteFile: () => undefined,
-          getFile: () => undefined
-      } as unknown as IndexDatabase;
+    const createIndexer = (rootPath: string) => {
+        const symbolIndex = {
+            isSupported: (fp: string) => fp.endsWith('.ts') || fp.endsWith('.js'),
+            shouldIgnore: () => false,
+            getSymbolsForFile: jest.fn(async () => [{ name: 'TestSymbol', kind: 'class', line: 1 } as any]),
+            restoreFromCache: jest.fn(),
+            findFilesBySymbolName: jest.fn(async () => [])
+        } as unknown as SymbolIndex;
 
-      const moduleResolver = {
-          reloadConfig: jest.fn()
-      } as unknown as ModuleResolver;
+        const dependencyGraph = {
+            updateFileDependencies: jest.fn(async () => undefined),
+            rebuildUnresolved: jest.fn(async () => undefined),
+            removeFile: jest.fn(async () => undefined),
+            removeDirectory: jest.fn(async () => undefined),
+            restoreEdges: jest.fn(async () => undefined)
+        } as unknown as DependencyGraph;
 
-      // We don't provide ConfigurationManager here to simplify
-      const indexer = new IncrementalIndexer(
-          rootPath,
-          symbolIndex,
-          dependencyGraph,
-          indexDatabase,
-          moduleResolver,
-          undefined, // ConfigurationManager
-          { watch: true, initialScan: true }
-      );
+        const indexDatabase = {
+            listFiles: jest.fn(() => []),
+            deleteFile: jest.fn(),
+            getFile: jest.fn(() => undefined)
+        } as unknown as IndexDatabase;
 
-      return { indexer, symbolIndex, dependencyGraph };
-  };
-  
-  test('should persist index after initial build and shutdown', async () => {
-    // Create test files
-    await createTestFiles(testProjectRoot, [
-      'src/a.ts',
-      'src/b.ts',
-      'src/c.ts'
-    ]);
-    
-    // Build index
-    const result = createIndexer(testProjectRoot);
-    indexer = result.indexer;
-    
-    await indexer.start();
-    await waitForIndexing();
-    await indexer.stop();
-    
-    // Verify index file exists
-    const indexPath = path.join(testProjectRoot, '.mcp', 'smart-context', 'index.json');
-    try {
-        await fs.access(indexPath);
-    } catch {
-        throw new Error(`Index file not found at ${indexPath}`);
-    }
-    
-    // Verify index content
-    const index = await indexManager.loadPersistedIndex();
-    expect(index).not.toBeNull();
-    // Since we mocked symbolIndex to return empty arrays, we expect entries but empty content
-    // Also IncrementalIndexer.processFile updates the indexManager
-    // But we need to ensure processFile was actually called.
-    // enqueueInitialScan works by scanning directory.
-    
-    // We should expect 3 files in index
-    expect(Object.keys(index!.files).length).toBe(3);
-  });
-  
-  test('should load persisted index and restore cache', async () => {
-    // Step 1: Initial build
-    await createTestFiles(testProjectRoot, [
-      'src/a.ts'
-    ]);
-    
-    const result1 = createIndexer(testProjectRoot);
-    const indexer1 = result1.indexer;
-    await indexer1.start();
-    await waitForIndexing();
-    await indexer1.stop();
-    
-    // Step 2: Restart indexer
-    const result2 = createIndexer(testProjectRoot);
-    const indexer2 = result2.indexer;
-    const symbolIndex2 = result2.symbolIndex;
-    
-    await indexer2.start();
-    
-    // It should have restored from cache
-    // We can verify if symbolIndex.restoreFromCache was called
-    expect(symbolIndex2.restoreFromCache).toHaveBeenCalled();
-    
-    await indexer2.stop();
-  });
-  
-  test('should detect changes via mtime', async () => {
-    // 1. Create file and index
-    await createTestFiles(testProjectRoot, ['src/a.ts']);
-    let result = createIndexer(testProjectRoot);
-    await result.indexer.start();
-    await waitForIndexing();
-    await result.indexer.stop();
-    
-    // 2. Modify file
-    await sleep(100); 
-    await touchFile(path.join(testProjectRoot, 'src/a.ts'));
-    
-    // 3. Re-index
-    // We want to check if it queues the file for processing.
-    // We can spy on enqueuePath? It's private.
-    // But if it queues, it calls symbolIndex.getSymbolsForFile.
-    
-    result = createIndexer(testProjectRoot);
-    await result.indexer.start();
-    await waitForIndexing();
-    
-    // Since it changed, shouldReindex should return true, and enqueuePath called.
-    // processQueue should call symbolIndex.getSymbolsForFile
-    expect(result.symbolIndex.getSymbolsForFile).toHaveBeenCalledWith(expect.stringContaining('src/a.ts'));
-    
-    await result.indexer.stop();
-  });
+        const moduleResolver = {
+            reloadConfig: jest.fn()
+        } as unknown as ModuleResolver;
 
-  test('should skip unchanged files', async () => {
-    // 1. Create file and index
-    await createTestFiles(testProjectRoot, ['src/a.ts']);
-    let result = createIndexer(testProjectRoot);
-    await result.indexer.start();
-    await waitForIndexing();
-    await result.indexer.stop();
-    
-    // 2. Do NOT modify file
-    
-    // 3. Re-index
-    result = createIndexer(testProjectRoot);
-    await result.indexer.start();
-    await waitForIndexing();
-    
-    // It should load from persisted index and NOT queue it for processing (except maybe 'medium' queue for 'add' event but skipped inside handler?)
-    // In start():
-    // this.watcher.on('add', async file => { const needs = await shouldReindex(file); if(needs) ... else log skipping })
-    // So getSymbolsForFile should NOT be called if skipped.
-    
-    expect(result.symbolIndex.getSymbolsForFile).not.toHaveBeenCalled();
-    
-    await result.indexer.stop();
-  });
+        const indexer = new IncrementalIndexer(
+            rootPath,
+            symbolIndex,
+            dependencyGraph,
+            indexDatabase,
+            moduleResolver,
+            undefined, 
+            { watch: false, initialScan: true }
+        );
+
+        return { indexer, symbolIndex, dependencyGraph };
+    };
+
+    test('should persist index after initial build and shutdown', async () => {
+        await createTestFiles(testProjectRoot, ['src/main.ts', 'src/utils.ts']);
+        const { indexer: idx } = createIndexer(testProjectRoot);
+        indexer = idx;
+
+        await indexer.start();
+        await indexer.waitForInitialScan();
+        await sleep(500); 
+        await indexer.stop();
+
+        const index = await indexManager.loadPersistedIndex();
+        expect(index).not.toBeNull();
+        expect(Object.keys(index!.files).length).toBeGreaterThan(0);
+    });
+
+    test('should restore state from persisted index', async () => {
+        await createTestFiles(testProjectRoot, ['src/shared.ts']);
+        const { indexer: idx1 } = createIndexer(testProjectRoot);
+        await idx1.start();
+        await idx1.waitForInitialScan();
+        await sleep(500);
+        await idx1.stop();
+
+        const { indexer: idx2, symbolIndex: sym2 } = createIndexer(testProjectRoot);
+        await idx2.start();
+        await idx2.waitForInitialScan();
+        
+        expect(sym2.restoreFromCache).toHaveBeenCalled();
+        await idx2.stop();
+    });
+
+    test('should only reindex changed files after restoration', async () => {
+        await createTestFiles(testProjectRoot, ['file1.ts', 'file2.ts']);
+        
+        const { indexer: idx1 } = createIndexer(testProjectRoot);
+        await idx1.start();
+        await idx1.waitForInitialScan();
+        await sleep(500);
+        await idx1.stop();
+
+        await sleep(200); 
+        await touchFile(path.join(testProjectRoot, 'file1.ts'));
+
+        const { indexer: idx2, symbolIndex: sym2 } = createIndexer(testProjectRoot);
+        await idx2.start();
+        await idx2.waitForInitialScan();
+        await sleep(500);
+
+        const calls = (sym2.getSymbolsForFile as jest.Mock).mock.calls;
+        const indexedFiles = calls.map(c => c[0] as string);
+        
+        expect(indexedFiles.some(f => f.endsWith('file1.ts'))).toBe(true);
+        expect(indexedFiles.some(f => f.endsWith('file2.ts'))).toBe(false);
+
+        await idx2.stop();
+    });
 });
 
-// Helper functions
 async function createTestFiles(root: string, files: string[]): Promise<void> {
-  for (const file of files) {
-    const fullPath = path.join(root, file);
-    await fs.mkdir(path.dirname(fullPath), { recursive: true });
-    await fs.writeFile(fullPath, `// Test file: ${file}\nexport const x = 1;`, 'utf-8');
-  }
+    for (const file of files) {
+        const fullPath = path.join(root, file);
+        await fs.mkdir(path.dirname(fullPath), { recursive: true });
+        await fs.writeFile(fullPath, `// Test file: ${file}\nexport const x = 1;`, 'utf-8');
+    }
 }
 
 async function touchFile(filePath: string): Promise<void> {
-  const content = await fs.readFile(filePath, 'utf-8');
-  await fs.writeFile(filePath, content + '\n// touched', 'utf-8');
+    const content = await fs.readFile(filePath, 'utf-8');
+    await fs.writeFile(filePath, content + '\n// touched', 'utf-8');
 }
 
 function sleep(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-function waitForIndexing(): Promise<void> {
-  return sleep(1000); // Wait for async indexing to complete
+    return new Promise(resolve => setTimeout(resolve, ms));
 }

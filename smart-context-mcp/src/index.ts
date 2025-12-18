@@ -4,9 +4,6 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { ListToolsRequestSchema, CallToolRequestSchema, McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import * as fs from "fs";
-
-
-
 import * as path from "path";
 import * as ignore from "ignore";
 import * as url from "url";
@@ -43,10 +40,9 @@ import { TransactionLog, TransactionLogEntry } from "./engine/TransactionLog.js"
 import { metrics } from "./utils/MetricsCollector.js";
 import { PathNormalizer } from "./utils/PathNormalizer.js";
 import { ConfigurationManager } from "./config/ConfigurationManager.js";
+import { PathManager } from "./utils/PathManager.js";
 
 export { ConfigurationManager } from "./config/ConfigurationManager.js";
-
-
 
 const ENABLE_DEBUG_LOGS = process.env.SMART_CONTEXT_DEBUG === 'true';
 
@@ -114,6 +110,7 @@ export class SmartContextServer {
         });
 
         this.rootPath = path.resolve(rootPath);
+        PathManager.setRoot(this.rootPath);
         this.fileSystem = fileSystem ?? new NodeFileSystem(this.rootPath);
         if (this.fileSystem instanceof NodeFileSystem) {
             try {
@@ -893,8 +890,6 @@ export class SmartContextServer {
         }
         return Math.max(0, Math.min(1, value));
     }
-
-
 
     private async pathExists(absPath: string): Promise<boolean> {
         try {
