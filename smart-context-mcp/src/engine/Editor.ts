@@ -142,6 +142,77 @@ export class EditorEngine {
         return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     }
 
+    private normalizeReplacementString(value: string | undefined): string {
+        if (!value || !value.includes("\\")) {
+            return value ?? "";
+        }
+
+        let normalized = value;
+        const quoteChars: Array<'"' | "'" | "`"> = ['"', "'", "`"];
+
+        for (const quote of quoteChars) {
+            if (this.containsUnescapedQuote(normalized, quote)) {
+                continue;
+            }
+
+            if (!normalized.includes(`\\${quote}`)) {
+                continue;
+            }
+
+            normalized = this.stripEscapedQuotes(normalized, quote);
+        }
+
+        return normalized;
+    }
+
+    private containsUnescapedQuote(value: string, quote: '"' | "'" | "`"): boolean {
+        for (let i = 0; i < value.length; i++) {
+            if (value[i] !== quote) {
+                continue;
+            }
+
+            let backslashCount = 0;
+            let j = i - 1;
+            while (j >= 0 && value[j] === "\\") {
+                backslashCount++;
+                j--;
+            }
+
+            if (backslashCount % 2 === 0) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private stripEscapedQuotes(value: string, quote: '"' | "'" | "`"): string {
+        let result = "";
+
+        for (let i = 0; i < value.length; i++) {
+            const char = value[i];
+
+            if (char === "\\" && value[i + 1] === quote) {
+                let backslashCount = 0;
+                let j = i - 1;
+                while (j >= 0 && value[j] === "\\") {
+                    backslashCount++;
+                    j--;
+                }
+
+                if (backslashCount % 2 === 0) {
+                    result += quote;
+                    i++; // skip the quote we just consumed
+                    continue;
+                }
+            }
+
+            result += char;
+        }
+
+        return result;
+    }
+
     private decodeEscapeSequences(value: string): string {
         if (!value.includes("\\")) {
             return value;
@@ -1180,6 +1251,8 @@ export class EditorEngine {
         const plannedMatches: Match[] = [];
 
         for (const edit of edits) {
+            edit.replacementString = this.normalizeReplacementString(edit.replacementString);
+
             if (edit.indexRange) {
                 const { start, end } = edit.indexRange;
 

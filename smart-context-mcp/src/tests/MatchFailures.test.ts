@@ -106,4 +106,58 @@ describe('EditorEngine Match Failures', () => {
         const updated = await fs.readFile('/test.ts');
         expect(updated.includes('line\\nupdated')).toBe(true);
     });
+
+    it('should normalize replacement strings that contain escaped quotes', async () => {
+        const content = 'const before = 1;';
+        await fs.writeFile('/test.ts', content);
+
+        const edits = [{
+            filePath: '/test.ts',
+            operation: 'replace' as const,
+            targetString: 'const before = 1;',
+            replacementString: 'const after = \\\"value\\\";'
+        }];
+
+        const result = await engine.applyEdits('/test.ts', edits);
+        expect(result.success).toBe(true);
+        const updated = await fs.readFile('/test.ts');
+        expect(updated.includes('const after = "value";')).toBe(true);
+        expect(updated.includes('\\"')).toBe(false);
+    });
+
+    it('should normalize replacement strings that contain escaped single quotes', async () => {
+        const content = "const before = 'value';";
+        await fs.writeFile('/test.ts', content);
+
+        const edits = [{
+            filePath: '/test.ts',
+            operation: 'replace' as const,
+            targetString: "const before = 'value';",
+            replacementString: "const after = \\'value\\';"
+        }];
+
+        const result = await engine.applyEdits('/test.ts', edits);
+        expect(result.success).toBe(true);
+        const updated = await fs.readFile('/test.ts');
+        expect(updated.includes("const after = 'value';")).toBe(true);
+        expect(updated.includes("\\'")).toBe(false);
+    });
+
+    it('should normalize replacement strings that contain escaped backticks', async () => {
+        const content = 'const before = `value`;';
+        await fs.writeFile('/test.ts', content);
+
+        const edits = [{
+            filePath: '/test.ts',
+            operation: 'replace' as const,
+            targetString: 'const before = `value`;',
+            replacementString: 'const after = \\`value\\`;'
+        }];
+
+        const result = await engine.applyEdits('/test.ts', edits);
+        expect(result.success).toBe(true);
+        const updated = await fs.readFile('/test.ts');
+        expect(updated.includes('const after = `value`;')).toBe(true);
+        expect(updated.includes('\\`')).toBe(false);
+    });
 });
