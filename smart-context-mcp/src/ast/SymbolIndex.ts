@@ -91,22 +91,35 @@ export class SymbolIndex {
 
     public async search(query: string): Promise<SymbolSearchResult[]> {
         await this.ensureBaselineIndex();
-        const results: SymbolSearchResult[] = [];
-        const queryLower = query.toLowerCase();
-        const symbolMap = this.db.streamAllSymbols();
-        for (const [relativePath, symbols] of symbolMap) {
-            for (const symbol of symbols) {
-                if (symbol.name.toLowerCase().includes(queryLower)) {
-                    results.push({ filePath: relativePath, symbol });
-                }
-            }
-        }
+        
+        const pattern = `%${query}%`;
+        const rows = this.db.searchSymbols(pattern, 100);
+        
+        const results = rows.map(row => ({
+            filePath: row.path,
+            symbol: JSON.parse(row.data_json) as SymbolInfo
+        }));
         
         if (results.length > 0) {
-            return results.slice(0, 100);
+            return results;
         }
 
         return this.fuzzySearch(query, { maxEditDistance: 2 });
+    }
+
+    public async findFilesBySymbolName(keywords: string[]): Promise<string[]> {
+        await this.ensureBaselineIndex();
+        const filePaths = new Set<string>();
+        
+        for (const keyword of keywords) {
+            const pattern = `%${keyword}%`;
+            const rows = this.db.searchSymbols(pattern, 200);
+            for (const row of rows) {
+                filePaths.add(row.path);
+            }
+        }
+        
+        return Array.from(filePaths);
     }
 
     public async getAllSymbols(): Promise<Map<string, SymbolInfo[]>> {

@@ -209,30 +209,44 @@ export class TrigramIndex {
         } catch {
             return;
         }
+
+        const subDirs: string[] = [];
+        const files: Array<{ absPath: string, relative: string, mtime: number, size: number }> = [];
+
         for (const entry of entries) {
             const absPath = path.join(absDir, entry);
             const relative = this.normalizeRelative(absPath);
-            if (!relative) {
+            if (!relative || this.ignoreFilter.ignores(relative)) {
                 continue;
             }
-            if (this.ignoreFilter.ignores(relative)) {
-                continue;
-            }
+
             let stats;
             try {
                 stats = await this.fileSystem.stat(absPath);
             } catch {
                 continue;
             }
+
             if (stats.isDirectory()) {
-                await this.walk(absPath, visited);
-                continue;
+                subDirs.push(absPath);
+            } else if (this.shouldIndexFile(relative, stats.size)) {
+                files.push({ absPath, relative, mtime: stats.mtime, size: stats.size });
             }
-            if (!this.shouldIndexFile(relative, stats.size)) {
-                continue;
-            }
-            visited?.add(relative);
-            await this.indexFile(absPath, relative, stats.mtime, stats.size);
+        }
+
+        // 1. Process files in current directory in parallel batches
+        const FILE_BATCH_SIZE = 20;
+        for (let i = 0; i < files.length; i += FILE_BATCH_SIZE) {
+            const chunk = files.slice(i, i + FILE_BATCH_SIZE);
+            await Promise.all(chunk.map(async (file) => {
+                visited?.add(file.relative);
+                await this.indexFile(file.absPath, file.relative, file.mtime, file.size);
+            }));
+        }
+
+        // 2. Process subdirectories
+        if (subDirs.length > 0) {
+            await Promise.all(subDirs.map(dir => this.walk(dir, visited)));
         }
     }
 

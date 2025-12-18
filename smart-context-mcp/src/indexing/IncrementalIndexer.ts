@@ -257,41 +257,48 @@ export class IncrementalIndexer {
             this.setActivity('queue_processing', `Processing ${this.getTotalQueueSize()} queued files`);
 
             const batchEntries = this.pullNextBatch();
-            for (const filePath of batchEntries) {
-                if (this.stopped) {
-                    break;
-                }
-                if (!(await this.fileExists(filePath))) {
-                    continue;
-                }
-
-                try {
-                    const symbols = await this.symbolIndex.getSymbolsForFile(filePath);
-                    const imports = await this.importExtractor.extractImports(filePath);
-                    const exports = await this.exportExtractor.extractExports(filePath);
-
-                    await this.dependencyGraph.updateFileDependencies(filePath);
-
-                    // Update persistent index
-                    if (this.currentIndex && !this.stopped) {
-                        const stat = await fs.promises.stat(filePath).catch(() => undefined);
-                        if (stat) {
-                            const entry: FileIndexEntry = {
-                                mtime: stat.mtimeMs,
-                                symbols,
-                                imports,
-                                exports,
-                                trigrams: {
-                                    wordCount: 0,
-                                    uniqueTrigramCount: 0
-                                }
-                            };
-                            this.indexManager.updateFileEntry(this.currentIndex, filePath, entry);
-                        }
+            
+            // Process batch in smaller parallel chunks to avoid overwhelming system
+            const PARALLEL_LIMIT = 8;
+            for (let i = 0; i < batchEntries.length; i += PARALLEL_LIMIT) {
+                const chunk = batchEntries.slice(i, i + PARALLEL_LIMIT);
+                
+                await Promise.all(chunk.map(async (filePath) => {
+                    if (this.stopped) {
+                        return;
                     }
-                } catch (error) {
-                    console.warn(`[IncrementalIndexer] failed to index ${filePath}:`, error);
-                }
+                    if (!(await this.fileExists(filePath))) {
+                        return;
+                    }
+
+                    try {
+                        const symbols = await this.symbolIndex.getSymbolsForFile(filePath);
+                        const imports = await this.importExtractor.extractImports(filePath);
+                        const exports = await this.exportExtractor.extractExports(filePath);
+
+                        await this.dependencyGraph.updateFileDependencies(filePath);
+
+                        // Update persistent index
+                        if (this.currentIndex && !this.stopped) {
+                            const stat = await fs.promises.stat(filePath).catch(() => undefined);
+                            if (stat) {
+                                const entry: FileIndexEntry = {
+                                    mtime: stat.mtimeMs,
+                                    symbols,
+                                    imports,
+                                    exports,
+                                    trigrams: {
+                                        wordCount: 0,
+                                        uniqueTrigramCount: 0
+                                    }
+                                };
+                                this.indexManager.updateFileEntry(this.currentIndex, filePath, entry);
+                            }
+                        }
+                    } catch (error) {
+                        console.warn(`[IncrementalIndexer] failed to index ${filePath}:`, error);
+                    }
+                }));
             }
             this.debouncedPersist();
         }

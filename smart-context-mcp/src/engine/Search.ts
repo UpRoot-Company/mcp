@@ -239,22 +239,35 @@ export class SearchEngine {
         const documents: Document[] = [];
         const candidateEntries: Array<{ absPath: string, relativeToBase: string }> = [];
 
-        for (const candidatePath of candidates) {
-            const absPath = path.isAbsolute(candidatePath)
-                ? candidatePath
-                : path.join(this.rootPath, candidatePath);
+        // 1. Gather all document contents for collection-wide BM25 in parallel batches
+        const candidateList = Array.from(candidates);
+        const CHUNK_SIZE = 50;
+        
+        for (let i = 0; i < candidateList.length; i += CHUNK_SIZE) {
+            const chunk = candidateList.slice(i, i + CHUNK_SIZE);
+            const chunkResults = await Promise.all(chunk.map(async (candidatePath) => {
+                const absPath = path.isAbsolute(candidatePath)
+                    ? candidatePath
+                    : path.join(this.rootPath, candidatePath);
 
-            const relativeToBase = this.normalizeRelativePath(absPath, basePath ? path.resolve(basePath) : this.rootPath);
-            if (!relativeToBase || !this.shouldInclude(relativeToBase, includeRegexes, excludeRegexes)) {
-                continue;
-            }
+                const relativeToBase = this.normalizeRelativePath(absPath, basePath ? path.resolve(basePath) : this.rootPath);
+                if (!relativeToBase || !this.shouldInclude(relativeToBase, includeRegexes, excludeRegexes)) {
+                    return null;
+                }
 
-            try {
-                const content = await this.fileSystem.readFile(absPath);
-                documents.push({ id: absPath, text: content, filePath: relativeToBase, score: 0 });
-                candidateEntries.push({ absPath, relativeToBase });
-            } catch {
-                continue;
+                try {
+                    const content = await this.fileSystem.readFile(absPath);
+                    return { absPath, relativeToBase, content };
+                } catch {
+                    return null;
+                }
+            }));
+
+            for (const res of chunkResults) {
+                if (res) {
+                    documents.push({ id: res.absPath, text: res.content, filePath: res.relativeToBase, score: 0 });
+                    candidateEntries.push({ absPath: res.absPath, relativeToBase: res.relativeToBase });
+                }
             }
         }
 
@@ -264,21 +277,33 @@ export class SearchEngine {
 
         const fileSearchResults: FileSearchResult[] = [];
 
-        for (const { absPath, relativeToBase } of candidateEntries) {
-            const content = contentMap.get(absPath) || "";
-            const contentScoreRaw = bm25ScoreMap.get(absPath) || 0;
+        // 3. Combine BM25 with other signals using HybridScorer in parallel batches
+        for (let i = 0; i < candidateEntries.length; i += CHUNK_SIZE) {
+            const chunk = candidateEntries.slice(i, i + CHUNK_SIZE);
+            const chunkScores = await Promise.all(chunk.map(async ({ absPath, relativeToBase }) => {
+                const content = contentMap.get(absPath) || "";
+                const contentScoreRaw = bm25ScoreMap.get(absPath) || 0;
 
-            try {
-                const hybridScore = await this.hybridScorer.scoreFile(
-                    absPath,
-                    content,
-                    normalizedKeywords,
-                    normalizedQuery,
-                    contentScoreRaw,
-                    intent,
-                    patterns,
-                    { wordBoundary, caseSensitive }
-                );
+                try {
+                    const hybridScore = await this.hybridScorer.scoreFile(
+                        absPath,
+                        content,
+                        normalizedKeywords,
+                        normalizedQuery,
+                        contentScoreRaw,
+                        intent,
+                        patterns,
+                        { wordBoundary, caseSensitive }
+                    );
+                    return { relativeToBase, hybridScore };
+                } catch {
+                    return null;
+                }
+            }));
+
+            for (const res of chunkScores) {
+                if (!res) continue;
+                const { relativeToBase, hybridScore } = res;
 
                 const CORE_SIGNALS = ['content', 'filename', 'symbol', 'comment', 'pattern'];
                 const hasCoreSignal = hybridScore.signals.some(s => CORE_SIGNALS.includes(s));
@@ -326,8 +351,6 @@ export class SearchEngine {
                         });
                     }
                 }
-            } catch (error) {
-                continue;
             }
         }
 

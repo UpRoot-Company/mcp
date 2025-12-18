@@ -44,6 +44,7 @@ interface StatementMap {
     insertUnresolved: Database.Statement;
     selectUnresolved: Database.Statement;
     selectUnresolvedByFile: Database.Statement;
+    searchSymbols: Database.Statement;
 }
 
 export class IndexDatabase {
@@ -235,8 +236,19 @@ export class IndexDatabase {
                 FROM unresolved_dependencies u
                 JOIN files f ON f.id = u.source_file_id
                 WHERE f.path = ?
+            `),
+            searchSymbols: this.db.prepare(`
+                SELECT f.path as path, s.data_json as data_json
+                FROM symbols s
+                JOIN files f ON f.id = s.file_id
+                WHERE s.name LIKE ?
+                LIMIT ?
             `)
         };
+    }
+
+    public searchSymbols(pattern: string, limit: number = 100): Array<{ path: string; data_json: string }> {
+        return this.statements.searchSymbols.all(pattern, limit) as Array<{ path: string; data_json: string }>;
     }
 
     public getOrCreateFile(relativePath: string, lastModified?: number, language?: string | null): FileRecord {

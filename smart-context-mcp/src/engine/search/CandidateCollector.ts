@@ -133,25 +133,10 @@ export class CandidateCollector {
     }
 
     private async findBySymbolName(keywords: string[]): Promise<string[]> {
-        const matches = new Set<string>();
         if (!this.symbolIndex) {
             return [];
         }
-
-        const allSymbols = await this.symbolIndex.getAllSymbols();
-        for (const [filePath, symbols] of allSymbols.entries()) {
-            for (const symbol of symbols) {
-                const lowerSymbol = symbol.name.toLowerCase();
-                for (const keyword of keywords) {
-                    if (lowerSymbol.includes(keyword.toLowerCase())) {
-                        matches.add(filePath);
-                        break;
-                    }
-                }
-            }
-        }
-
-        return Array.from(matches);
+        return this.symbolIndex.findFilesBySymbolName(keywords);
     }
 
     private normalizeRelativePath(filePath: string, basePath: string): string | null {
