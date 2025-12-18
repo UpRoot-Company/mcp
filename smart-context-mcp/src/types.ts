@@ -537,6 +537,8 @@ export interface SkeletonOptions {
     includeMemberVars?: boolean;
     /** Include line/comment blocks when true. Defaults to false. */
     includeComments?: boolean;
+    /** Include semantic summaries (calls/refs) in folded blocks. Defaults to false. */
+    includeSummary?: boolean;
     /** Controls folding strictness for method bodies and large regions. */
     detailLevel?: SkeletonDetailLevel;
     /** Maximum literal entries to show when previewing member arrays. Defaults to 3. */

@@ -59,17 +59,20 @@ describe('SkeletonGenerator', () => {
         expect(skeleton).toContain('key: \'value\'');
     });
 
-    it('should fold Python function bodies but keep classes', async () => {
+        it('should fold Python function bodies but keep classes', async () => {
         const code = `
 class MyClass:
     def method(self):
-        print("hello")
-        if True:
-            pass
+        print(\"line 1\")
+        print(\"line 2\")
+        print(\"line 3\")
 
 def global_func():
-    return 1
+    print(\"global 1\")
+    print(\"global 2\")
+    print(\"global 3\")
 `;
+
         const skeleton = await generator.generateSkeleton('test.py', code);
         
         expect(skeleton).toContain('class MyClass:');
@@ -372,6 +375,23 @@ def python_func(arg1, arg2):
                 s.type === 'import' && (s as ImportSymbol).isTypeOnly
             );
             expect(typeImport).toBeDefined();
+        });
+    });
+
+    describe('Tier 2: Semantic Summaries', () => {
+        it('should include semantic summary when includeSummary is true', async () => {
+            const code = `
+            class Service {
+                async save() {
+                    const data = await db.users.insert({ name: 'test' });
+                    logger.info('Saved');
+                    return data;
+                }
+            }
+            `;
+            const skeleton = await generator.generateSkeleton('test.ts', code, { includeSummary: true });
+            expect(skeleton).toContain('implementation hidden');
+            expect(skeleton).toContain('calls: db.users.insert, logger.info');
         });
     });
 });

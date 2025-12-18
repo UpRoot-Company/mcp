@@ -2,6 +2,7 @@ import { AstManager } from './AstManager.js';
 import { SymbolInfo, SkeletonOptions, SkeletonDetailLevel } from '../types.js';
 import { Query } from 'web-tree-sitter';
 import { SymbolExtractor } from './extraction/SymbolExtractor.js';
+import { CallSiteAnalyzer } from './analysis/CallSiteAnalyzer.js';
 
 interface FoldQuery {
     query: string;
@@ -45,18 +46,21 @@ const LANGUAGE_CONFIG: Record<string, FoldQuery> = {
 type ResolvedSkeletonOptions = {
     includeMemberVars: boolean;
     includeComments: boolean;
+    includeSummary: boolean;
     detailLevel: SkeletonDetailLevel;
     maxMemberPreview: number;
 };
 
 export class SkeletonGenerator {
     private astManager: AstManager;
-    private queryCache = new Map<string, any>(); 
+    private queryCache = new Map<string, any>();
     private symbolExtractor: SymbolExtractor;
+    private callSiteAnalyzer: CallSiteAnalyzer;
 
     constructor() {
         this.astManager = AstManager.getInstance();
         this.symbolExtractor = new SymbolExtractor();
+        this.callSiteAnalyzer = new CallSiteAnalyzer();
     }
 
     public async getParserForFile(filePath: string) {
@@ -68,28 +72,22 @@ export class SkeletonGenerator {
     }
 
     public async generateSkeleton(filePath: string, content: string, options: SkeletonOptions = {}): Promise<string> {
-        if (typeof content !== 'string') return '';
-
         if (!this.astManager.supportsQueries()) {
             return content;
         }
 
-        let doc;
+        let doc: any;
         try {
             doc = await this.astManager.parseFile(filePath, content);
-        } catch (e) {
-            return content;
-        }
+            const lang = await this.astManager.getLanguageForFile(filePath);
+            const langId = this.astManager.getLanguageId(filePath);
+            const config = this.getLanguageConfig(filePath);
+            if (!config || !lang) return content;
 
-        const lang = await this.astManager.getLanguageForFile(filePath);
-        const langId = this.astManager.getLanguageId(filePath);
-        const config = this.getLanguageConfig(filePath);
-        if (!config) return content;
-        const resolvedOptions = this.resolveOptions(options);
+            const resolvedOptions = this.resolveOptions(options);
+            const rootNode: any | null = doc.rootNode;
 
-        let rootNode: any | null = null;
-        try {
-            rootNode = doc.rootNode;
+            if (!rootNode) return content;
 
             const maybeHasError = rootNode?.hasError;
             const rootHasError = typeof maybeHasError === 'function'
@@ -99,7 +97,8 @@ export class SkeletonGenerator {
             if (rootHasError) {
                 throw new Error('Tree-sitter parse error detected while building skeleton');
             }
-            const queryKey = `${langId}:${config.query}`; 
+
+            const queryKey = `${langId}:${config.query}`;
             let query = this.queryCache.get(queryKey);
             if (!query) {
                 query = new Query(lang, config.query);
@@ -107,21 +106,29 @@ export class SkeletonGenerator {
             }
 
             const matches = query.matches(rootNode);
-            const rangesToFold: { start: number; end: number; }[] = [];
+            const rangesToFold: { start: number; end: number; replacement?: string }[] = [];
 
             for (const match of matches) {
                 for (const capture of match.captures) {
-                    if (capture.name === 'fold') {
-                        const node = capture.node;
-                        if (config.shouldFold && !config.shouldFold(node)) {
-                            continue;
+                    const node = capture.node;
+                    if (config.shouldFold && !config.shouldFold(node)) {
+                        continue;
+                    }
+                    if (this.shouldFoldByDetailLevel(node, resolvedOptions.detailLevel, content)) {
+                        let replacement = config.replacement;
+
+                        // Tier 2: Semantic Summary
+                        if (resolvedOptions.includeSummary) {
+                            const summary = await this.generateSemanticSummary(node, lang, langId);
+                            if (summary) {
+                                replacement = replacement?.replace('implementation hidden', `implementation hidden; ${summary}`);
+                            }
                         }
-                        if (!this.shouldFoldByDetailLevel(node, resolvedOptions.detailLevel, content)) {
-                            continue;
-                        }
+
                         rangesToFold.push({
                             start: node.startIndex,
-                            end: node.endIndex
+                            end: node.endIndex,
+                            replacement: replacement ?? config.replacement
                         });
                     }
                 }
@@ -129,9 +136,8 @@ export class SkeletonGenerator {
 
             rangesToFold.sort((a, b) => a.start - b.start || b.end - a.end);
 
-            const rootRanges: { start: number; end: number; }[] = [];
+            const rootRanges: typeof rangesToFold = [];
             let lastEnd = -1;
-
             for (const range of rangesToFold) {
                 if (range.start >= lastEnd) {
                     rootRanges.push(range);
@@ -144,66 +150,100 @@ export class SkeletonGenerator {
                 const range = rootRanges[i];
                 const prefix = skeleton.substring(0, range.start);
                 const suffix = skeleton.substring(range.end);
-                skeleton = prefix + (config.replacement || '...') + suffix;
+                skeleton = prefix + (range.replacement ?? config.replacement ?? '') + suffix;
             }
 
             return this.applySkeletonPostProcessing(skeleton, resolvedOptions);
-
-        } catch (error) {
-            throw error; 
         } finally {
             doc?.dispose?.();
         }
     }
 
+    private async generateSemanticSummary(node: any, lang: any, langId: string): Promise<string | null> {
+        const callQuery = (this.callSiteAnalyzer as any).getCallQuery(langId, lang);
+        if (!callQuery) return null;
+
+        const matches = callQuery.matches(node);
+        const calls = new Set<string>();
+
+        for (const match of matches) {
+            const parsed = (this.callSiteAnalyzer as any).parseCallMatch(match);
+            if (parsed) {
+                const name = parsed.calleeObject
+                    ? `${parsed.calleeObject}.${parsed.calleeName}`
+                    : parsed.calleeName;
+                calls.add(name);
+            }
+        }
+
+        if (calls.size === 0) return null;
+
+        const callsList = Array.from(calls).slice(0, 5);
+        const moreCount = calls.size - callsList.length;
+        let summary = `calls: ${callsList.join(', ')}`;
+        if (moreCount > 0) summary += ` (+${moreCount} more)`;
+
+        return summary;
+    }
+
     private resolveOptions(options: SkeletonOptions): ResolvedSkeletonOptions {
         return {
-            includeMemberVars: options.includeMemberVars !== false,
-            includeComments: options.includeComments === true,
-            detailLevel: options.detailLevel ?? "standard",
+            includeMemberVars: options.includeMemberVars ?? true,
+            includeComments: options.includeComments ?? false,
+            includeSummary: options.includeSummary ?? false,
+            detailLevel: options.detailLevel ?? 'standard',
             maxMemberPreview: Math.max(1, options.maxMemberPreview ?? 3)
         };
     }
 
     private shouldFoldByDetailLevel(node: any, detailLevel: SkeletonDetailLevel, content: string): boolean {
-        if (detailLevel === "detailed") {
-            const lineLength = this.countLinesInRange(content, node.startIndex, node.endIndex);
-            return lineLength > 50;
+        const lineLength = this.countLinesInRange(content, node.startIndex, node.endIndex);
+        if (detailLevel === 'detailed') {
+            return lineLength > 20;
         }
-        return true;
+        if (detailLevel === 'minimal') {
+            return true;
+        }
+        // standard (default)
+        return lineLength >= 3;
     }
 
     private countLinesInRange(content: string, start: number, end: number): number {
         const slice = content.substring(start, end);
-        if (!slice) {
-            return 0;
-        }
         return slice.split(/\r?\n/).length;
     }
 
     private applySkeletonPostProcessing(content: string, options: ResolvedSkeletonOptions): string {
         const lines = content.split(/\r?\n/);
         const processed: string[] = [];
+
         for (const line of lines) {
             const trimmed = line.trim();
+            if (trimmed === "") continue;
+
             if (!options.includeComments && this.isCommentText(trimmed)) {
                 continue;
             }
             if (!options.includeMemberVars && this.isMemberVariableLine(trimmed)) {
                 continue;
             }
+
             let nextLine = line;
-            if (options.includeMemberVars) {
+            if (this.isMemberVariableLine(trimmed)) {
                 nextLine = this.limitMemberPreview(nextLine, options.maxMemberPreview);
             }
+
             processed.push(nextLine);
         }
-        let output = processed.join("\n");
-        if (options.detailLevel === "minimal") {
-            output = this.keepEssentialLinesOnly(output);
+
+        if (options.detailLevel === 'minimal') {
+            const minimalPattern = /(class|interface|function|def|enum|struct|trait|module|namespace|constructor)/i;
+            return processed
+                .filter(line => minimalPattern.test(line))
+                .join("\n");
         }
-        output = this.collapseBlankLines(output);
-        return output;
+
+        return this.collapseBlankLines(processed.join("\n"));
     }
 
     private isCommentText(trimmed: string): boolean {
@@ -211,25 +251,13 @@ export class SkeletonGenerator {
     }
 
     private isMemberVariableLine(trimmed: string): boolean {
-        if (/^(public|protected|private)\s+(static\s+)?(readonly\s+)?\$?[A-Za-z_][\w$]*\s*[:=;]/.test(trimmed)) {
-            return true;
-        }
-        if (/^(readonly\s+)?[A-Za-z_][\w$]*\s*:\s*[\w\<\>\[\]\s]+(?:;|=)/.test(trimmed)) {
-            return true;
-        }
-        if (/^\$[A-Za-z_][\w$]*\s*=/.test(trimmed)) {
-            return true;
-        }
-        if (/^[A-Za-z_][\w$]*\s*=\s*[^=]+$/.test(trimmed) && !/\bfunction\b/.test(trimmed)) {
-            return true;
-        }
-        return false;
+        return /^(public|protected|private)\s+(static\s+)?(readonly\s+)?\$?[A-Za-z_][\w$]*\s*[:=;]/.test(trimmed) ||
+            /^(readonly\s+)?[A-Za-z_][\w$]*\s*:\s*[\w\<\\>\[\]\s]+(?:;|=)/.test(trimmed) ||
+            /^\$[A-Za-z_][\w$]*\s*=/.test(trimmed) ||
+            (/^[A-Za-z_][\w$]*\s*=\s*[^=]+$/.test(trimmed) && !/\bfunction\b/.test(trimmed));
     }
 
     private limitMemberPreview(line: string, maxEntries: number): string {
-        if (maxEntries <= 0) {
-            return line;
-        }
         const arrayMatch = line.match(/=\s*\[(.+)\](;)?/);
         if (arrayMatch) {
             const entries = arrayMatch[1].split(",").map(part => part.trim()).filter(Boolean);
@@ -240,8 +268,8 @@ export class SkeletonGenerator {
                     `= [${limited}, ...${entries.length - maxEntries} more]${arrayMatch[2] ?? ""}`
                 );
             }
-            return line;
         }
+
         const objectMatch = line.match(/=\s*\{(.+)\}(;)?/);
         if (objectMatch) {
             const entries = objectMatch[1].split(",").map(part => part.trim()).filter(Boolean);
@@ -253,33 +281,16 @@ export class SkeletonGenerator {
                 );
             }
         }
-        return line;
-    }
 
-    private keepEssentialLinesOnly(content: string): string {
-        const essentialPattern = /(class|interface|function|def|enum|struct|trait|module|namespace|export\s+(class|function|const)|constructor|private|public|protected|greet)/i;
-        const lines = content.split(/\r?\n/);
-        const essentials: string[] = [];
-        for (const line of lines) {
-            const trimmed = line.trim();
-            if (trimmed.length === 0) {
-                continue;
-            }
-            if (essentialPattern.test(trimmed)) {
-                essentials.push(line);
-            }
-        }
-        return essentials.join("\n");
+        return line;
     }
 
     private collapseBlankLines(content: string): string {
         const lines = content.split(/\r?\n/);
         const filtered: string[] = [];
         for (const line of lines) {
-            if (line.trim().length === 0) {
-                if (filtered.length === 0 || filtered[filtered.length - 1].trim().length === 0) {
-                    continue;
-                }
+            if (line.trim() === "" && filtered.length > 0 && filtered[filtered.length - 1].trim() === "") {
+                continue;
             }
             filtered.push(line);
         }
@@ -291,35 +302,27 @@ export class SkeletonGenerator {
     }
 
     public async findIdentifiers(filePath: string, content: string, targetNames: string[]): Promise<{ name: string, range: any }[]> {
-        if (typeof content !== 'string') return [];
-        
         if (!this.astManager.supportsQueries()) {
             return [];
         }
 
-        let doc;
+        let doc: any;
         try {
             doc = await this.astManager.parseFile(filePath, content);
-        } catch (e) {
-            return [];
-        }
+            const lang = await this.astManager.getLanguageForFile(filePath);
+            const rootNode: any | null = doc.rootNode;
+            const results: { name: string, range: any }[] = [];
 
-        const lang = await this.astManager.getLanguageForFile(filePath);
-        if (!lang) return [];
+            if (!rootNode || !lang) return [];
 
-        let rootNode: any | null = null;
-        const results: { name: string, range: any }[] = [];
-
-        try {
-            rootNode = doc.rootNode;
             const query = new Query(lang, `
                 (identifier) @id
                 (property_identifier) @id
                 (type_identifier) @id
                 (shorthand_property_identifier_pattern) @id
             `);
+
             const matches = query.matches(rootNode);
-            
             const targetSet = new Set(targetNames);
 
             for (const match of matches) {
@@ -336,12 +339,13 @@ export class SkeletonGenerator {
                     });
                 }
             }
+            return results;
         } catch (error) {
             console.error(`Error finding identifiers in ${filePath}:`, error);
+            return [];
         } finally {
             doc?.dispose?.();
         }
-        return results;
     }
 
     private getLanguageConfig(filePath: string): FoldQuery | undefined {
