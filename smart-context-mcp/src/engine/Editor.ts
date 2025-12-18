@@ -162,7 +162,7 @@ export class EditorEngine {
             normalized = this.stripEscapedQuotes(normalized, quote);
         }
 
-        return normalized;
+        return this.decodeStructuralEscapeSequences(normalized);
     }
 
     private containsUnescapedQuote(value: string, quote: '"' | "'" | "`"): boolean {
@@ -171,14 +171,7 @@ export class EditorEngine {
                 continue;
             }
 
-            let backslashCount = 0;
-            let j = i - 1;
-            while (j >= 0 && value[j] === "\\") {
-                backslashCount++;
-                j--;
-            }
-
-            if (backslashCount % 2 === 0) {
+            if (!this.isEscapedCharacter(value, i)) {
                 return true;
             }
         }
@@ -193,14 +186,7 @@ export class EditorEngine {
             const char = value[i];
 
             if (char === "\\" && value[i + 1] === quote) {
-                let backslashCount = 0;
-                let j = i - 1;
-                while (j >= 0 && value[j] === "\\") {
-                    backslashCount++;
-                    j--;
-                }
-
-                if (backslashCount % 2 === 0) {
+                if (!this.isEscapedCharacter(value, i)) {
                     result += quote;
                     i++; // skip the quote we just consumed
                     continue;
@@ -211,6 +197,68 @@ export class EditorEngine {
         }
 
         return result;
+    }
+
+    private decodeStructuralEscapeSequences(value: string): string {
+        if (!value.includes("\\n") && !value.includes("\\r") && !value.includes("\\t")) {
+            return value;
+        }
+
+        let result = "";
+        let activeQuote: '"' | "'" | "`" | null = null;
+
+        for (let i = 0; i < value.length; i++) {
+            const char = value[i];
+
+            if (char === "\\" && i < value.length - 1) {
+                const next = value[i + 1];
+                if (!activeQuote) {
+                    if (next === "n") {
+                        result += "\n";
+                        i++;
+                        continue;
+                    }
+                    if (next === "r") {
+                        result += "\r";
+                        i++;
+                        continue;
+                    }
+                    if (next === "t") {
+                        result += "\t";
+                        i++;
+                        continue;
+                    }
+                }
+
+                result += char;
+                continue;
+            }
+
+            if (char === '"' || char === "'" || char === "`") {
+                const escaped = this.isEscapedCharacter(value, i);
+                if (!escaped) {
+                    if (activeQuote === char) {
+                        activeQuote = null;
+                    } else if (!activeQuote) {
+                        activeQuote = char as '"' | "'" | "`";
+                    }
+                }
+                result += char;
+                continue;
+            }
+
+            result += char;
+        }
+
+        return result;
+    }
+
+    private isEscapedCharacter(value: string, index: number): boolean {
+        let backslashCount = 0;
+        for (let i = index - 1; i >= 0 && value[i] === "\\"; i--) {
+            backslashCount++;
+        }
+        return backslashCount % 2 === 1;
     }
 
     private decodeEscapeSequences(value: string): string {

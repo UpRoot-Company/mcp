@@ -160,4 +160,39 @@ describe('EditorEngine Match Failures', () => {
         expect(updated.includes('const after = `value`;')).toBe(true);
         expect(updated.includes('\\`')).toBe(false);
     });
+
+    it('should decode structural newline escapes in replacement strings', async () => {
+        const content = 'const before = 1;';
+        await fs.writeFile('/test.ts', content);
+
+        const edits = [{
+            filePath: '/test.ts',
+            operation: 'replace' as const,
+            targetString: 'const before = 1;',
+            replacementString: 'const before = 1;\\nconst after = 2;'
+        }];
+
+        const result = await engine.applyEdits('/test.ts', edits);
+        expect(result.success).toBe(true);
+        const updated = await fs.readFile('/test.ts');
+        expect(updated.includes('const before = 1;\nconst after = 2;')).toBe(true);
+        expect(updated.includes('\\nconst after')).toBe(false);
+    });
+
+    it('should preserve newline escapes that live inside string literals', async () => {
+        const content = 'const text = "before";';
+        await fs.writeFile('/test.ts', content);
+
+        const edits = [{
+            filePath: '/test.ts',
+            operation: 'replace' as const,
+            targetString: 'const text = "before";',
+            replacementString: 'const text = "line\\nnext";'
+        }];
+
+        const result = await engine.applyEdits('/test.ts', edits);
+        expect(result.success).toBe(true);
+        const updated = await fs.readFile('/test.ts');
+        expect(updated.includes('const text = "line\\nnext";')).toBe(true);
+    });
 });

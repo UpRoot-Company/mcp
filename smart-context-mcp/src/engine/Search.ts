@@ -130,6 +130,10 @@ export class SearchEngine {
         this.resultProcessor = new ResultProcessor();
     }
 
+    public dispose(): void {
+        this.trigramIndex.dispose();
+    }
+
     public async updateExcludeGlobs(patterns: string[]): Promise<void> {
         const combined = [...BUILTIN_EXCLUDE_GLOBS, ...patterns];
         this.defaultExcludeGlobs = Array.from(new Set(combined));

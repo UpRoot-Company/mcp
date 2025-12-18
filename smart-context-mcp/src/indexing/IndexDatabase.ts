@@ -46,6 +46,12 @@ interface StatementMap {
     selectUnresolved: Database.Statement;
     selectUnresolvedByFile: Database.Statement;
     searchSymbols: Database.Statement;
+    // Tier 3: Ghost Registry
+    insertGhost: Database.Statement;
+    getGhost: Database.Statement;
+    deleteGhost: Database.Statement;
+    listGhosts: Database.Statement;
+    pruneGhosts: Database.Statement;
 }
 
 export class IndexDatabase {
@@ -62,29 +68,24 @@ export class IndexDatabase {
             console.error('[IndexDatabase] Falling back to in-memory database. Persistence will be disabled.');
             this.db = new Database(':memory:');
         }
-        
+
         try {
             this.configure();
             new MigrationRunner(this.db).run();
             this.statements = this.prepareStatements();
         } catch (error) {
             console.error('[IndexDatabase] Failed to initialize database schema:', error);
-            // If schema init fails even in memory or after fallback, we might need a desperate fallback or re-throw
-            // But let's try to survive with in-memory if the first attempt was file-based and failed later? 
-            // Actually, if 'new Database' succeeded, configure/migration should mostly work unless sqlite binary is broken.
-            // If it was file-based and failed during configure (e.g. WAL lock), we should catch that too.
-            
-            if (this.db.name !== ':memory:') {
-                 console.error('[IndexDatabase] Retrying with in-memory database due to configuration failure.');
-                 try {
-                     this.db.close();
-                 } catch {}
-                 this.db = new Database(':memory:');
-                 this.configure();
-                 new MigrationRunner(this.db).run();
-                 this.statements = this.prepareStatements();
+            if (dbPath !== ':memory:') {
+                console.error('[IndexDatabase] Retrying with in-memory database due to configuration failure.');
+                try {
+                    this.db.close();
+                } catch {}
+                this.db = new Database(':memory:');
+                this.configure();
+                new MigrationRunner(this.db).run();
+                this.statements = this.prepareStatements();
             } else {
-                throw error; // Memory db failed? Something is very wrong.
+                throw error;
             }
         }
     }
@@ -146,6 +147,14 @@ export class IndexDatabase {
                 metadata_json TEXT,
                 PRIMARY KEY(source_file_id, specifier),
                 FOREIGN KEY(source_file_id) REFERENCES files(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS ghost_symbols (
+                name TEXT PRIMARY KEY,
+                last_seen_path TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                signature TEXT,
+                deleted_at INTEGER NOT NULL
             );
 
             CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(name);
@@ -244,27 +253,45 @@ export class IndexDatabase {
                 JOIN files f ON f.id = s.file_id
                 WHERE s.name LIKE ?
                 LIMIT ?
+            `),
+            insertGhost: this.db.prepare(`
+                INSERT OR REPLACE INTO ghost_symbols(name, last_seen_path, kind, signature, deleted_at)
+                VALUES(?, ?, ?, ?, ?)
+            `),
+            getGhost: this.db.prepare(`
+                SELECT name, last_seen_path as lastSeenPath, kind as type, signature as lastKnownSignature, deleted_at as deletedAt
+                FROM ghost_symbols WHERE name = ?
+            `),
+            deleteGhost: this.db.prepare(`
+                DELETE FROM ghost_symbols WHERE name = ?
+            `),
+            listGhosts: this.db.prepare(`
+                SELECT name, last_seen_path as lastSeenPath, kind as type, signature as lastKnownSignature, deleted_at as deletedAt
+                FROM ghost_symbols ORDER BY deleted_at DESC
+            `),
+            pruneGhosts: this.db.prepare(`
+                DELETE FROM ghost_symbols WHERE deleted_at < ?
             `)
         };
     }
 
     public searchSymbols(pattern: string, limit: number = 100): Array<{ path: string; data_json: string }> {
-        return this.statements.searchSymbols.all(pattern, limit) as Array<{ path: string; data_json: string }>;
+        return this.statements.searchSymbols.all(pattern, limit) as any;
     }
 
     public getOrCreateFile(relativePath: string, lastModified?: number, language?: string | null): FileRecord {
         const normalized = this.normalize(relativePath);
         const existing = this.statements.getFileByPath.get(normalized) as FileRecord | undefined;
-        if (!existing) {
-            const info = this.statements.insertFile.run(normalized, lastModified ?? 0, language ?? null);
-            const id = Number(info.lastInsertRowid);
-            return { id, path: normalized, last_modified: lastModified ?? 0, language: language ?? null };
+        if (existing) {
+            if (lastModified !== undefined) {
+                this.statements.updateFile.run(lastModified, language ?? null, existing.id);
+                return { ...existing, last_modified: lastModified, language: language ?? null };
+            }
+            return existing;
         }
-        if (typeof lastModified === 'number' && (existing.last_modified !== lastModified || (language && existing.language !== language))) {
-            this.statements.updateFile.run(lastModified, language ?? null, existing.id);
-            return { ...existing, last_modified: lastModified, language: language ?? null };
-        }
-        return existing;
+        const info = this.statements.insertFile.run(normalized, lastModified ?? 0, language ?? null);
+        const id = Number(info.lastInsertRowid);
+        return { id, path: normalized, last_modified: lastModified ?? 0, language: language ?? null };
     }
 
     public getFile(relativePath: string): FileRecord | undefined {
@@ -283,7 +310,7 @@ export class IndexDatabase {
                     fileId,
                     symbol.name,
                     symbol.type,
-                    'signature' in symbol ? symbol.signature ?? null : null,
+                    'signature' in symbol ? (symbol as any).signature ?? null : null,
                     rangeJson,
                     serialized
                 );
@@ -350,7 +377,6 @@ export class IndexDatabase {
         const rows = (direction === 'outgoing'
             ? this.statements.selectDependenciesBySource.all(file.id)
             : this.statements.selectDependenciesByTarget.all(file.id)) as Array<{ path: string; type: string; weight: number; metadata_json: string | null }>;
-            
         return rows.map(row => ({
             source: direction === 'outgoing' ? relativePath : row.path,
             target: direction === 'outgoing' ? row.path : relativePath,
@@ -404,9 +430,10 @@ export class IndexDatabase {
 
     public clearDependencies(relativePath: string): void {
         const file = this.getFile(relativePath);
-        if (!file) return;
-        this.statements.deleteDependenciesForSource.run(file.id);
-        this.statements.deleteUnresolvedForSource.run(file.id);
+        if (file) {
+            this.statements.deleteDependenciesForSource.run(file.id);
+            this.statements.deleteUnresolvedForSource.run(file.id);
+        }
     }
 
     public clearAllFiles(): void {
@@ -415,6 +442,7 @@ export class IndexDatabase {
             db.exec('DELETE FROM symbols');
             db.exec('DELETE FROM dependencies');
             db.exec('DELETE FROM unresolved_dependencies');
+            db.exec('DELETE FROM ghost_symbols');
             db.exec('DELETE FROM files');
             console.info('[IndexDatabase] All indexed files cleared');
         } catch (error) {
@@ -423,7 +451,60 @@ export class IndexDatabase {
         }
     }
 
+    // Ghost Management
+    public addGhost(ghost: any): void {
+        const lastSeen = this.normalize(ghost.lastSeenPath);
+        this.statements.insertGhost.run(
+            ghost.name,
+            lastSeen,
+            ghost.type,
+            ghost.lastKnownSignature ?? null,
+            ghost.deletedAt
+        );
+    }
+
+    public findGhost(name: string): any | undefined {
+        return this.statements.getGhost.get(name) as any | undefined;
+    }
+
+    public listGhosts(): any[] {
+        return this.statements.listGhosts.all() as any[];
+    }
+
+    public deleteGhost(name: string): void {
+        this.statements.deleteGhost.run(name);
+    }
+
+    public pruneGhosts(olderThanMs: number): void {
+        const cutoff = Date.now() - olderThanMs;
+        this.statements.pruneGhosts.run(cutoff);
+    }
+
+    public dispose(): void {
+        try {
+            this.db.close();
+        } catch (error) {
+            console.error('[IndexDatabase] Failed to close database:', error);
+        }
+    }
+
     private normalize(relPath: string): string {
-        return relPath.replace(/\\/g, '/');
+        let normalized = relPath.replace(/\\/g, '/');
+        const resolvedRoot = path.resolve(this.rootPath).replace(/\\/g, '/');
+        const realRoot = fs.existsSync(this.rootPath) ? fs.realpathSync(this.rootPath).replace(/\\/g, '/') : resolvedRoot;
+
+        let absoluteInput = path.isAbsolute(normalized) ? normalized : path.resolve(this.rootPath, normalized).replace(/\\/g, '/');
+        
+        if (absoluteInput.startsWith(realRoot)) {
+            normalized = absoluteInput.substring(realRoot.length);
+        } else if (absoluteInput.startsWith(resolvedRoot)) {
+            normalized = absoluteInput.substring(resolvedRoot.length);
+        }
+
+        if (normalized.startsWith('/')) {
+            normalized = normalized.substring(1);
+        }
+        
+        return normalized || '.';
     }
 }

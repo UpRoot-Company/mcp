@@ -72,13 +72,35 @@ describe('SmartContextServer - edit_code integration', () => {
             ]
         });
         expect(editResult.success).toBe(true);
-        expect(fs.readFileSync(absFirst, 'utf-8')).toContain('alpha\\nBETA');
+        const windowsContent = fs.readFileSync(absFirst, 'utf-8');
+        expect(windowsContent).toContain('alpha\nBETA');
+        expect(windowsContent.includes('\\nBETA')).toBe(false);
         expect(fs.readFileSync(absSecond, 'utf-8')).toContain('second line (patched)');
 
         const undoResult = await runTool(server, 'manage_project', { command: 'undo' });
         expect(undoResult.output).toMatch(/undid/i);
         expect(fs.readFileSync(absFirst, 'utf-8')).toBe('alpha\r\nbeta\r\n');
         expect(fs.readFileSync(absSecond, 'utf-8')).toBe('first line\nsecond line\n');
+    });
+
+    it('decodes structural newline escapes in multi-line replacements', async () => {
+        const relPath = path.join('src', 'structural.ts');
+        const absPath = path.join(testRoot, relPath);
+        fs.writeFileSync(absPath, 'const alpha = 1;\n', 'utf-8');
+
+        const result = await runTool(server, 'edit_code', {
+            edits: [{
+                filePath: relPath,
+                operation: 'replace',
+                targetString: 'const alpha = 1;',
+                replacementString: 'const alpha = 1;\\nconst beta = 2;\\n'
+            }]
+        });
+
+        expect(result.success).toBe(true);
+        const updated = fs.readFileSync(absPath, 'utf-8');
+        expect(updated).toContain('const alpha = 1;\nconst beta = 2;');
+        expect(updated.includes('\\n')).toBe(false);
     });
 
     it('surfacing actionable errors for ambiguous matches', async () => {

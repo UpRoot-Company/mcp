@@ -31,6 +31,7 @@ export class SymbolIndex {
     private editTracker: Map<string, number> = new Map();
     private pendingUpdates: Set<string> = new Set();
     private updateDebounceTimer?: NodeJS.Timeout;
+    private disposed = false;
 
 
     constructor(rootPath: string, skeletonGenerator: SkeletonGenerator, ignorePatterns: string[], db?: IndexDatabase) {
@@ -358,13 +359,32 @@ export class SymbolIndex {
         return matrix[b.length][a.length];
     }
 
+    public dispose(): void {
+        if (this.disposed) {
+            return;
+        }
+        this.disposed = true;
+        if (this.updateDebounceTimer) {
+            clearTimeout(this.updateDebounceTimer);
+            this.updateDebounceTimer = undefined;
+        }
+        this.pendingUpdates.clear();
+        this.editTracker.clear();
+    }
+
     public markFileModified(filepath: string): void {
+        if (this.disposed) {
+            return;
+        }
         this.editTracker.set(filepath, Date.now());
         this.pendingUpdates.add(filepath);
         this.scheduleIncrementalUpdate();
     }
 
     private scheduleIncrementalUpdate(): void {
+        if (this.disposed) {
+            return;
+        }
         if (this.updateDebounceTimer) {
             clearTimeout(this.updateDebounceTimer);
         }
@@ -374,7 +394,18 @@ export class SymbolIndex {
         }, 500);
     }
 
+    public async flush(): Promise<void> {
+        if (this.updateDebounceTimer) {
+            clearTimeout(this.updateDebounceTimer);
+            this.updateDebounceTimer = undefined;
+            await this.incrementalUpdate();
+        }
+    }
+
     private async incrementalUpdate(): Promise<void> {
+        if (this.disposed) {
+            return;
+        }
         if (this.pendingUpdates.size === 0) return;
 
         const filesToUpdate = Array.from(this.pendingUpdates);
@@ -428,4 +459,3 @@ export class SymbolIndex {
         return filter;
     }
 }
-

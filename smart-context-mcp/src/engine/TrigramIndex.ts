@@ -55,6 +55,7 @@ export class TrigramIndex {
     private readonly cacheDir: string;
     private readonly persistPath: string;
     private persistTimer?: NodeJS.Timeout;
+    private disposed = false;
     private persistPromise?: Promise<void>;
     private isBuilding = false;
     private needsPersistAfterBuild = false;
@@ -341,7 +342,18 @@ export class TrigramIndex {
         this.needsPersistAfterBuild = true;
     }
 
+    public dispose(): void {
+        this.disposed = true;
+        if (this.persistTimer) {
+            clearTimeout(this.persistTimer);
+            this.persistTimer = undefined;
+        }
+    }
+
     private schedulePersist(): void {
+        if (this.disposed) {
+            return;
+        }
         if (this.persistTimer) clearTimeout(this.persistTimer);
         this.persistTimer = setTimeout(() => void this.persistIndex(), 5000);
     }
