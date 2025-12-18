@@ -55,16 +55,20 @@ describe('HybridScorer', () => {
 
     test('should calculate scores from multiple signals', async () => {
         // Setup mocks
-        (mockFileSystem.readFile as unknown as jest.Mock<any>).mockResolvedValue('function test() { return true; }');
-        (mockBM25Ranking.rank as unknown as jest.Mock<any>).mockReturnValue([{ score: 10 }]); // Trigram score
+        const content = 'function test() { return true; }';
+        (mockFileSystem.readFile as unknown as jest.Mock<any>).mockResolvedValue(content);
         (mockSymbolIndex.getSymbolsForFile as unknown as jest.Mock<any>).mockResolvedValue([
             { name: 'test', type: 'function' }
         ]);
+        (mockFileSystem.stat as unknown as jest.Mock<any>).mockResolvedValue({ mtime: Date.now() } as any);
 
         const result = await scorer.scoreFile(
             '/root/src/test.ts',
+            content,
             ['test'],
-            'test'
+            'test',
+            10, // contentScoreRaw
+            'code'
         );
 
         expect(result.total).toBeGreaterThan(0);
@@ -81,13 +85,17 @@ describe('HybridScorer', () => {
             mockBM25Ranking
         );
 
-        (mockFileSystem.readFile as unknown as jest.Mock<any>).mockResolvedValue('content');
-        (mockBM25Ranking.rank as unknown as jest.Mock<any>).mockReturnValue([{ score: 5 }]);
+        const content = 'some content';
+        (mockFileSystem.readFile as unknown as jest.Mock<any>).mockResolvedValue(content);
+        (mockFileSystem.stat as unknown as jest.Mock<any>).mockResolvedValue({ mtime: Date.now() } as any);
 
         const result = await scorerWithoutSymbols.scoreFile(
             '/root/doc.md',
+            content,
             ['doc'],
-            'doc'
+            'doc',
+            5,
+            'file'
         );
 
         expect(result.signals).not.toContain('symbol');

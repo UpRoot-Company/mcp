@@ -2,250 +2,295 @@ import path from 'path';
 import { IFileSystem } from '../../platform/FileSystem.js';
 import { TrigramIndex } from '../TrigramIndex.js';
 import { BM25FRanking } from '../Ranking.js';
-import { SymbolIndex, Document } from '../../types.js';
+import { SymbolIndex } from '../../types.js';
 import { FilenameScorer } from './FilenameScorer.js';
 import { CommentParser } from '../../utils/CommentParser.js';
+import { SignalNormalizer, FileContext } from './SignalNormalizer.js';
+import { AdaptiveWeights } from './AdaptiveWeights.js';
+import { QueryIntent } from '../search/QueryIntent.js';
+import { DependencyGraph } from '../../ast/DependencyGraph.js';
+
+export interface ScoredFileMatch {
+    line: number;
+    content: string;
+}
 
 export class HybridScorer {
     private filenameScorer = new FilenameScorer();
     private commentParser = new CommentParser();
+    private normalizer = new SignalNormalizer();
+    private adaptiveWeights = new AdaptiveWeights();
 
     constructor(
         private rootPath: string,
         private fileSystem: IFileSystem,
         private trigramIndex: TrigramIndex,
         private bm25Ranking: BM25FRanking,
-        private symbolIndex?: SymbolIndex
+        private symbolIndex?: SymbolIndex,
+        private dependencyGraph?: DependencyGraph
     ) {}
 
     public async scoreFile(
         filePath: string,
+        content: string,
         keywords: string[],
         normalizedQuery: string,
-        patterns?: string[]
+        contentScoreRaw: number,
+        intent: QueryIntent,
+        patterns?: string[],
+        options: { wordBoundary?: boolean; caseSensitive?: boolean } = {}
     ): Promise<{
         total: number;
         signals: string[];
-        breakdown: {
-            content: number;
-            filename: number;
-            symbol: number;
-            comment: number;
-            pattern: number;
-            filenameMatchType: "exact" | "partial" | "none";
-        }
+        breakdown: any;
+        matches: ScoredFileMatch[];
     }> {
-        let totalScore = 0;
+        const weights = this.adaptiveWeights.getWeights(intent);
         const signals: string[] = [];
-        const breakdown = {
-            content: 0,
-            filename: 0,
-            symbol: 0,
-            comment: 0,
-            pattern: 0,
-            filenameMatchType: "none" as "exact" | "partial" | "none"
+        const breakdown: any = {
+            filenameMatchType: "none"
         };
+        const matches: ScoredFileMatch[] = [];
 
-        // Signal 1: Trigram content similarity
-        if (normalizedQuery) {
-            const trigramScore = await this.getTrigramScore(filePath, normalizedQuery);
-            if (trigramScore > 0) {
-                totalScore += trigramScore * 0.5;
-                breakdown.content = trigramScore * 0.5;
-                signals.push('content');
-            }
-        }
+        const lines = content.split(/\r?\n/);
+        const lineCount = lines.length;
+        const context: FileContext = { lineCount };
 
-        // Signal 2: Filename matching
+        // 1. Trigram Score
+        const trigramScore = this.normalizer.normalize(contentScoreRaw, 'trigram', context);
+        if (trigramScore > 0) signals.push('content');
+
+        // 2. Filename Score
+        let filenameRaw = 0;
         if (keywords.length > 0) {
-            const matchType = this.filenameScorer.scoreFilename(filePath, keywords);
+            const matchType = this.filenameScorer.scoreFilename(filePath, keywords, options);
+            breakdown.filenameMatchType = matchType;
             if (matchType !== "none") {
-                const filenameWeight = matchType === "exact" ? 2 : 1;
-                const filenameScore = filenameWeight * 10;
-                totalScore += filenameScore;
-                breakdown.filename = filenameScore;
-                breakdown.filenameMatchType = matchType;
-                signals.push('filename');
+                filenameRaw = matchType === "exact" ? 100 : 50;
             }
         }
+        const filenameScore = this.normalizer.normalize(filenameRaw, 'filename', context);
+        if (filenameScore > 0) signals.push('filename');
 
-        // Signal 3: Symbol name matching
+        // 3. Symbol Score
+        let symbolRaw = 0;
         if (this.symbolIndex && keywords.length > 0) {
-            const symbolScore = await this.scoreSymbols(filePath, keywords);
-            if (symbolScore > 0) {
-                totalScore += symbolScore * 8;
-                breakdown.symbol = symbolScore * 8;
-                signals.push('symbol');
-            }
+            symbolRaw = await this.scoreSymbols(filePath, keywords, options);
         }
+        const symbolScore = this.normalizer.normalize(symbolRaw, 'symbol', context);
+        if (symbolScore > 0) signals.push('symbol');
 
-        // Signal 4: Comment matching
+        // 4. Comment Score
+        let commentRaw = 0;
         if (keywords.length > 0) {
-            const commentScore = await this.scoreComments(filePath, keywords);
-            if (commentScore > 0) {
-                totalScore += commentScore * 3;
-                breakdown.comment = commentScore * 3;
-                signals.push('comment');
-            }
+            commentRaw = await this.scoreComments(filePath, content, keywords, options);
         }
+        const commentScore = this.normalizer.normalize(commentRaw, 'comment', context);
+        if (commentScore > 0) signals.push('comment');
 
-        // Signal 5: Direct content keyword matching (fallback when trigram score is zero)
-        if (keywords.length > 0 && breakdown.content === 0) {
-            const directContentScore = await this.scoreContentMatches(filePath, keywords);
-            if (directContentScore > 0) {
-                totalScore += directContentScore;
-                breakdown.content = directContentScore;
-                if (!signals.includes('content')) {
-                    signals.push('content');
-                }
-            }
+        // 5. Additional Signals
+        const testCoverageRaw = await this.scoreTestCoverage(filePath);
+        const testCoverageScore = this.normalizer.normalize(testCoverageRaw, 'testCoverage', context);
+
+        const recencyRaw = await this.calculateRecencyScore(filePath);
+        const recencyScore = this.normalizer.normalize(recencyRaw, 'recency', context);
+
+        const outboundRaw = await this.scoreOutboundImportance(filePath);
+        const outboundScore = this.normalizer.normalize(outboundRaw, 'outboundImportance', context);
+
+        // Collect matches
+        if (keywords.length > 0) {
+            const keywordMatches = this.findKeywordMatches(lines, keywords, options);
+            matches.push(...keywordMatches);
         }
-
-        // Signal 6: Patterns
         if (patterns && patterns.length > 0) {
-            const patternScore = await this.scorePatterns(filePath, patterns);
-            if (patternScore > 0) {
-                totalScore += patternScore;
-                breakdown.pattern = patternScore;
+            const patternMatches = this.findPatternMatches(lines, patterns);
+            matches.push(...patternMatches);
+        }
+
+        if (matches.length > 0 && !signals.includes('content')) {
+            signals.push('content');
+        }
+
+        // Weighted Sum
+        let totalScore = 
+            trigramScore * weights.trigram +
+            filenameScore * weights.filename +
+            symbolScore * weights.symbol +
+            commentScore * weights.comment +
+            testCoverageScore * weights.testCoverage +
+            recencyScore * weights.recency +
+            outboundScore * weights.outboundImportance;
+
+        totalScore *= 100;
+
+        // Ensure small ranking differences are preserved even if BM25 score is low
+        // but literal matches are present.
+        if (matches.length > 0 && totalScore < 10) {
+            totalScore = 10 + (contentScoreRaw / 100); 
+        }
+
+        if (patterns && patterns.length > 0) {
+            const patternRaw = await this.scorePatterns(content, patterns);
+            if (patternRaw > 0) {
+                totalScore += patternRaw; 
                 signals.push('pattern');
             }
         }
 
-        // Signal 7: Path depth penalty
-        const depthPenalty = this.calculateDepthPenalty(filePath);
-        totalScore -= depthPenalty;
+        breakdown.content = trigramScore;
+        breakdown.filename = filenameScore;
+        breakdown.symbol = symbolScore;
+        breakdown.comment = commentScore;
+        breakdown.testCoverage = testCoverageScore;
+        breakdown.recency = recencyScore;
+        breakdown.outboundImportance = outboundScore;
 
-        return { total: totalScore, signals, breakdown };
+        return { total: totalScore, signals, breakdown, matches };
     }
 
-    private async getTrigramScore(filePath: string, query: string): Promise<number> {
-        const content = await this.fileSystem.readFile(filePath);
-        const document: Document = {
-            id: filePath,
-            text: content,
-            filePath: filePath,
-            score: 0
-        };
-        const ranked = this.bm25Ranking.rank([document], query);
-        return ranked[0]?.score || 0;
-    }
-
-    private async scoreSymbols(filePath: string, keywords: string[]): Promise<number> {
-        if (!this.symbolIndex) {
-            return 0;
-        }
-        try {
-            const symbols = await this.symbolIndex.getSymbolsForFile(filePath);
-            let score = 0;
-
-            for (const symbol of symbols) {
-                const lowerSymbol = symbol.name.toLowerCase();
-                for (const keyword of keywords) {
-                    const lowerKw = keyword.toLowerCase();
-                    if (lowerSymbol === lowerKw) {
-                        score += 8;
-                    } else if (lowerSymbol.includes(lowerKw)) {
-                        score += 4;
-                    }
-                }
-            }
-
-            return score;
-        } catch (error) {
-            return 0;
-        }
-    }
-
-    private async scoreComments(filePath: string, keywords: string[]): Promise<number> {
-        try {
-            const content = await this.fileSystem.readFile(filePath);
-            const comments = this.commentParser.extractComments(content, filePath);
-
-            let score = 0;
-            for (const comment of comments) {
-                const lowerComment = comment.toLowerCase();
-                for (const keyword of keywords) {
-                    if (lowerComment.includes(keyword.toLowerCase())) {
-                        score += 3;
-                    }
-                }
-            }
-
-            return score;
-        } catch (error) {
-            return 0;
-        }
-    }
-
-    private async scoreContentMatches(filePath: string, keywords: string[]): Promise<number> {
-        try {
-            const content = await this.fileSystem.readFile(filePath);
-            const lowerContent = content.toLowerCase();
-            let total = 0;
-
-            for (const keyword of keywords) {
-                const needle = keyword.toLowerCase();
-                let index = lowerContent.indexOf(needle);
-                while (index !== -1) {
-                    total += 50;
-                    index = lowerContent.indexOf(needle, index + needle.length);
-                }
-            }
-
-            return total;
-        } catch {
-            return 0;
-        }
-    }
-
-    private async scorePatterns(filePath: string, patterns: string[]): Promise<number> {
-        try {
-            let total = 0;
-            for (const pattern of patterns) {
-                const matches = await this.runFileGrep(pattern, filePath);
-                if (matches.length > 0) {
-                    total += 100 * matches.length;
-                }
-            }
-            return total;
-        } catch {
-            return 0;
-        }
-    }
-
-    private calculateDepthPenalty(filePath: string): number {
-        const relativePath = path.relative(this.rootPath, filePath);
-        const depth = relativePath.split(path.sep).length;
-        return Math.max(0, (depth - 3) * 0.5);
-    }
-
-    // Helper from Search.ts
-    private async runFileGrep(searchPattern: string, filePath: string): Promise<number[]> {
-        let regex: RegExp;
-        try {
-            regex = new RegExp(searchPattern, "g");
-        } catch {
-            regex = new RegExp(this.escapeRegExp(searchPattern), "g");
-        }
-        let content: string;
-        try {
-            content = await this.fileSystem.readFile(filePath);
-        } catch {
-            return [];
-        }
-        const lines = content.split(/\r?\n/);
-        const matches: number[] = [];
-        for (let index = 0; index < lines.length; index++) {
-            regex.lastIndex = 0;
-            if (regex.test(lines[index])) {
-                matches.push(index + 1);
+    private findKeywordMatches(lines: string[], keywords: string[], options: { wordBoundary?: boolean; caseSensitive?: boolean } = {}): ScoredFileMatch[] {
+        const matches: ScoredFileMatch[] = [];
+        const flags = options.caseSensitive ? '' : 'i';
+        const regexes = keywords.map(kw => {
+            const escaped = kw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+            const pattern = options.wordBoundary ? `\\b${escaped}\\b` : escaped;
+            return new RegExp(pattern, flags);
+        });
+        
+        for (let i = 0; i < lines.length; i++) {
+            const line = lines[i];
+            if (regexes.some(regex => regex.test(line))) {
+                matches.push({ line: i + 1, content: line });
+                if (matches.length >= 10) break; 
             }
         }
         return matches;
     }
 
-    private escapeRegExp(value: string, options: { wordBoundary?: boolean } = {}): string {
-        const escaped = value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-        return options.wordBoundary ? `\\b${escaped}\\b` : escaped;
+    private findPatternMatches(lines: string[], patterns: string[]): ScoredFileMatch[] {
+        const matches: ScoredFileMatch[] = [];
+        const regexes = patterns.map(p => {
+            try {
+                return new RegExp(p, 'i');
+            } catch {
+                return new RegExp(p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), 'i');
+            }
+        });
+
+        for (let i = 0; i < lines.length; i++) {
+            const line = lines[i];
+            if (regexes.some(regex => regex.test(line))) {
+                matches.push({ line: i + 1, content: line });
+                if (matches.length >= 10) break;
+            }
+        }
+        return matches;
+    }
+
+    private async scoreSymbols(filePath: string, keywords: string[], options: { wordBoundary?: boolean; caseSensitive?: boolean } = {}): Promise<number> {
+        if (!this.symbolIndex) return 0;
+        try {
+            const symbols = await this.symbolIndex.getSymbolsForFile(filePath);
+            let score = 0;
+            const flags = options.caseSensitive ? '' : 'i';
+            const regexes = keywords.map(kw => {
+                const escaped = kw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+                const pattern = options.wordBoundary ? `\\b${escaped}\\b` : escaped;
+                return new RegExp(pattern, flags);
+            });
+
+            for (const symbol of symbols) {
+                for (const regex of regexes) {
+                    if (regex.test(symbol.name)) {
+                        const isExact = symbol.name.toLowerCase() === regex.source.replace(/\\b/g, '').toLowerCase();
+                        score += isExact ? 32 : 16;
+                    }
+                }
+            }
+            return score;
+        } catch { return 0; }
+    }
+
+    private async scoreComments(filePath: string, content: string, keywords: string[], options: { wordBoundary?: boolean; caseSensitive?: boolean } = {}): Promise<number> {
+        try {
+            const comments = this.commentParser.extractComments(content, filePath);
+            let score = 0;
+            const flags = options.caseSensitive ? '' : 'i';
+            const regexes = keywords.map(kw => {
+                const escaped = kw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+                const pattern = options.wordBoundary ? `\\b${escaped}\\b` : escaped;
+                return new RegExp(pattern, flags);
+            });
+
+            for (const comment of comments) {
+                for (const regex of regexes) {
+                    if (regex.test(comment)) {
+                        score += 10;
+                    }
+                }
+            }
+            return score;
+        } catch { return 0; }
+    }
+
+    private async scorePatterns(content: string, patterns: string[]): Promise<number> {
+        try {
+            let total = 0;
+            for (const pattern of patterns) {
+                let regex: RegExp;
+                try {
+                    regex = new RegExp(pattern, 'g');
+                } catch {
+                    regex = new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), 'g');
+                }
+                const matches = content.match(regex);
+                if (matches) {
+                    total += 100 * matches.length;
+                }
+            }
+            return total;
+        } catch { return 0; }
+    }
+
+    private async scoreTestCoverage(filePath: string): Promise<number> {
+        const ext = path.extname(filePath);
+        const basename = path.basename(filePath, ext);
+        const dir = path.dirname(filePath);
+        
+        const testCandidates = [
+            path.join(dir, `${basename}.test${ext}`),
+            path.join(dir, `${basename}.spec${ext}`),
+            path.join(dir, '__tests__', `${basename}.test${ext}`)
+        ];
+
+        for (const testFile of testCandidates) {
+            if (await this.fileSystem.exists(testFile)) return 1.0;
+        }
+        return 0.0;
+    }
+
+    private async calculateRecencyScore(filePath: string): Promise<number> {
+        try {
+            const stats = await this.fileSystem.stat(filePath);
+            const ageDays = (Date.now() - stats.mtime) / (1000 * 60 * 60 * 24);
+            if (ageDays < 7) return 1.0;
+            if (ageDays < 30) return 0.8;
+            if (ageDays < 90) return 0.6;
+            return 0.4;
+        } catch {
+            return 0;
+        }
+    }
+
+    private async scoreOutboundImportance(filePath: string): Promise<number> {
+        if (!this.dependencyGraph) return 0;
+        try {
+            const importers = await this.dependencyGraph.getImporters(filePath);
+            const inDegree = importers.length;
+            return Math.min(1.0, Math.log2(Math.max(1, inDegree) + 1) / 7);
+        } catch {
+            return 0;
+        }
     }
 }
