@@ -1,4 +1,5 @@
 
+import { jest, describe, beforeAll, afterAll, beforeEach, it, expect } from '@jest/globals';
 import { SmartContextServer } from "../index.js";
 import * as fs from "fs";
 import * as path from "path";
@@ -10,7 +11,10 @@ describe('SmartContextServer - scout_files', () => {
     const rankingKeyword = 'rankingToken';
     const tieBreakerKeyword = 'keywordToken';
 
-    beforeAll(() => {
+    // Increase timeout for all tests in this suite
+    jest.setTimeout(30000);
+
+    beforeAll(async () => {
         if (!fs.existsSync(testFilesDir)) {
             fs.mkdirSync(testFilesDir, { recursive: true });
         }
@@ -26,13 +30,26 @@ describe('SmartContextServer - scout_files', () => {
         fs.writeFileSync(path.join(testFilesDir, 'UserManager.ts'), 'export class UserManager {\n    constructor() {\n        console.log("UserManager ready");\n    }\n}\n');
 
         server = new SmartContextServer(process.cwd());
+        await server.waitForInitialScan();
     });
 
     afterAll(async () => {
-        if (fs.existsSync(testFilesDir)) {
-            fs.rmSync(testFilesDir, { recursive: true, force: true });
+        if (server) {
+            await server.shutdown();
         }
-        await server.shutdown();
+        if (fs.existsSync(testFilesDir)) {
+            try {
+                fs.rmSync(testFilesDir, { recursive: true, force: true });
+            } catch (e) {
+                // Ignore cleanup errors
+            }
+        }
+    });
+
+    beforeEach(async () => {
+        if (server) {
+            await server.waitForInitialScan();
+        }
     });
 
     it('should find files with a single keyword', async () => {

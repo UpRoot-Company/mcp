@@ -8,15 +8,21 @@ import { SymbolInfo } from '../types.js';
 const makeTempRoot = () => fs.mkdtempSync(path.join(os.tmpdir(), 'smart-context-db-'));
 
 describe('IndexDatabase', () => {
-    let rootDir: string;
+        let rootDir: string;
+    let db: IndexDatabase | undefined;
 
     beforeEach(() => {
         rootDir = makeTempRoot();
     });
 
     afterEach(() => {
+        if (db) {
+            db.dispose();
+            db = undefined;
+        }
         fs.rmSync(rootDir, { recursive: true, force: true });
     });
+
 
     const makeSymbol = (name: string): SymbolInfo => ({
         type: 'function',
@@ -28,7 +34,8 @@ describe('IndexDatabase', () => {
     });
 
     it('persists and streams symbols per file', () => {
-        const db = new IndexDatabase(rootDir);
+                db = new IndexDatabase(rootDir);
+
         const symbols = [makeSymbol('alpha'), makeSymbol('beta')];
         db.replaceSymbols({
             relativePath: 'src/main.ts',
@@ -46,7 +53,8 @@ describe('IndexDatabase', () => {
     });
 
     it('stores dependencies and unresolved imports with cleanup support', () => {
-        const db = new IndexDatabase(rootDir);
+                db = new IndexDatabase(rootDir);
+
         const now = Date.now();
 
         db.replaceDependencies({

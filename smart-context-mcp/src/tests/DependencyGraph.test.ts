@@ -11,6 +11,12 @@ describe('DependencyGraph', () => {
     let graph: DependencyGraph;
     let symbolIndex: SymbolIndex;
 
+    afterAll(async () => {
+        if (symbolIndex) await symbolIndex.dispose();
+        AstManager.resetForTesting();
+        if (fs.existsSync(testDir)) fs.rmSync(testDir, { recursive: true, force: true });
+    });
+
     beforeAll(async () => {
         await AstManager.getInstance().init();
         if (fs.existsSync(testDir)) fs.rmSync(testDir, { recursive: true, force: true });

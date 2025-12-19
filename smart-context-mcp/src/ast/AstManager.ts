@@ -9,7 +9,7 @@ import { LanguageConfigLoader } from '../config/LanguageConfig.js';
 export class AstManager {
     private static instance: AstManager;
     private initialized = false;
-    private backend: AstBackend;
+    private backend?: AstBackend;
     private engineConfig: EngineConfig;
     private activeBackend?: string;
     private languageConfig?: LanguageConfigLoader;
@@ -28,14 +28,25 @@ export class AstManager {
 
     public static resetForTesting(): void {
         if (AstManager.instance) {
-            (AstManager.instance.backend as any)?.dispose?.();
+            if (AstManager.instance.backend?.dispose) {
+                AstManager.instance.backend.dispose();
+            }
             AstManager.instance.initialized = false;
-            AstManager.instance.backend = new WebTreeSitterBackend();
+            AstManager.instance.backend = undefined;
             AstManager.instance.engineConfig = { mode: 'prod', parserBackend: 'auto' };
             AstManager.instance.activeBackend = undefined;
             AstManager.instance.languageConfig?.dispose();
             AstManager.instance.languageConfig = undefined;
         }
+    }
+
+    public registerBackend(backend: AstBackend): void {
+        if (this.backend && this.backend.dispose) {
+            this.backend.dispose();
+        }
+        this.backend = backend;
+        this.activeBackend = backend.name;
+        this.initialized = true;
     }
 
     public async init(config?: EngineConfig): Promise<void> {
@@ -66,7 +77,7 @@ export class AstManager {
     public async parseFile(filePath: string, content: string): Promise<AstDocument> {
         if (!this.initialized) await this.init();
         const mapping = this.getLanguageMapping(filePath);
-        return this.backend.parseFile(filePath, content, mapping?.languageId);
+        return this.backend!.parseFile(filePath, content, mapping?.languageId);
     }
 
     public async getParserForFile(filePath: string): Promise<any> {
@@ -76,9 +87,9 @@ export class AstManager {
         if (!langName) {
             return null;
         }
-        if (typeof (this.backend as any).getParser === 'function') {
+        if (typeof (this.backend! as any).getParser === 'function') {
             try {
-                return await (this.backend as any).getParser(langName);
+                return await (this.backend! as any).getParser(langName);
             } catch (error) {
                 console.warn(`Failed to retrieve parser for ${filePath}:`, error);
                 return null;
@@ -91,7 +102,7 @@ export class AstManager {
         if (!this.initialized) await this.init();
         const mapping = this.getLanguageMapping(filePath);
         const languageId = mapping?.languageId ?? path.extname(filePath).replace('.', '');
-        return this.backend.getLanguage(languageId);
+        return this.backend!.getLanguage(languageId);
     }
 
     public getLanguageId(filePath: string): string {
@@ -103,6 +114,7 @@ export class AstManager {
     }
 
     public supportsQueries(): boolean {
+        if (!this.backend) return false;
         return this.backend.capabilities.supportsQueries;
     }
 
@@ -195,5 +207,13 @@ export class AstManager {
     private getLanguageMapping(filePath: string) {
         const ext = path.extname(filePath).toLowerCase();
         return this.languageConfig?.getLanguageMapping(ext);
+    }
+
+    public async dispose(): Promise<void> {
+        if (this.backend && typeof (this.backend as any).dispose === 'function') {
+            (this.backend as any).dispose();
+        }
+        this.languageConfig?.dispose();
+        this.initialized = false;
     }
 }

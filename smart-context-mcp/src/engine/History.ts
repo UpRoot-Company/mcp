@@ -1,6 +1,7 @@
 import * as path from "path";
 import { HistoryItem } from "../types.js";
 import { IFileSystem } from "../platform/FileSystem.js";
+import { PathManager } from "../utils/PathManager.js";
 
 interface HistoryState {
     undoStack: HistoryItem[];
@@ -13,62 +14,60 @@ export class HistoryEngine {
     private readonly fileSystem: IFileSystem;
 
     constructor(rootPath: string, fileSystem: IFileSystem) {
-
-        this.historyFilePath = path.join(rootPath, ".mcp", "history.json");
         this.fileSystem = fileSystem;
+        this.historyFilePath = path.join(PathManager.getHistoryDir(), "history.json");
     }
 
     private async readHistory(): Promise<HistoryState> {
-        if (!(await this.fileSystem.exists(this.historyFilePath))) {
-            return { undoStack: [], redoStack: [] };
-        }
-
         try {
+            if (!(await this.fileSystem.exists(this.historyFilePath))) {
+                return { undoStack: [], redoStack: [] };
+            }
             const content = await this.fileSystem.readFile(this.historyFilePath);
             const parsed = JSON.parse(content);
             return {
                 undoStack: Array.isArray(parsed.undoStack) ? parsed.undoStack : [],
-                redoStack: Array.isArray(parsed.redoStack) ? parsed.redoStack : [],
+                redoStack: Array.isArray(parsed.redoStack) ? parsed.redoStack : []
             };
-        } catch {
+        } catch (error) {
+            console.error("[HistoryEngine] Error reading history:", error);
             return { undoStack: [], redoStack: [] };
         }
     }
 
     private async writeHistory(state: HistoryState): Promise<void> {
-        const dir = path.dirname(this.historyFilePath);
-        if (!(await this.fileSystem.exists(dir))) {
-            await this.fileSystem.createDir(dir);
+        try {
+            const dir = path.dirname(this.historyFilePath);
+            if (!(await this.fileSystem.exists(dir))) {
+                await this.fileSystem.createDir(dir);
+            }
+            const json = JSON.stringify(state, null, 2);
+            const tempPath = `${this.historyFilePath}.tmp`;
+            await this.fileSystem.writeFile(tempPath, json);
+            await this.fileSystem.rename(tempPath, this.historyFilePath);
+        } catch (error) {
+            console.error("[HistoryEngine] Error writing history:", error);
         }
-
-        const json = JSON.stringify(state, null, 2);
-        const tempPath = `${this.historyFilePath}.tmp`;
-        await this.fileSystem.writeFile(tempPath, json);
-        await this.fileSystem.rename(tempPath, this.historyFilePath);
     }
 
     public async pushOperation(op: HistoryItem): Promise<void> {
         const history = await this.readHistory();
-
         history.undoStack.push(op);
+        // Keep only last 50 operations
         if (history.undoStack.length > 50) {
             history.undoStack = history.undoStack.slice(-50);
         }
-
-        history.redoStack = [];
+        history.redoStack = []; // Clear redo stack on new operation
         await this.writeHistory(history);
     }
 
     public async replaceOperation(id: string, op: HistoryItem): Promise<void> {
         const history = await this.readHistory();
         const index = history.undoStack.findIndex(item => (item as any).id === id);
-        if (index === -1) {
-            history.undoStack.push(op);
-        } else {
+        if (index !== -1) {
             history.undoStack[index] = op;
+            await this.writeHistory(history);
         }
-        history.redoStack = [];
-        await this.writeHistory(history);
     }
 
     public async removeOperation(id: string): Promise<void> {
@@ -80,29 +79,21 @@ export class HistoryEngine {
 
     public async undo(): Promise<HistoryItem | null> {
         const history = await this.readHistory();
-
-        if (history.undoStack.length === 0) {
-            return null;
-        }
+        if (history.undoStack.length === 0) return null;
 
         const op = history.undoStack.pop()!;
         history.redoStack.push(op);
         await this.writeHistory(history);
-
         return op;
     }
 
     public async redo(): Promise<HistoryItem | null> {
         const history = await this.readHistory();
-
-        if (history.redoStack.length === 0) {
-            return null;
-        }
+        if (history.redoStack.length === 0) return null;
 
         const op = history.redoStack.pop()!;
         history.undoStack.push(op);
         await this.writeHistory(history);
-
         return op;
     }
 

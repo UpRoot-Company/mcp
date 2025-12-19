@@ -1,8 +1,9 @@
 import * as path from "path";
 import { performance } from "perf_hooks";
 import { MemoryFileSystem } from "../platform/FileSystem.js";
-import { SearchEngine, SymbolIndex } from "../engine/Search.js";
-import { SymbolInfo } from "../types.js";
+import { SearchEngine } from "../engine/Search.js";
+import { SymbolInfo, SymbolIndex } from "../types.js";
+import { AstManager } from "../ast/AstManager.js";
 
 const joinLines = (lines: string[]): string => lines.join("\n");
 
@@ -41,6 +42,11 @@ describe("SearchEngine trigram index integration", () => {
 
         searchEngine = new SearchEngine(rootPath, fileSystem, []);
         await searchEngine.warmup();
+    });
+
+    afterAll(async () => {
+        searchEngine.dispose();
+        AstManager.resetForTesting();
     });
 
     it("returns file matches for keyword queries", async () => {
@@ -123,7 +129,7 @@ describe("SearchEngine trigram index integration", () => {
     });
 
     it("prioritizes exported definitions via field weights", async () => {
-        const stubProvider = {
+        const stubProvider: SymbolIndex = {
             async getSymbolsForFile(filePath: string): Promise<SymbolInfo[]> {
                 if (path.normalize(filePath) !== path.normalize(alphaPath)) {
                     return [];
@@ -138,6 +144,12 @@ describe("SearchEngine trigram index integration", () => {
             },
             async getAllSymbols(): Promise<Map<string, SymbolInfo[]>> {
                 return new Map();
+            },
+            async findFilesBySymbolName(keywords: string[]): Promise<string[]> {
+                if (keywords.includes("alphaMark")) {
+                    return ["src/utils/alpha.ts"];
+                }
+                return [];
             }
         };
 

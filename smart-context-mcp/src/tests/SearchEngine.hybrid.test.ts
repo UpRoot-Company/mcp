@@ -1,6 +1,7 @@
-import { describe, test, expect, beforeEach } from '@jest/globals';
+import { describe, test, expect, beforeEach, afterEach } from '@jest/globals';
 import { SearchEngine } from '../engine/Search.js';
 import { MemoryFileSystem } from '../platform/FileSystem.js';
+import { AstManager } from '../ast/AstManager.js';
 import * as path from 'path';
 
 describe('Hybrid Search', () => {
@@ -14,6 +15,11 @@ describe('Hybrid Search', () => {
     
     // Initialize search engine
     search = new SearchEngine(rootPath, fileSystem);
+  });
+
+  afterEach(() => {
+    search.dispose();
+    AstManager.resetForTesting();
   });
   
   test('should find file by filename match even if trigram misses', async () => {
@@ -45,10 +51,14 @@ describe('Hybrid Search', () => {
       },
       getAllSymbols: async () => new Map([
         [fileA, [{ name: 'QPSO', kind: 'class', line: 1, range: { startLine: 0, endLine: 0 } } as any]]
-      ])
+      ]),
+      findFilesBySymbolName: async (keywords: string[]) => {
+        if (keywords.some(k => k.toLowerCase().includes('qpso'))) return [fileA];
+        return [];
+      }
     };
     
-    search = new SearchEngine(rootPath, fileSystem, [], { symbolIndex: mockSymbolIndex });
+    search = new SearchEngine(rootPath, fileSystem, [], { symbolIndex: mockSymbolIndex as any });
 
     await search.invalidateFile(fileA);
     await search.invalidateFile(fileB);
@@ -80,7 +90,7 @@ const x = 1;
     const workerPath = path.join(rootPath, 'worker.js');
     await fileSystem.writeFile(workerPath, `
 // Worker 데이터
-const { name, conf, option, data } = workerData;
+const { name, conf, option, data = workerData;
 
 // QPSO 알고리즘 초기화
 class QPSO {
@@ -112,10 +122,15 @@ async function train() {
                 { name: 'QPSO', kind: 'class', line: 6 },
                 { name: 'train', kind: 'function', line: 12 }
             ] as any]
-        ])
+        ]),
+        findFilesBySymbolName: async (keywords: string[]) => {
+            if (keywords.some(k => k.toLowerCase().includes('qpso'))) return [workerPath];
+            if (keywords.some(k => k.toLowerCase().includes('train'))) return [workerPath];
+            return [];
+        }
     };
 
-    search = new SearchEngine(rootPath, fileSystem, [], { symbolIndex: mockSymbolIndex });
+    search = new SearchEngine(rootPath, fileSystem, [], { symbolIndex: mockSymbolIndex as any });
     await search.invalidateFile(workerPath);
     
     const results = await search.scout({ 

@@ -2,13 +2,10 @@
 node_modules/
 
 # smart-context-mcp
-.mcp/
+.smart-context/
 
 # test output
 coverage/
 
 # build output
 dist/
-
-# documentation output
-docs/

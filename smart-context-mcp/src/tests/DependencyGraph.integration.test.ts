@@ -33,7 +33,8 @@ describe('DependencyGraph with AST extraction', () => {
   });
   
   afterEach(async () => {
-
+    if (symbolIndex) await symbolIndex.dispose();
+    if (database) database.dispose();
     await fs.rm(testDir, { recursive: true, force: true });
   });
 

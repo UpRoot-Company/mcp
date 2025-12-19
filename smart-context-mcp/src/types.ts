@@ -47,6 +47,8 @@ export interface CallSiteInfo {
     line: number;
     column: number;
     text?: string;
+    arguments?: string[];
+    isAwaited?: boolean;
 }
 
 export interface ReadFragmentResult {
@@ -123,6 +125,8 @@ export interface Edit {
     normalization?: NormalizationLevel;
     /** Fine-grained options for normalization attempts (tab width, indentation preservation, etc.) */
     normalizationConfig?: NormalizationConfig;
+    /** NEW: Explicit escape handling mode. Defaults to 'literal'. */
+    escapeMode?: 'literal' | 'interpreted';
     /** Optional hash guard for the original content to catch drift before editing. */
     expectedHash?: {
         algorithm: 'sha256' | 'xxhash';
@@ -366,6 +370,12 @@ export interface ExportSymbol extends BaseSymbolInfo {
 
 export type SymbolInfo = DefinitionSymbol | ImportSymbol | ExportSymbol;
 
+export interface SymbolIndex {
+    getSymbolsForFile(filePath: string): Promise<SymbolInfo[]>;
+    getAllSymbols(): Promise<Map<string, SymbolInfo[]>>;
+    findFilesBySymbolName(keywords: string[]): Promise<string[]>;
+}
+
 export type CallConfidence = "definite" | "possible" | "inferred";
 
 export interface CallGraphEdge {
@@ -494,6 +504,7 @@ export interface SmartFileProfile {
         bodyHidden: boolean;
         readFullHint: string;
         readFragmentHint: string;
+        skeletonSummaryNote?: string;
     };
 }
 
@@ -531,6 +542,8 @@ export interface SkeletonOptions {
     includeMemberVars?: boolean;
     /** Include line/comment blocks when true. Defaults to false. */
     includeComments?: boolean;
+    /** Include semantic summaries (calls/refs) in folded blocks. Defaults to false. */
+    includeSummary?: boolean;
     /** Controls folding strictness for method bodies and large regions. */
     detailLevel?: SkeletonDetailLevel;
     /** Maximum literal entries to show when previewing member arrays. Defaults to 3. */
@@ -544,6 +557,14 @@ export interface ReadCodeArgs {
     skeletonOptions?: SkeletonOptions;
 }
 
+export interface FileVersionInfo {
+    version: number;
+    contentHash: string;
+    lastModified: number;
+    encoding: 'utf-8';
+    lineEnding: 'lf' | 'crlf';
+}
+
 export interface ReadCodeResult {
     content: string;
     metadata: {
@@ -552,6 +573,7 @@ export interface ReadCodeResult {
         path: string;
     };
     truncated: boolean;
+    versionInfo?: FileVersionInfo;
 }
 
 export type SearchProjectType = "auto" | "file" | "symbol" | "directory" | "filename";
@@ -658,6 +680,10 @@ export interface EditCodeArgs {
     ignoreMistakes?: boolean;
     diffMode?: DiffMode;
     refactoringContext?: RefactoringContext;
+    fileVersions?: Record<string, {
+        expectedVersion?: number;
+        expectedHash?: string;
+    }>;
 }
 
 export interface EditCodeResultEntry {
@@ -679,6 +705,11 @@ export interface EditCodeResult {
     transactionId?: string;
     warnings?: string[];
     message?: string;
+    updatedFileStates?: Record<string, {
+        newVersion: number;
+        newHash: string;
+        affectedLineRange?: LineRange;
+    }>;
 }
 
 export interface NextActionHint {
@@ -692,6 +723,31 @@ export interface GetBatchGuidanceArgs {
     pattern?: string;
 }
 
+
+export interface GhostMethodInfo {
+    name: string;
+    callCount: number;
+    fileCount: number;
+    inferredSignature: string;
+    confidence: 'high' | 'medium' | 'low';
+}
+
+export interface GhostInterface {
+    name: string;
+    methods: GhostMethodInfo[];
+    confidence: 'high' | 'medium' | 'low';
+    usageCount: number;
+    sourceFiles: string[];
+}
+
+export interface ReconstructInterfaceArgs {
+    symbolName: string;
+}
+
+export interface ReconstructInterfaceResult {
+    ghostInterface: GhostInterface;
+    message: string;
+}
 
 export type ManageProjectCommand = "undo" | "redo" | "guidance" | "status" | "metrics" | "reindex";
 

@@ -25,22 +25,26 @@ const WATCH_FILES = [
 ];
 
 export class ConfigurationManager extends EventEmitter {
-    private readonly watcher: chokidar.FSWatcher;
+    private readonly watcher?: chokidar.FSWatcher;
     private ignorePatterns: string[];
 
     constructor(private readonly rootPath: string) {
         super();
         this.ignorePatterns = this.loadIgnorePatterns();
-        const watchTargets = WATCH_FILES.map(file => path.join(this.rootPath, file));
-        this.watcher = chokidar.watch(watchTargets, {
-            ignoreInitial: true,
-            persistent: true,
-            awaitWriteFinish: {
-                stabilityThreshold: 200,
-                pollInterval: 100
-            }
-        });
-        this.registerWatchHandlers();
+        
+        const isTestEnv = process.env.NODE_ENV === 'test' || process.env.JEST_WORKER_ID !== undefined;
+        if (!isTestEnv) {
+            const watchTargets = WATCH_FILES.map(file => path.join(this.rootPath, file));
+            this.watcher = chokidar.watch(watchTargets, {
+                ignoreInitial: true,
+                persistent: true,
+                awaitWriteFinish: {
+                    stabilityThreshold: 200,
+                    pollInterval: 100
+                }
+            });
+            this.registerWatchHandlers();
+        }
     }
 
     public getIgnoreGlobs(): string[] {
@@ -56,11 +60,14 @@ export class ConfigurationManager extends EventEmitter {
     }
 
     public async dispose(): Promise<void> {
-        await this.watcher.close();
+        if (this.watcher) {
+            await this.watcher.close();
+        }
         this.removeAllListeners();
     }
 
     private registerWatchHandlers(): void {
+        if (!this.watcher) return;
         const handler = (filePath: string) => this.handleConfigChange(filePath);
         this.watcher.on("add", handler);
         this.watcher.on("change", handler);

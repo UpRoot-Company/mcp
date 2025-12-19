@@ -33,14 +33,19 @@ describe('SymbolIndex', () => {
         fs.writeFileSync(path.join(testDir, 'node_modules', 'ignored.ts'), 'class IgnoredClass {}');
     });
 
-    afterAll(() => {
+    afterAll(async () => {
         if (fs.existsSync(testDir)) fs.rmSync(testDir, { recursive: true, force: true });
+        AstManager.resetForTesting();
     });
 
     beforeEach(() => {
         const generator = new SkeletonGenerator();
         // Pointing to testDir as root
         index = new SymbolIndex(testDir, generator, []);
+    });
+
+    afterEach(async () => {
+        await index.dispose();
     });
 
     it('should find symbols in root files', async () => {

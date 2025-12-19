@@ -71,10 +71,11 @@ export function teardownUser(name: string) {
 `);
     });
 
-    afterAll(() => {
+    afterAll(async () => {
         if (fs.existsSync(testDir)) {
             fs.rmSync(testDir, { recursive: true, force: true });
         }
+        AstManager.resetForTesting();
     });
 
     beforeEach(() => {
@@ -85,6 +86,10 @@ export function teardownUser(name: string) {
         typeDependencyTracker = new TypeDependencyTracker(testDir, symbolIndex);
         dependencyGraph = new DependencyGraph(testDir, symbolIndex, moduleResolver);
         fileSystem = new NodeFileSystem(testDir);
+    });
+
+    afterEach(async () => {
+        await symbolIndex.dispose();
     });
 
     it('parses filters and intent from query strings', () => {

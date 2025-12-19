@@ -31,6 +31,8 @@ export class SymbolIndex {
     private editTracker: Map<string, number> = new Map();
     private pendingUpdates: Set<string> = new Set();
     private updateDebounceTimer?: NodeJS.Timeout;
+    private disposed = false;
+    private incrementalUpdatePromise: Promise<void> | null = null;
 
 
     constructor(rootPath: string, skeletonGenerator: SkeletonGenerator, ignorePatterns: string[], db?: IndexDatabase) {
@@ -91,22 +93,35 @@ export class SymbolIndex {
 
     public async search(query: string): Promise<SymbolSearchResult[]> {
         await this.ensureBaselineIndex();
-        const results: SymbolSearchResult[] = [];
-        const queryLower = query.toLowerCase();
-        const symbolMap = this.db.streamAllSymbols();
-        for (const [relativePath, symbols] of symbolMap) {
-            for (const symbol of symbols) {
-                if (symbol.name.toLowerCase().includes(queryLower)) {
-                    results.push({ filePath: relativePath, symbol });
-                }
-            }
-        }
+        
+        const pattern = `%${query}%`;
+        const rows = this.db.searchSymbols(pattern, 100);
+        
+        const results = rows.map(row => ({
+            filePath: row.path,
+            symbol: JSON.parse(row.data_json) as SymbolInfo
+        }));
         
         if (results.length > 0) {
-            return results.slice(0, 100);
+            return results;
         }
 
         return this.fuzzySearch(query, { maxEditDistance: 2 });
+    }
+
+    public async findFilesBySymbolName(keywords: string[]): Promise<string[]> {
+        await this.ensureBaselineIndex();
+        const filePaths = new Set<string>();
+        
+        for (const keyword of keywords) {
+            const pattern = `%${keyword}%`;
+            const rows = this.db.searchSymbols(pattern, 200);
+            for (const row of rows) {
+                filePaths.add(row.path);
+            }
+        }
+        
+        return Array.from(filePaths);
     }
 
     public async getAllSymbols(): Promise<Map<string, SymbolInfo[]>> {
@@ -345,29 +360,69 @@ export class SymbolIndex {
         return matrix[b.length][a.length];
     }
 
+    public async dispose(): Promise<void> {
+        if (this.disposed) {
+            return;
+        }
+        this.disposed = true;
+        if (this.updateDebounceTimer) {
+            clearTimeout(this.updateDebounceTimer);
+            this.updateDebounceTimer = undefined;
+        }
+
+        if (this.incrementalUpdatePromise) {
+            await this.incrementalUpdatePromise;
+        }
+
+        this.pendingUpdates.clear();
+        this.editTracker.clear();
+    }
+
     public markFileModified(filepath: string): void {
+        if (this.disposed) {
+            return;
+        }
         this.editTracker.set(filepath, Date.now());
         this.pendingUpdates.add(filepath);
         this.scheduleIncrementalUpdate();
     }
 
     private scheduleIncrementalUpdate(): void {
+        if (this.disposed) {
+            return;
+        }
         if (this.updateDebounceTimer) {
             clearTimeout(this.updateDebounceTimer);
         }
 
         this.updateDebounceTimer = setTimeout(() => {
-            void this.incrementalUpdate();
+            if (!this.incrementalUpdatePromise) {
+                this.incrementalUpdatePromise = this.incrementalUpdate().finally(() => {
+                    this.incrementalUpdatePromise = null;
+                });
+            }
         }, 500);
     }
 
+    public async flush(): Promise<void> {
+        if (this.updateDebounceTimer) {
+            clearTimeout(this.updateDebounceTimer);
+            this.updateDebounceTimer = undefined;
+            await this.incrementalUpdate();
+        }
+    }
+
     private async incrementalUpdate(): Promise<void> {
+        if (this.disposed) {
+            return;
+        }
         if (this.pendingUpdates.size === 0) return;
 
         const filesToUpdate = Array.from(this.pendingUpdates);
         this.pendingUpdates.clear();
 
         for (const relativePath of filesToUpdate) {
+            if (this.disposed) break;
             try {
                 // Check if file still exists
                 const fullPath = path.join(this.rootPath, relativePath);
@@ -411,8 +466,7 @@ export class SymbolIndex {
 
     private createIgnoreFilter(patterns: string[]) {
         const filter = ignore.default().add(patterns);
-                filter.add(['.git', 'node_modules', '.mcp', 'dist', 'coverage', '.DS_Store']);
+        filter.add(['.git', 'node_modules', '.mcp', '.smart-context', 'dist', 'coverage', '.DS_Store']);
         return filter;
     }
 }
-

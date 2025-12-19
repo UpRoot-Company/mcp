@@ -8,13 +8,15 @@ import * as path from "path";
 import { createRequire } from "module";
 import { EditorEngine } from "./Editor.js";
 import { HistoryEngine } from "./History.js";
+import { ImpactAnalyzer } from "./ImpactAnalyzer.js";
 import {
     Edit,
     EditResult,
     EditOperation,
     BatchOperation,
     HistoryItem,
-    EditExecutionOptions
+    EditExecutionOptions,
+    ImpactPreview
 } from "../types.js";
 import { IFileSystem } from "../platform/FileSystem.js";
 import { TransactionLog, TransactionSnapshot } from "./TransactionLog.js";
@@ -24,6 +26,7 @@ interface EditCoordinatorInitOptions {
     rootPath?: string;
     transactionLog: TransactionLog;
     fileSystem: IFileSystem;
+    impactAnalyzer?: ImpactAnalyzer;
 }
 
 interface BatchFailure {
@@ -46,6 +49,7 @@ export class EditCoordinator {
     private rootPath?: string;
     private readonly fileSystem?: IFileSystem;
     private readonly transactionLog?: TransactionLog;
+    private readonly impactAnalyzer?: ImpactAnalyzer;
 
     /**
      * @param editorEngine EditorEngine instance (expects absolute file paths)
@@ -65,6 +69,7 @@ export class EditCoordinator {
             this.rootPath = rootPathOrOptions.rootPath;
             this.transactionLog = rootPathOrOptions.transactionLog;
             this.fileSystem = rootPathOrOptions.fileSystem;
+            this.impactAnalyzer = rootPathOrOptions.impactAnalyzer;
         }
     }
 
@@ -87,6 +92,10 @@ export class EditCoordinator {
 
         if (result.success && !dryRun && result.operation) {
             await this.historyEngine.pushOperation(result.operation as EditOperation);
+        }
+
+        if (result.success && dryRun && this.impactAnalyzer) {
+            result.impactPreview = await this.impactAnalyzer.analyzeImpact(filePath, edits);
         }
 
         return result;
@@ -112,10 +121,7 @@ export class EditCoordinator {
         };
 
         if (fileEdits.length === 0) {
-            return {
-                success: true,
-                message: "No edits to apply.",
-            };
+            return { success: true, message: "No edits provided." };
         }
 
         if (dryRun) {
@@ -131,9 +137,18 @@ export class EditCoordinator {
                 }
             }
 
+            const impactPreviews: ImpactPreview[] = [];
+            if (this.impactAnalyzer) {
+                for (const { filePath, edits } of fileEdits) {
+                    const preview = await this.impactAnalyzer.analyzeImpact(filePath, edits);
+                    impactPreviews.push(preview);
+                }
+            }
+
             return {
                 success: true,
                 message: `Dry run successful for ${fileEdits.length} file(s).`,
+                impactPreviews: impactPreviews.length > 0 ? impactPreviews : undefined
             };
         }
 
@@ -154,18 +169,18 @@ export class EditCoordinator {
             const result = await invokeApply(filePath, edits, false);
 
             if (!result.success || !result.operation) {
+                // Rollback previously applied edits in this batch
+                const errors = [`Failed to apply edits to ${filePath}: ${result.message ?? "Unknown error"}`];
                 for (let i = applied.length - 1; i >= 0; i--) {
                     const entry = applied[i];
-                    try {
-                        await invokeApply(entry.filePath, entry.operation.inverseEdits as Edit[], false);
-                    } catch {
-                        // Best-effort rollback; ignore individual rollback failures here.
+                    const rbResult = await invokeApply(entry.filePath, entry.operation.inverseEdits as Edit[], false);
+                    if (!rbResult.success) {
+                        errors.push(`Critical: Failed to rollback ${entry.filePath}: ${rbResult.message ?? "Unknown error"}`);
                     }
                 }
-
                 return {
                     success: false,
-                    message: `Batch edit failed for file ${filePath}: ${result.message ?? "Unknown error"}`,
+                    message: errors.join("\n"),
                     errorCode: result.errorCode ?? "BatchApplyFailed",
                 };
             }
@@ -251,14 +266,14 @@ export class EditCoordinator {
 
             return {
                 success: true,
-                message: `Successfully applied batch edits to ${fileEdits.length} file(s).`,
+                message: `Successfully applied batch edits to ${operations.length} file(s).`,
             };
         } catch (error) {
             await this.restoreSnapshots(snapshots);
             transactionLog.rollback(transactionId);
             await this.historyEngine.removeOperation(transactionId);
-            const failure = this.normalizeBatchFailure(error);
 
+            const failure = this.normalizeBatchFailure(error);
             return {
                 success: false,
                 message: failure.message,
@@ -282,74 +297,39 @@ export class EditCoordinator {
         if (!item) {
             return {
                 success: false,
-                message: "No undo history",
-                errorCode: "NoUndoHistory",
+                message: "No operation to undo.",
             };
         }
 
         // BatchOperation: undo each contained EditOperation in reverse order.
         if ((item as BatchOperation).operations) {
             const batch = item as BatchOperation;
-
             for (let i = batch.operations.length - 1; i >= 0; i--) {
                 const op = batch.operations[i];
-
-                if (!op.filePath) {
-                    return {
-                        success: false,
-                        message: "Cannot undo batch: a history entry is missing filePath.",
-                        errorCode: "MissingFilePath",
-                    };
-                }
-
-                const resolvedPath = this.resolveFilePath(op.filePath);
+                const resolvedPath = this.resolveFilePath(op.filePath!);
                 const result = await this.editorEngine.applyEdits(
                     resolvedPath,
                     op.inverseEdits as Edit[],
                     false
                 );
-
                 if (!result.success) {
                     return {
                         success: false,
-                        message: `Undo failed for batch operation on file ${resolvedPath}: ${
-                            result.message ?? "Unknown error"
-                        }`,
-                        errorCode: result.errorCode ?? "UndoFailed",
+                        message: `Failed to undo part of batch: ${result.message}`,
                     };
                 }
             }
-
-            return {
-                success: true,
-                message: `Successfully undid batch operation affecting ${
-                    (item as BatchOperation).operations.length
-                } file(s).`,
-            };
+            return { success: true, message: "Successfully undid batch operation." };
+        } else {
+            const op = item as EditOperation;
+            const resolvedPath = this.resolveFilePath(op.filePath!);
+            const result = await this.editorEngine.applyEdits(
+                resolvedPath,
+                op.inverseEdits as Edit[],
+                false
+            );
+            return result;
         }
-
-        const op = item as EditOperation;
-
-        if (!op.filePath) {
-            return {
-                success: false,
-                message: "Cannot undo: history entry is missing filePath.",
-                errorCode: "MissingFilePath",
-            };
-        }
-
-        const resolvedPath = this.resolveFilePath(op.filePath);
-        const result = await this.editorEngine.applyEdits(
-            resolvedPath,
-            op.inverseEdits as Edit[],
-            false
-        );
-
-        if (!result.success && !result.errorCode) {
-            result.errorCode = "UndoFailed";
-        }
-
-        return result;
     }
 
     /**
@@ -367,68 +347,34 @@ export class EditCoordinator {
         if (!item) {
             return {
                 success: false,
-                message: "No redo history",
-                errorCode: "NoRedoHistory",
+                message: "No operation to redo.",
             };
         }
 
         // BatchOperation: redo each contained EditOperation in original order.
         if ((item as BatchOperation).operations) {
             const batch = item as BatchOperation;
-
             for (const op of batch.operations) {
-                if (!op.filePath) {
-                    return {
-                        success: false,
-                        message: "Cannot redo batch: a history entry is missing filePath.",
-                        errorCode: "MissingFilePath",
-                    };
-                }
-
-                const resolvedPath = this.resolveFilePath(op.filePath);
+                const resolvedPath = this.resolveFilePath(op.filePath!);
                 const result = await this.editorEngine.applyEdits(
                     resolvedPath,
                     op.edits as Edit[],
                     false
                 );
-
                 if (!result.success) {
                     return {
                         success: false,
-                        message: `Redo failed for batch operation on file ${resolvedPath}: ${
-                            result.message ?? "Unknown error"
-                        }`,
-                        errorCode: result.errorCode ?? "RedoFailed",
+                        message: `Failed to redo part of batch: ${result.message}`,
                     };
                 }
             }
-
-            return {
-                success: true,
-                message: `Successfully redid batch operation affecting ${
-                    (item as BatchOperation).operations.length
-                } file(s).`,
-            };
+            return { success: true, message: "Successfully redid batch operation." };
+        } else {
+            const op = item as EditOperation;
+            const resolvedPath = this.resolveFilePath(op.filePath!);
+            const result = await this.editorEngine.applyEdits(resolvedPath, op.edits as Edit[], false);
+            return result;
         }
-
-        const op = item as EditOperation;
-
-        if (!op.filePath) {
-            return {
-                success: false,
-                message: "Cannot redo: history entry is missing filePath.",
-                errorCode: "MissingFilePath",
-            };
-        }
-
-        const resolvedPath = this.resolveFilePath(op.filePath);
-        const result = await this.editorEngine.applyEdits(resolvedPath, op.edits as Edit[], false);
-
-        if (!result.success && !result.errorCode) {
-            result.errorCode = "RedoFailed";
-        }
-
-        return result;
     }
 
     private computeHash(content: string): string {
@@ -439,10 +385,11 @@ export class EditCoordinator {
     }
 
     private generateTransactionId(): string {
-        if (typeof crypto.randomUUID === "function") {
+        try {
             return crypto.randomUUID();
+        } catch {
+            return `tx-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
         }
-        return `${Date.now()}-${Math.random()}`;
     }
 
     private async restoreSnapshots(snapshots: TransactionSnapshot[]): Promise<void> {
@@ -476,15 +423,11 @@ export class EditCoordinator {
         if (error && typeof error === "object" && "message" in error) {
             const maybeFailure = error as BatchFailure & { message?: string };
             return {
-                message: maybeFailure.message ?? "Batch operation failed",
+                message: maybeFailure.message || "Unknown batch error",
                 errorCode: maybeFailure.errorCode,
             };
         }
-
-        return {
-            message: error instanceof Error ? error.message : "Batch operation failed",
-            errorCode: "BatchApplyFailed",
-        };
+        return { message: String(error) };
     }
 
     /**

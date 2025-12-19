@@ -1,5 +1,6 @@
 import * as fs from "fs";
 import * as path from "path";
+import { PathManager } from "../utils/PathManager.js";
 
 export interface LanguageMapping {
     languageId: string;
@@ -47,7 +48,7 @@ export class LanguageConfigLoader {
 
     public getLanguageMapping(ext: string): LanguageMapping | undefined {
         const normalized = ext.toLowerCase();
-        return this.config.mappings[normalized];
+        return this.config.mappings[normalized] || BUILTIN_LANGUAGE_MAPPINGS[normalized];
     }
 
     public reload(): void {
@@ -55,37 +56,36 @@ export class LanguageConfigLoader {
     }
 
     public watch(onChange: () => void): void {
-        if (this.watcher) {
-            return;
-        }
-        try {
+        if (this.watcher) return;
+        
+        if (fs.existsSync(this.configPath)) {
             this.watcher = fs.watch(this.configPath, { persistent: false }, (event) => {
                 if (event === "change" || event === "rename") {
                     this.reload();
                     onChange();
                 }
             });
-        } catch {
-            // File might not exist yet; no-op
         }
     }
 
     public dispose(): void {
         this.watcher?.close();
-        this.watcher = undefined;
     }
 
     private resolveConfigPath(): string {
-        const primaryDir = path.join(this.rootPath, ".mcp", "smart-context");
+        // Use PathManager for primary directory
+        const primaryDir = PathManager.getIndexDir();
         const primary = path.join(primaryDir, "languages.json");
-        const legacy = path.join(this.rootPath, ".smart-context", "languages.json");
-
         if (fs.existsSync(primary)) {
             return primary;
         }
+
+        // Legacy search
+        const legacy = path.join(this.rootPath, ".smart-context", "languages.json");
         if (fs.existsSync(legacy)) {
             return legacy;
         }
+
         return primary;
     }
 
@@ -101,8 +101,11 @@ export class LanguageConfigLoader {
         }
 
         return {
-            version: userConfig?.version ?? 1,
-            mappings: { ...BUILTIN_LANGUAGE_MAPPINGS, ...(userConfig?.mappings ?? {}) }
+            version: userConfig?.version || 1,
+            mappings: {
+                ...BUILTIN_LANGUAGE_MAPPINGS,
+                ...(userConfig?.mappings || {})
+            }
         };
     }
 }

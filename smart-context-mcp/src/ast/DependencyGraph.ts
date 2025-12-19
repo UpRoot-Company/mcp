@@ -82,11 +82,10 @@ export class DependencyGraph {
         this.lastRebuiltAt = Date.now();
     }
 
-
     public async build(): Promise<void> {
         const symbolMap = await this.symbolIndex.getAllSymbols();
-        for (const [relativePath, _] of symbolMap) {
-            const absPath = path.join(this.rootPath, relativePath);
+        for (const [pathOrRel, _] of symbolMap) {
+            const absPath = path.isAbsolute(pathOrRel) ? pathOrRel : path.join(this.rootPath, pathOrRel);
             await this.updateFileDependencies(absPath);
         }
         this.lastRebuiltAt = Date.now();

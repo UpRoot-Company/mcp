@@ -43,6 +43,7 @@ describe("Tool surface consistency", () => {
             "edit_code",
             "get_batch_guidance",
             "manage_project",
+            "reconstruct_interface",
         ].sort();
 
         expect(Array.isArray(tools)).toBe(true);

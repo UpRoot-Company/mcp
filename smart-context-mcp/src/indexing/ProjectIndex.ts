@@ -2,7 +2,7 @@ import { SymbolInfo } from '../types.js';
 
 /**
  * Persistent project-wide index structure
-  * Stored as JSON at: <projectRoot>/.mcp/smart-context/index.json
+ * Stored as JSON at: <projectRoot>/.smart-context/data/index/index.json
  */
 export interface ProjectIndex {
   /** Index format version (for migration compatibility) */

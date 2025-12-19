@@ -35,18 +35,6 @@
   "author": "devkwan",
   "license": "MIT",
   "description": "A Model Context Protocol (MCP) enabled tool for AI-assisted coding and intelligent file analysis.",
-  "jest": {
-    "collectCoverage": true,
-    "coverageDirectory": "coverage",
-    "testPathIgnorePatterns": [
-      "/node_modules/",
-      "/backup/",
-      "/dist/tests/performance/",
-      "/dist/tests/fixtures/",
-      "/src/tests/fixtures/"
-    ],
-    "testEnvironment": "node"
-  },
   "devDependencies": {
     "@types/babel__parser": "^7.0.0",
     "@types/babel__traverse": "^7.28.0",

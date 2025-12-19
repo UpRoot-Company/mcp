@@ -1,7 +1,8 @@
 import { AstManager } from './AstManager.js';
-import { SymbolInfo, ImportSymbol, ExportSymbol, DefinitionSymbol, CallSiteInfo, CallType, SkeletonOptions, SkeletonDetailLevel } from '../types.js';
-
+import { SymbolInfo, SkeletonOptions, SkeletonDetailLevel } from '../types.js';
 import { Query } from 'web-tree-sitter';
+import { SymbolExtractor } from './extraction/SymbolExtractor.js';
+import { CallSiteAnalyzer } from './analysis/CallSiteAnalyzer.js';
 
 interface FoldQuery {
     query: string;
@@ -11,28 +12,20 @@ interface FoldQuery {
 
 const LANGUAGE_CONFIG: Record<string, FoldQuery> = {
     typescript: {
-        query: `
-            (statement_block) @fold
-        `,
-        replacement: '{ /* ... implementation hidden ... */ }'
+        query: `\n            (statement_block) @fold\n        `,
+        replacement: '{ /* ... */ }'
     },
     tsx: {
-        query: `
-            (statement_block) @fold
-        `,
-        replacement: '{ /* ... implementation hidden ... */ }'
+        query: `\n            (statement_block) @fold\n        `,
+        replacement: '{ /* ... */ }'
     },
     javascript: {
-        query: `
-            (statement_block) @fold
-        `,
-        replacement: '{ /* ... implementation hidden ... */ }'
+        query: `\n            (statement_block) @fold\n        `,
+        replacement: '{ /* ... */ }'
     },
     python: {
-        query: `
-            (block) @fold
-        `,
-        replacement: '... # implementation hidden',
+        query: `\n            (block) @fold\n        `,
+        replacement: '# ...',
         shouldFold: (node: any) => {
             if (node.parent && node.parent.type === 'class_definition') {
                 return false;
@@ -45,18 +38,21 @@ const LANGUAGE_CONFIG: Record<string, FoldQuery> = {
 type ResolvedSkeletonOptions = {
     includeMemberVars: boolean;
     includeComments: boolean;
+    includeSummary: boolean;
     detailLevel: SkeletonDetailLevel;
     maxMemberPreview: number;
 };
 
 export class SkeletonGenerator {
     private astManager: AstManager;
-    private queryCache = new Map<string, any>(); 
-    private extractionQueryCache = new Map<string, Query>(); 
-    private callQueryCache = new Map<string, Query>();
+    private queryCache = new Map<string, any>();
+    private symbolExtractor: SymbolExtractor;
+    private callSiteAnalyzer: CallSiteAnalyzer;
 
     constructor() {
         this.astManager = AstManager.getInstance();
+        this.symbolExtractor = new SymbolExtractor();
+        this.callSiteAnalyzer = new CallSiteAnalyzer();
     }
 
     public async getParserForFile(filePath: string) {
@@ -68,28 +64,22 @@ export class SkeletonGenerator {
     }
 
     public async generateSkeleton(filePath: string, content: string, options: SkeletonOptions = {}): Promise<string> {
-        if (typeof content !== 'string') return '';
-
         if (!this.astManager.supportsQueries()) {
             return content;
         }
 
-        let doc;
+        let doc: any;
         try {
             doc = await this.astManager.parseFile(filePath, content);
-        } catch (e) {
-            return content;
-        }
+            const lang = await this.astManager.getLanguageForFile(filePath);
+            const langId = this.astManager.getLanguageId(filePath);
+            const config = this.getLanguageConfig(filePath);
+            if (!config || !lang) return content;
 
-        const lang = await this.astManager.getLanguageForFile(filePath);
-        const langId = this.astManager.getLanguageId(filePath);
-        const config = this.getLanguageConfig(filePath);
-        if (!config) return content;
-        const resolvedOptions = this.resolveOptions(options);
+            const resolvedOptions = this.resolveOptions(options);
+            const rootNode: any | null = doc.rootNode;
 
-        let rootNode: any | null = null;
-        try {
-            rootNode = doc.rootNode;
+            if (!rootNode) return content;
 
             const maybeHasError = rootNode?.hasError;
             const rootHasError = typeof maybeHasError === 'function'
@@ -99,7 +89,8 @@ export class SkeletonGenerator {
             if (rootHasError) {
                 throw new Error('Tree-sitter parse error detected while building skeleton');
             }
-            const queryKey = `${langId}:${config.query}`; 
+
+            const queryKey = `${langId}:${config.query}`;
             let query = this.queryCache.get(queryKey);
             if (!query) {
                 query = new Query(lang, config.query);
@@ -107,21 +98,29 @@ export class SkeletonGenerator {
             }
 
             const matches = query.matches(rootNode);
-            const rangesToFold: { start: number; end: number; }[] = [];
+            const rangesToFold: { start: number; end: number; replacement?: string }[] = [];
 
             for (const match of matches) {
                 for (const capture of match.captures) {
-                    if (capture.name === 'fold') {
-                        const node = capture.node;
-                        if (config.shouldFold && !config.shouldFold(node)) {
-                            continue;
+                    const node = capture.node;
+                    if (config.shouldFold && !config.shouldFold(node)) {
+                        continue;
+                    }
+                    if (this.shouldFoldByDetailLevel(node, resolvedOptions.detailLevel, content)) {
+                        // Tier 2: Always generate Semantic Summary for folded blocks
+                        const summary = await this.generateSemanticSummary(node, lang, langId);
+                        let replacement = config.replacement;
+
+                        if (summary) {
+                            replacement = langId === 'python' 
+                                ? `# [Summary] ${summary}`
+                                : `{ /* [Summary] ${summary} */ }`;
                         }
-                        if (!this.shouldFoldByDetailLevel(node, resolvedOptions.detailLevel, content)) {
-                            continue;
-                        }
+
                         rangesToFold.push({
                             start: node.startIndex,
-                            end: node.endIndex
+                            end: node.endIndex,
+                            replacement: replacement ?? config.replacement
                         });
                     }
                 }
@@ -129,9 +128,8 @@ export class SkeletonGenerator {
 
             rangesToFold.sort((a, b) => a.start - b.start || b.end - a.end);
 
-            const rootRanges: { start: number; end: number; }[] = [];
+            const rootRanges: typeof rangesToFold = [];
             let lastEnd = -1;
-
             for (const range of rangesToFold) {
                 if (range.start >= lastEnd) {
                     rootRanges.push(range);
@@ -144,66 +142,143 @@ export class SkeletonGenerator {
                 const range = rootRanges[i];
                 const prefix = skeleton.substring(0, range.start);
                 const suffix = skeleton.substring(range.end);
-                skeleton = prefix + (config.replacement || '...') + suffix;
+                skeleton = prefix + (range.replacement ?? config.replacement ?? '') + suffix;
             }
 
             return this.applySkeletonPostProcessing(skeleton, resolvedOptions);
-
-        } catch (error) {
-            throw error; 
         } finally {
             doc?.dispose?.();
         }
     }
 
+    private async generateSemanticSummary(node: any, lang: any, langId: string): Promise<string | null> {
+        const callQuery = (this.callSiteAnalyzer as any).getCallQuery(langId, lang);
+        if (!callQuery) return null;
+
+        const matches = callQuery.matches(node);
+        const calls = new Set<string>();
+        const refs = new Set<string>();
+
+        for (const match of matches) {
+            const parsed = (this.callSiteAnalyzer as any).parseCallMatch(match);
+            if (parsed) {
+                const name = parsed.calleeObject
+                    ? `${parsed.calleeObject}.${parsed.calleeName}`
+                    : parsed.calleeName;
+                calls.add(name);
+            }
+        }
+
+        // Heuristic: Extract potential external references (PascalCase identifiers usually types/classes)
+        const refQuery = new Query(lang, `(identifier) @id`);
+        const refMatches = refQuery.matches(node);
+        const localNames = this.extractLocalNames(node);
+
+        for (const match of refMatches) {
+            const text = match.captures[0].node.text;
+            if (/^[A-Z]/.test(text) && !localNames.has(text)) {
+                refs.add(text);
+            }
+        }
+
+        const lineCount = this.countLinesInRange(node.sourceCode || "", node.startIndex, node.endIndex);
+        const branches = this.countBranches(node);
+
+        const summaryParts: string[] = [];
+        if (calls.size > 0) {
+            const callsList = Array.from(calls).slice(0, 5);
+            summaryParts.push(`calls: ${callsList.join(', ')}${calls.size > 5 ? ` (+${calls.size - 5} more)` : ''}`);
+        }
+        if (refs.size > 0) {
+            const refsList = Array.from(refs).slice(0, 5);
+            summaryParts.push(`refs: ${refsList.join(', ')}${refs.size > 5 ? ` (+${refs.size - 5} more)` : ''}`);
+        }
+        
+        summaryParts.push(`complexity: ${lineCount} LOC, ${branches} branches`);
+
+        return summaryParts.join('; ');
+    }
+
+    private extractLocalNames(node: any): Set<string> {
+        const locals = new Set<string>();
+        // Simplified local name extraction (parameters, variables defined in this block)
+        // A full implementation would traverse the AST for declarations
+        return locals;
+    }
+
+    private countBranches(node: any): number {
+        let count = 0;
+        const branchTypes = ['if_statement', 'for_statement', 'while_statement', 'case_clause', 'catch_clause', 'conditional_expression'];
+        
+        const traverse = (n: any) => {
+            if (branchTypes.includes(n.type)) count++;
+            for (let i = 0; i < n.childCount; i++) {
+                traverse(n.child(i));
+            }
+        };
+        
+        traverse(node);
+        return count;
+    }
+
     private resolveOptions(options: SkeletonOptions): ResolvedSkeletonOptions {
         return {
-            includeMemberVars: options.includeMemberVars !== false,
-            includeComments: options.includeComments === true,
-            detailLevel: options.detailLevel ?? "standard",
+            includeMemberVars: options.includeMemberVars ?? true,
+            includeComments: options.includeComments ?? false,
+            includeSummary: options.includeSummary ?? false,
+            detailLevel: options.detailLevel ?? 'standard',
             maxMemberPreview: Math.max(1, options.maxMemberPreview ?? 3)
         };
     }
 
     private shouldFoldByDetailLevel(node: any, detailLevel: SkeletonDetailLevel, content: string): boolean {
-        if (detailLevel === "detailed") {
-            const lineLength = this.countLinesInRange(content, node.startIndex, node.endIndex);
-            return lineLength > 50;
+        const lineLength = this.countLinesInRange(content, node.startIndex, node.endIndex);
+        if (detailLevel === 'detailed') {
+            return lineLength > 20;
         }
-        return true;
+        if (detailLevel === 'minimal') {
+            return true;
+        }
+        // standard (default)
+        return lineLength >= 3;
     }
 
     private countLinesInRange(content: string, start: number, end: number): number {
         const slice = content.substring(start, end);
-        if (!slice) {
-            return 0;
-        }
         return slice.split(/\r?\n/).length;
     }
 
     private applySkeletonPostProcessing(content: string, options: ResolvedSkeletonOptions): string {
         const lines = content.split(/\r?\n/);
         const processed: string[] = [];
+
         for (const line of lines) {
             const trimmed = line.trim();
+            if (trimmed === "") continue;
+
             if (!options.includeComments && this.isCommentText(trimmed)) {
                 continue;
             }
             if (!options.includeMemberVars && this.isMemberVariableLine(trimmed)) {
                 continue;
             }
+
             let nextLine = line;
-            if (options.includeMemberVars) {
+            if (this.isMemberVariableLine(trimmed)) {
                 nextLine = this.limitMemberPreview(nextLine, options.maxMemberPreview);
             }
+
             processed.push(nextLine);
         }
-        let output = processed.join("\n");
-        if (options.detailLevel === "minimal") {
-            output = this.keepEssentialLinesOnly(output);
+
+        if (options.detailLevel === 'minimal') {
+            const minimalPattern = /(class|interface|function|def|enum|struct|trait|module|namespace|constructor)/i;
+            return processed
+                .filter(line => minimalPattern.test(line))
+                .join("\n");
         }
-        output = this.collapseBlankLines(output);
-        return output;
+
+        return this.collapseBlankLines(processed.join("\n"));
     }
 
     private isCommentText(trimmed: string): boolean {
@@ -211,25 +286,13 @@ export class SkeletonGenerator {
     }
 
     private isMemberVariableLine(trimmed: string): boolean {
-        if (/^(public|protected|private)\s+(static\s+)?(readonly\s+)?\$?[A-Za-z_][\w$]*\s*[:=;]/.test(trimmed)) {
-            return true;
-        }
-        if (/^(readonly\s+)?[A-Za-z_][\w$]*\s*:\s*[\w\<\>\[\]\s]+(?:;|=)/.test(trimmed)) {
-            return true;
-        }
-        if (/^\$[A-Za-z_][\w$]*\s*=/.test(trimmed)) {
-            return true;
-        }
-        if (/^[A-Za-z_][\w$]*\s*=\s*[^=]+$/.test(trimmed) && !/\bfunction\b/.test(trimmed)) {
-            return true;
-        }
-        return false;
+        return /^(public|protected|private)\s+(static\s+)?(readonly\s+)?\$?[A-Za-z_][\w$]*\s*[:=;]/.test(trimmed) ||
+            /^(readonly\s+)?[A-Za-z_][\w$]*\s*:\s*[\w\<\\>\[\]\s]+(?:;|=)/.test(trimmed) ||
+            /^\$[A-Za-z_][\w$]*\s*=/.test(trimmed) ||
+            (/^[A-Za-z_][\w$]*\s*=\s*[^=]+$/.test(trimmed) && !/\bfunction\b/.test(trimmed));
     }
 
     private limitMemberPreview(line: string, maxEntries: number): string {
-        if (maxEntries <= 0) {
-            return line;
-        }
         const arrayMatch = line.match(/=\s*\[(.+)\](;)?/);
         if (arrayMatch) {
             const entries = arrayMatch[1].split(",").map(part => part.trim()).filter(Boolean);
@@ -240,8 +303,8 @@ export class SkeletonGenerator {
                     `= [${limited}, ...${entries.length - maxEntries} more]${arrayMatch[2] ?? ""}`
                 );
             }
-            return line;
         }
+
         const objectMatch = line.match(/=\s*\{(.+)\}(;)?/);
         if (objectMatch) {
             const entries = objectMatch[1].split(",").map(part => part.trim()).filter(Boolean);
@@ -253,33 +316,16 @@ export class SkeletonGenerator {
                 );
             }
         }
-        return line;
-    }
 
-    private keepEssentialLinesOnly(content: string): string {
-        const essentialPattern = /(class|interface|function|def|enum|struct|trait|module|namespace|export\s+(class|function|const)|constructor|private|public|protected|greet)/i;
-        const lines = content.split(/\r?\n/);
-        const essentials: string[] = [];
-        for (const line of lines) {
-            const trimmed = line.trim();
-            if (trimmed.length === 0) {
-                continue;
-            }
-            if (essentialPattern.test(trimmed)) {
-                essentials.push(line);
-            }
-        }
-        return essentials.join("\n");
+        return line;
     }
 
     private collapseBlankLines(content: string): string {
         const lines = content.split(/\r?\n/);
         const filtered: string[] = [];
         for (const line of lines) {
-            if (line.trim().length === 0) {
-                if (filtered.length === 0 || filtered[filtered.length - 1].trim().length === 0) {
-                    continue;
-                }
+            if (line.trim() === "" && filtered.length > 0 && filtered[filtered.length - 1].trim() === "") {
+                continue;
             }
             filtered.push(line);
         }
@@ -287,120 +333,31 @@ export class SkeletonGenerator {
     }
 
     public async generateStructureJson(filePath: string, content: string): Promise<SymbolInfo[]> {
-        if (typeof content !== 'string') return [];
-
-        let doc;
-        try {
-            doc = await this.astManager.parseFile(filePath, content);
-        } catch (e) {
-            return [];
-        }
-
-        const lang = await this.astManager.getLanguageForFile(filePath);
-        if (!lang || !this.astManager.supportsQueries()) return [];
-        const langId = this.astManager.getLanguageId(filePath);
-
-        let rootNode: any | null = null;
-        const symbols: SymbolInfo[] = [];
-        const definitionNodeMap = new Map<string, DefinitionSymbol>();
-
-        try {
-            rootNode = doc.rootNode;
-            const queryKey = langId + '_EXTRACT';
-            let query = this.extractionQueryCache.get(queryKey);
-
-            if (!query) {
-                let extractionQuerySource = '';
-                if (langId === 'typescript' || langId === 'tsx' || langId === 'javascript') {
-                    extractionQuerySource = `
-                        (class_declaration name: (type_identifier) @name) @definition
-                        (function_declaration name: (identifier) @name) @definition
-                        (method_definition name: (property_identifier) @name) @definition
-                        (interface_declaration name: (type_identifier) @name) @definition
-                        (type_alias_declaration name: (type_identifier) @name) @definition
-                        (variable_declarator name: (identifier) @name) @definition
-                        (import_statement) @import
-                        (export_statement) @export
-                    `;
-                } else if (langId === 'python') {
-                    extractionQuerySource = `
-                        (class_definition name: (identifier) @name) @definition
-                        (function_definition name: (identifier) @name) @definition
-                        (import_statement) @import
-                        (import_from_statement) @import
-                    `;
-                } else {
-                    return []; 
-                }
-                query = new Query(lang, extractionQuerySource);
-                this.extractionQueryCache.set(queryKey, query);
-            }
-
-            for (const match of query.matches(rootNode)) {
-                for (const capture of match.captures) {
-                    if (capture.name === 'definition') {
-                        const nameCapture = match.captures.find((c: any) => c.name === 'name');
-                        if (nameCapture) {
-                            const symbol = this.processDefinition(capture.node, nameCapture.node, langId);
-                            if (symbol) {
-                                symbols.push(symbol);
-                                definitionNodeMap.set(this.makeNodeKey(capture.node), symbol);
-                            }
-                        }
-                    } else if (capture.name === 'import') {
-                        const importSymbols = this.processImport(capture.node, langId);
-                        symbols.push(...importSymbols);
-                    } else if (capture.name === 'export') {
-                        const exportSymbols = this.processExport(capture.node, langId);
-                        symbols.push(...exportSymbols);
-                    }
-                }
-            }
-
-            if (definitionNodeMap.size > 0) {
-                this.attachCallSiteMetadata(rootNode, lang, langId, definitionNodeMap);
-            }
-
-        } catch (error) {
-            console.error(`Error generating JSON skeleton for ${filePath}:`, error);
-            throw error; 
-        } finally {
-            doc?.dispose?.();
-        }
-
-        return symbols;
+        return this.symbolExtractor.generateStructureJson(filePath, content, this.astManager);
     }
 
     public async findIdentifiers(filePath: string, content: string, targetNames: string[]): Promise<{ name: string, range: any }[]> {
-        if (typeof content !== 'string') return [];
-        
         if (!this.astManager.supportsQueries()) {
             return [];
         }
 
-        let doc;
+        let doc: any;
         try {
             doc = await this.astManager.parseFile(filePath, content);
-        } catch (e) {
-            return [];
-        }
+            const lang = await this.astManager.getLanguageForFile(filePath);
+            const rootNode: any | null = doc.rootNode;
+            const results: { name: string, range: any }[] = [];
 
-        const lang = await this.astManager.getLanguageForFile(filePath);
-        if (!lang) return [];
+            if (!rootNode || !lang) return [];
 
-        let rootNode: any | null = null;
-        const results: { name: string, range: any }[] = [];
-
-        try {
-            rootNode = doc.rootNode;
             const query = new Query(lang, `
                 (identifier) @id
                 (property_identifier) @id
                 (type_identifier) @id
                 (shorthand_property_identifier_pattern) @id
             `);
+
             const matches = query.matches(rootNode);
-            
             const targetSet = new Set(targetNames);
 
             for (const match of matches) {
@@ -417,483 +374,13 @@ export class SkeletonGenerator {
                     });
                 }
             }
+            return results;
         } catch (error) {
             console.error(`Error finding identifiers in ${filePath}:`, error);
+            return [];
         } finally {
             doc?.dispose?.();
         }
-        return results;
-    }
-
-    private attachCallSiteMetadata(rootNode: any, lang: any, langId: string, definitionNodeMap: Map<string, DefinitionSymbol>) {
-        const query = this.getCallQuery(langId, lang);
-        if (!query) return;
-
-        const matches = query.matches(rootNode);
-        for (const match of matches) {
-            const parsed = this.parseCallMatch(match);
-            if (!parsed) continue;
-            const owner = this.findOwningDefinition(parsed.node, definitionNodeMap);
-            if (!owner) continue;
-
-            const callInfo: CallSiteInfo = {
-                calleeName: parsed.calleeName,
-                calleeObject: parsed.calleeObject,
-                callType: parsed.callType,
-                line: parsed.node.startPosition.row + 1,
-                column: parsed.node.startPosition.column + 1,
-                text: parsed.node.text
-            };
-
-            if (!owner.calls) {
-                owner.calls = [];
-            }
-            owner.calls.push(callInfo);
-        }
-    }
-
-    private getCallQuery(langId: string, lang: any): Query | null {
-        const source = this.getCallQuerySource(langId);
-        if (!source) return null;
-        const cacheKey = `${langId}_CALLS`;
-        let query = this.callQueryCache.get(cacheKey);
-        if (!query) {
-            query = new Query(lang, source);
-            this.callQueryCache.set(cacheKey, query);
-        }
-        return query;
-    }
-
-    private getCallQuerySource(langId: string): string | null {
-        if (langId === 'typescript' || langId === 'tsx' || langId === 'javascript') {
-            return `
-                (call_expression
-                    function: (identifier) @call_direct_name) @call_direct
-
-                (call_expression
-                    function: (member_expression
-                        object: (_) @call_method_object
-                        property: (property_identifier) @call_method_name)) @call_method
-
-                (new_expression
-                    constructor: (identifier) @call_ctor_name) @call_ctor
-            `;
-        }
-
-        if (langId === 'python') {
-            return `
-                (call
-                    function: (identifier) @py_call_name) @py_call
-
-                (call
-                    function: (attribute
-                        object: (_) @py_method_object
-                        attribute: (identifier) @py_method_name)) @py_method
-            `;
-        }
-
-        return null;
-    }
-
-    private parseCallMatch(match: any): { node: any; calleeName: string; calleeObject?: string; callType: CallType } | null {
-        const getNode = (name: string) => match.captures.find((capture: any) => capture.name === name)?.node;
-
-        const methodNode = getNode('call_method') || getNode('py_method');
-        if (methodNode) {
-            const nameNode = getNode('call_method_name') || getNode('py_method_name');
-            if (!nameNode) return null;
-            const objectNode = getNode('call_method_object') || getNode('py_method_object');
-            return {
-                node: methodNode,
-                calleeName: nameNode.text,
-                calleeObject: objectNode?.text,
-                callType: 'method'
-            };
-        }
-
-        const ctorNode = getNode('call_ctor');
-        if (ctorNode) {
-            const nameNode = getNode('call_ctor_name');
-            if (!nameNode) return null;
-            return {
-                node: ctorNode,
-                calleeName: nameNode.text,
-                callType: 'constructor'
-            };
-        }
-
-        const directNode = getNode('call_direct') || getNode('py_call');
-        if (directNode) {
-            const nameNode = getNode('call_direct_name') || getNode('py_call_name');
-            if (!nameNode) return null;
-            return {
-                node: directNode,
-                calleeName: nameNode.text,
-                callType: 'direct'
-            };
-        }
-
-        return null;
-    }
-
-    private findOwningDefinition(node: any, definitionNodeMap: Map<string, DefinitionSymbol>): DefinitionSymbol | undefined {
-        let current = node;
-        while (current) {
-            const symbol = definitionNodeMap.get(this.makeNodeKey(current));
-            if (symbol) {
-                return symbol;
-            }
-            current = current.parent;
-        }
-        return undefined;
-    }
-
-    private makeNodeKey(node: any): string {
-        const start = typeof node.startIndex === 'number' ? node.startIndex : 0;
-        const end = typeof node.endIndex === 'number' ? node.endIndex : start;
-        const idPart = typeof node.id === 'number' || typeof node.id === 'string'
-            ? String(node.id)
-            : '';
-        return `${idPart}:${start}:${end}`;
-    }
-
-    private processDefinition(definitionNode: any, nameNode: any, langName: string): DefinitionSymbol | null {
-        const resolvedType = this.resolveSymbolType(definitionNode);
-        if (!resolvedType) return null;
-
-        let containerName: string | undefined;
-        let parent = definitionNode.parent;
-        while (parent) {
-            if (['class_declaration', 'interface_declaration', 'class_definition', 'function_declaration', 'method_definition'].includes(parent.type)) {
-                const parentNameNode = parent.childForFieldName('name');
-                if (parentNameNode) {
-                    containerName = parentNameNode.text;
-                    break;
-                }
-            }
-            parent = parent.parent;
-        }
-
-        let signature = definitionNode.text.substring(nameNode.startIndex - definitionNode.startIndex);
-        if (definitionNode.childForFieldName('body')) {
-            const bodyNode = definitionNode.childForFieldName('body');
-            if (bodyNode) {
-                signature = definitionNode.text.substring(0, bodyNode.startIndex - definitionNode.startIndex).trim();
-            }
-        }
-
-        const parameters = this.extractParameterNames(definitionNode);
-        const returnType = this.extractReturnType(definitionNode);
-        const doc = this.extractDocumentation(definitionNode, langName);
-        
-        const modifiers: string[] = [];
-        let p = definitionNode.parent;
-        if (p && (p.type === 'export_statement')) {
-            modifiers.push('export');
-            if (p.children.some((c: any) => c.type === 'default')) modifiers.push('default');
-        }
-        
-        if (definitionNode.children) {
-            for (const child of definitionNode.children) {
-                if (child.type.includes('modifier') || child.type === 'static') {
-                    modifiers.push(child.text);
-                }
-            }
-        }
-
-        return {
-            type: resolvedType,
-            name: nameNode.text,
-            range: {
-                startLine: definitionNode.startPosition.row,
-                endLine: definitionNode.endPosition.row,
-                startByte: definitionNode.startIndex,
-                endByte: definitionNode.endIndex,
-            },
-            container: containerName,
-            signature,
-            parameters,
-            returnType,
-            modifiers,
-            doc
-        } as DefinitionSymbol;
-    }
-
-    private extractDocumentation(node: any, langName: string): string | undefined {
-        if (langName === 'typescript' || langName === 'tsx' || langName === 'javascript') {
-            const comments: string[] = [];
-            let prev = node.previousSibling;
-            let iterations = 0;
-            const MAX_COMMENT_SCAN = 50;
-            
-            while (prev && iterations < MAX_COMMENT_SCAN) {
-                iterations++;
-                if (prev.type === 'comment') {
-                    comments.unshift(prev.text);
-                    prev = prev.previousSibling;
-                } else if (prev.type.match(/\s/) || prev.text.trim() === '') { 
-                    // Skip whitespace/newlines
-                    prev = prev.previousSibling;
-                } else {
-                    break;
-                }
-            }
-            return comments.length > 0 ? comments.join('\n') : undefined;
-        } else if (langName === 'python') {
-            const body = node.childForFieldName('body');
-            if (body && body.firstChild) {
-                const first = body.firstChild;
-                if (first.type === 'expression_statement') {
-                    const stringNode = first.firstChild;
-                    if (stringNode && stringNode.type === 'string') {
-                        const text = stringNode.text;
-                        if (text.startsWith('"""') && text.endsWith('"""')) return text.slice(3, -3);
-                        if (text.startsWith("'''") && text.endsWith("'''")) return text.slice(3, -3);
-                        if (text.startsWith('"') && text.endsWith('"')) return text.slice(1, -1);
-                        if (text.startsWith("'") && text.endsWith("'")) return text.slice(1, -1);
-                        return text;
-                    }
-                }
-            }
-        }
-        return undefined;
-    }
-
-    private processImport(node: any, langName: string): ImportSymbol[] {
-        const results: ImportSymbol[] = [];
-        if (langName === 'typescript' || langName === 'tsx' || langName === 'javascript') {
-            const sourceNode = node.childForFieldName('source');
-            if (!sourceNode) return [];
-            const source = sourceNode.text.slice(1, -1); 
-
-            const isTypeOnly = node.children.some((c: any) => c.type === 'type' || c.text === 'type');
-            const importClause = node.children.find((c: any) => c.type === 'import_clause');
-            if (importClause) {
-
-                // 1. Default Import
-                const defaultImport = importClause.children.find((c: any) => c.type === 'identifier');
-                if (defaultImport) {
-                    results.push({
-                        type: 'import',
-                        name: defaultImport.text,
-                        source,
-                        importKind: 'default',
-                        alias: defaultImport.text,
-                        isTypeOnly,
-                        range: {
-                            startLine: node.startPosition.row,
-                            endLine: node.endPosition.row,
-                            startByte: node.startIndex,
-                            endByte: node.endIndex,
-                        }
-                    });
-                }
-
-                // 2. Named Imports
-                const namedImports = importClause.children.find((c: any) => c.type === 'named_imports');
-                if (namedImports) {
-                     const importsList: { name: string; alias?: string }[] = [];
-                     for (const child of namedImports.children) {
-                         if (child.type === 'import_specifier') {
-                             const nameNode = child.childForFieldName('name');
-                             const aliasNode = child.childForFieldName('alias');
-                             if (nameNode) {
-                                 importsList.push({
-                                     name: nameNode.text,
-                                     alias: aliasNode ? aliasNode.text : undefined
-                                 });
-                             }
-                         }
-                     }
-                     results.push({
-                         type: 'import',
-                         name: 'imports from ' + source, 
-                         source,
-                         importKind: 'named',
-                         imports: importsList,
-                         isTypeOnly,
-                         range: {
-                             startLine: node.startPosition.row,
-                             endLine: node.endPosition.row,
-                             startByte: node.startIndex,
-                             endByte: node.endIndex,
-                         }
-                     });
-                }
-                
-                // 3. Namespace Import
-                const namespaceImport = importClause.children.find((c: any) => c.type === 'namespace_import');
-                if (namespaceImport) {
-                     const aliasNode = namespaceImport.children.find((c: any) => c.type === 'identifier');
-                     if (aliasNode) {
-                         results.push({
-                            type: 'import',
-                            name: aliasNode.text,
-                            source,
-                            importKind: 'namespace',
-                            alias: aliasNode.text,
-                            isTypeOnly,
-                            range: {
-                                startLine: node.startPosition.row,
-                                endLine: node.endPosition.row,
-                                startByte: node.startIndex,
-                                endByte: node.endIndex,
-                            }
-                         });
-                     }
-                }
-            } else {
-                results.push({
-                    type: 'import',
-                    name: source,
-                    source,
-                    importKind: 'side-effect',
-                    isTypeOnly: false,
-                    range: {
-                        startLine: node.startPosition.row,
-                        endLine: node.endPosition.row,
-                        startByte: node.startIndex,
-                        endByte: node.endIndex,
-                    }
-                });
-            }
-        }
-        return results;
-    }
-
-    private processExport(node: any, langName: string): ExportSymbol[] {
-        const results: ExportSymbol[] = [];
-        if (langName === 'typescript' || langName === 'tsx' || langName === 'javascript') {
-             const isTypeOnly = node.children.some((c: any) => c.type === 'type' || c.text === 'type');
-             const sourceNode = node.childForFieldName('source');
-             const source = sourceNode ? sourceNode.text.slice(1, -1) : undefined;
-             
-             // 1. Export Clause (export { ... } [from ...])
-             const exportClause = node.children.find((c: any) => c.type === 'export_clause');
-             if (exportClause) {
-                 const exportsList: { name: string; alias?: string }[] = [];
-                 for (const child of exportClause.children) {
-                     if (child.type === 'export_specifier') {
-                         const nameNode = child.childForFieldName('name');
-                         const aliasNode = child.childForFieldName('alias');
-                         if (nameNode) {
-                             exportsList.push({
-                                 name: nameNode.text,
-                                 alias: aliasNode ? aliasNode.text : undefined
-                             });
-                         }
-                     }
-                 }
-                 results.push({
-                     type: 'export',
-                     name: source ? `re-export from ${source}` : 'named exports',
-                     exportKind: source ? 're-export' : 'named',
-                     source,
-                     exports: exportsList,
-                     isTypeOnly,
-                     range: {
-                        startLine: node.startPosition.row,
-                        endLine: node.endPosition.row,
-                        startByte: node.startIndex,
-                        endByte: node.endIndex,
-                    }
-                 });
-             }
-             
-             // 2. Namespace Re-export (export * from 'b')
-             const starNode = node.children.find((c: any) => c.type === '*');
-             if (starNode && source) {
-                  results.push({
-                     type: 'export',
-                     name: `* from ${source}`,
-                     exportKind: 're-export', 
-                     source,
-                     isTypeOnly,
-                     range: {
-                        startLine: node.startPosition.row,
-                        endLine: node.endPosition.row,
-                        startByte: node.startIndex,
-                        endByte: node.endIndex,
-                    }
-                 });
-             }
-
-             // 3. Local / Default Exports (via declaration field)
-             const isDefault = node.children.some((c: any) => c.type === 'default' || c.text === 'default');
-             const declaration = node.childForFieldName('declaration');
-             
-             if (declaration) {
-                 if (isDefault) {
-                     // export default class/function
-                     const nameNode = declaration.childForFieldName('name');
-                     const name = nameNode ? nameNode.text : 'default';
-                     results.push({
-                         type: 'export',
-                         name: name,
-                         exportKind: 'default',
-                         isTypeOnly,
-                         range: {
-                            startLine: node.startPosition.row,
-                            endLine: node.endPosition.row,
-                            startByte: node.startIndex,
-                            endByte: node.endIndex,
-                        }
-                     });
-                 } else {
-                     // export class/function/const
-                     const exportsList: { name: string; alias?: string }[] = [];
-                     
-                     if (declaration.type === 'lexical_declaration' || declaration.type === 'variable_declaration') {
-                         for (const child of declaration.children) {
-                             if (child.type === 'variable_declarator') {
-                                 const nameNode = child.childForFieldName('name');
-                                 if (nameNode) exportsList.push({ name: nameNode.text });
-                             }
-                         }
-                     } else {
-                         // function/class/interface/type_alias
-                         const nameNode = declaration.childForFieldName('name');
-                         if (nameNode) exportsList.push({ name: nameNode.text });
-                     }
-
-                     if (exportsList.length > 0) {
-                         results.push({
-                             type: 'export',
-                             name: 'local exports',
-                             exportKind: 'named',
-                             exports: exportsList,
-                             isTypeOnly,
-                             range: {
-                                startLine: node.startPosition.row,
-                                endLine: node.endPosition.row,
-                                startByte: node.startIndex,
-                                endByte: node.endIndex,
-                            }
-                         });
-                     }
-                 }
-             } else if (isDefault) {
-                 // export default expression; (e.g. export default 1;)
-                 const valueNode = node.children.find((c: any) => 
-                    c.type !== 'export' && c.type !== 'default' && c.type !== ';' && c.type !== 'type'
-                 );
-                 if (valueNode) {
-                     results.push({
-                         type: 'export',
-                         name: 'default',
-                         exportKind: 'default',
-                         isTypeOnly,
-                         range: {
-                            startLine: node.startPosition.row,
-                            endLine: node.endPosition.row,
-                            startByte: node.startIndex,
-                            endByte: node.endIndex,
-                        }
-                     });
-                 }
-             }
-        }
-        return results;
     }
 
     private getLanguageConfig(filePath: string): FoldQuery | undefined {
@@ -903,58 +390,5 @@ export class SkeletonGenerator {
         if (['js', 'mjs', 'cjs', 'jsx'].includes(ext!)) return LANGUAGE_CONFIG.javascript;
         if (['py'].includes(ext!)) return LANGUAGE_CONFIG.python;
         return undefined;
-    }
-
-    private resolveSymbolType(node: any): DefinitionSymbol['type'] | undefined {
-        switch (node.type) {
-            case 'class_declaration':
-            case 'class_definition':
-                return 'class';
-            case 'interface_declaration':
-                return 'interface';
-            case 'method_definition':
-                return 'method';
-            case 'function_declaration':
-            case 'function_definition':
-                return 'function';
-            case 'variable_declarator':
-                return 'variable';
-            case 'type_alias_declaration':
-                return 'type_alias';
-            default:
-                return undefined;
-        }
-    }
-
-    private extractParameterNames(node: any): string[] {
-        const paramsNode = node.childForFieldName('parameters');
-        if (!paramsNode) {
-            return [];
-        }
-
-        return paramsNode.children
-            .filter((child: any) =>
-                child.type === 'identifier' ||
-                child.type === 'required_parameter' ||
-                child.type === 'optional_parameter' ||
-                child.type === 'rest_parameter' ||
-                child.type === 'default_parameter' ||
-                child.type === 'typed_parameter')
-            .map((child: any) => {
-                if (child.type === 'identifier') {
-                    return child.text;
-                }
-                const nameField = child.childForFieldName ? child.childForFieldName('name') : null;
-                if (nameField) {
-                    return nameField.text;
-                }
-                const identifierChild = child.namedChildren?.find((c: any) => c.type === 'identifier');
-                return identifierChild ? identifierChild.text : child.text;
-            });
-    }
-
-    private extractReturnType(node: any): string | undefined {
-        const returnNode = node.childForFieldName('return_type');
-        return returnNode ? returnNode.text : undefined;
     }
 }

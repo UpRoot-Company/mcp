@@ -52,11 +52,23 @@ export class LRUCache<K, V> {
         }
     }
 
+    public keys(): IterableIterator<K> {
+        return this.cache.keys();
+    }
+
+    public delete(key: K): void {
+        this.performDelete(key);
+    }
+
+    public size(): number {
+        return this.cache.size;
+    }
+
     private isExpired(entry: { lastAccess: number }): boolean {
         return Date.now() - entry.lastAccess > this.ttlMs;
     }
 
-    private delete(key: K): void {
+    private performDelete(key: K): void {
         const entry = this.cache.get(key);
         if (!entry) {
             return;

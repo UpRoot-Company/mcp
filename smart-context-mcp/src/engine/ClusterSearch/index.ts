@@ -189,6 +189,11 @@ export class ClusterSearchEngine {
         this.precomputationEngine?.stop();
     }
 
+    public async getHotSpots(): Promise<any[]> {
+        if (!this.hotSpotDetector) return [];
+        return this.hotSpotDetector.detectHotSpots();
+    }
+
     private collectRecommendedExpansions(clusters: SearchCluster[]): string[] {
         const relationships: ExpandableRelationship[] = ["callers", "callees", "typeFamily"];
         const recommendations: string[] = [];

@@ -4,9 +4,6 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { ListToolsRequestSchema, CallToolRequestSchema, McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import * as fs from "fs";
-
-
-
 import * as path from "path";
 import * as ignore from "ignore";
 import * as url from "url";
@@ -18,8 +15,12 @@ import { ContextEngine } from "./engine/Context.js";
 import { EditorEngine, AmbiguousMatchError } from "./engine/Editor.js";
 import { HistoryEngine } from "./engine/History.js";
 import { EditCoordinator } from "./engine/EditCoordinator.js";
+import { ImpactAnalyzer } from "./engine/ImpactAnalyzer.js";
 import { SkeletonGenerator } from "./ast/SkeletonGenerator.js";
+import { SkeletonCache } from "./ast/SkeletonCache.js";
 import { FallbackResolver } from "./resolution/FallbackResolver.js";
+import { GhostInterfaceBuilder } from "./resolution/GhostInterfaceBuilder.js";
+import { CallSiteAnalyzer } from "./ast/analysis/CallSiteAnalyzer.js";
 import { ErrorEnhancer } from "./errors/ErrorEnhancer.js";
 import { AstManager } from "./ast/AstManager.js";
 import { SymbolIndex } from "./ast/SymbolIndex.js";
@@ -33,7 +34,7 @@ import { FileProfiler, FileMetadataAnalysis } from "./engine/FileProfiler.js";
 import { AgentWorkflowGuidance } from "./engine/AgentPlaybook.js";
 import { ClusterSearchEngine, ClusterSearchOptions, ClusterExpansionOptions } from "./engine/ClusterSearch/index.js";
 import { BuildClusterOptions, ExpandableRelationship } from "./engine/ClusterSearch/ClusterBuilder.js";
-import { FileSearchResult, ReadFragmentResult, EditResult, Edit, EngineConfig, SmartFileProfile, SymbolInfo, ToolSuggestion, ImpactPreview, BatchEditGuidance, ReadCodeResult, ReadCodeArgs, SearchProjectResult, SearchProjectArgs, AnalyzeRelationshipResult, EditCodeArgs, EditCodeResult, EditCodeEdit, ManageProjectResult, ManageProjectArgs, AnalyzeRelationshipArgs, ReadCodeView, SearchProjectType, ResolvedRelationshipTarget, AnalyzeRelationshipDirection, AnalyzeRelationshipNode, AnalyzeRelationshipEdge, LineRange, DiffMode, SafetyLevel, RefactoringContext, NextActionHint, BatchOpportunity, SuggestedBatchEdit } from "./types.js";
+import { FileSearchResult, ReadFragmentResult, EditResult, Edit, EngineConfig, SmartFileProfile, SymbolInfo, ToolSuggestion, ImpactPreview, BatchEditGuidance, ReadCodeResult, ReadCodeArgs, SearchProjectResult, SearchProjectArgs, AnalyzeRelationshipResult, EditCodeArgs, EditCodeResult, EditCodeEdit, ManageProjectResult, ManageProjectArgs, AnalyzeRelationshipArgs, ReadCodeView, SearchProjectType, ResolvedRelationshipTarget, AnalyzeRelationshipDirection, AnalyzeRelationshipNode, AnalyzeRelationshipEdge, LineRange, DiffMode, SafetyLevel, RefactoringContext, NextActionHint, BatchOpportunity, SuggestedBatchEdit, SkeletonOptions } from "./types.js";
 import { FileStats, IFileSystem, NodeFileSystem } from "./platform/FileSystem.js";
 import { AstAwareDiff } from "./engine/AstAwareDiff.js";
 import { IndexDatabase } from "./indexing/IndexDatabase.js";
@@ -42,10 +43,10 @@ import { TransactionLog, TransactionLogEntry } from "./engine/TransactionLog.js"
 import { metrics } from "./utils/MetricsCollector.js";
 import { PathNormalizer } from "./utils/PathNormalizer.js";
 import { ConfigurationManager } from "./config/ConfigurationManager.js";
+import { PathManager } from "./utils/PathManager.js";
+import { FileVersionManager } from "./engine/FileVersionManager.js";
 
 export { ConfigurationManager } from "./config/ConfigurationManager.js";
-
-
 
 const ENABLE_DEBUG_LOGS = process.env.SMART_CONTEXT_DEBUG === 'true';
 
@@ -61,8 +62,12 @@ export class SmartContextServer {
     private editorEngine: EditorEngine;
     private historyEngine: HistoryEngine;
     private editCoordinator: EditCoordinator;
+    private impactAnalyzer: ImpactAnalyzer;
     private skeletonGenerator: SkeletonGenerator;
+    private skeletonCache: SkeletonCache;
     private fallbackResolver: FallbackResolver;
+    private ghostInterfaceBuilder: GhostInterfaceBuilder;
+    private callSiteAnalyzer: CallSiteAnalyzer;
     private astManager: AstManager;
     private symbolIndex: SymbolIndex;
     private moduleResolver: ModuleResolver;
@@ -76,7 +81,9 @@ export class SmartContextServer {
     private transactionLog: TransactionLog;
     private incrementalIndexer?: IncrementalIndexer;
     private configurationManager: ConfigurationManager;
+    private fileVersionManager: FileVersionManager;
     private sigintListener?: () => Promise<void>;
+    private initPromise: Promise<void>;
     private static hasSigintListener = false;
     private static readonly READ_CODE_MAX_BYTES = 1_000_000;
     private static readonly READ_FILE_DEFAULT_MAX_BYTES = 65_536;
@@ -112,6 +119,7 @@ export class SmartContextServer {
         });
 
         this.rootPath = path.resolve(rootPath);
+        PathManager.setRoot(this.rootPath);
         this.fileSystem = fileSystem ?? new NodeFileSystem(this.rootPath);
         if (this.fileSystem instanceof NodeFileSystem) {
             try {
@@ -131,7 +139,14 @@ export class SmartContextServer {
         );
 
         this.configurationManager = configurationManager ?? new ConfigurationManager(this.rootPath);
+        this.configurationManager = configurationManager ?? new ConfigurationManager(this.rootPath);
         this.ownsConfigurationManager = !configurationManager;
+        this.ig = (ignore.default as any)();
+        this.applyIgnorePatterns(this.configurationManager.getIgnoreGlobs(), { skipPropagation: true });
+
+        this.fileVersionManager = new FileVersionManager(this.fileSystem);
+
+        // 경로 정규화 초기화 (절대경로 ↔ 상대경로 자동 변환)        this.ownsConfigurationManager = !configurationManager;
         this.ig = (ignore.default as any)();
         this.applyIgnorePatterns(this.configurationManager.getIgnoreGlobs(), { skipPropagation: true });
 
@@ -139,15 +154,38 @@ export class SmartContextServer {
         this.pathNormalizer = new PathNormalizer(this.rootPath);
 
         this.skeletonGenerator = new SkeletonGenerator();
+        this.skeletonCache = new SkeletonCache(this.rootPath);
         this.astManager = AstManager.getInstance();
         this.indexDatabase = new IndexDatabase(this.rootPath);
         this.transactionLog = new TransactionLog(this.indexDatabase.getHandle());
         this.symbolIndex = new SymbolIndex(this.rootPath, this.skeletonGenerator, this.ignoreGlobs, this.indexDatabase);
-        this.fallbackResolver = new FallbackResolver(this.symbolIndex, this.skeletonGenerator);
         this.moduleResolver = new ModuleResolver(this.rootPath);
         this.dependencyGraph = new DependencyGraph(this.rootPath, this.symbolIndex, this.moduleResolver, this.indexDatabase);
-        this.referenceFinder = new ReferenceFinder(this.rootPath, this.dependencyGraph, this.symbolIndex, this.skeletonGenerator, this.moduleResolver);
         this.callGraphBuilder = new CallGraphBuilder(this.rootPath, this.symbolIndex, this.moduleResolver);
+        
+        const impactAnalyzer = new ImpactAnalyzer(this.dependencyGraph, this.callGraphBuilder, this.symbolIndex);
+        this.impactAnalyzer = impactAnalyzer;
+        this.callSiteAnalyzer = new CallSiteAnalyzer();
+        this.searchEngine = new SearchEngine(this.rootPath, this.fileSystem, this.ignoreGlobs, {
+            symbolIndex: this.symbolIndex,
+            callGraphBuilder: this.callGraphBuilder
+        });
+
+        this.ghostInterfaceBuilder = new GhostInterfaceBuilder(
+            this.searchEngine, 
+            this.callSiteAnalyzer, 
+            this.astManager, 
+            this.fileSystem, 
+            this.rootPath
+        );
+
+        this.fallbackResolver = new FallbackResolver(
+            this.symbolIndex, 
+            this.skeletonGenerator, 
+            this.ghostInterfaceBuilder
+        );
+
+        this.referenceFinder = new ReferenceFinder(this.rootPath, this.dependencyGraph, this.symbolIndex, this.skeletonGenerator, this.moduleResolver);
         this.typeDependencyTracker = new TypeDependencyTracker(this.rootPath, this.symbolIndex);
         this.dataFlowTracer = new DataFlowTracer(this.rootPath, this.symbolIndex, this.fileSystem);
         const semanticDiffProvider = new AstAwareDiff(this.skeletonGenerator);
@@ -157,13 +195,10 @@ export class SmartContextServer {
         this.editCoordinator = new EditCoordinator(this.editorEngine, this.historyEngine, {
             rootPath: this.rootPath,
             transactionLog: this.transactionLog,
-            fileSystem: this.fileSystem
+            fileSystem: this.fileSystem,
+            impactAnalyzer: this.impactAnalyzer
         });
         void this.recoverPendingTransactions();
-        this.searchEngine = new SearchEngine(this.rootPath, this.fileSystem, this.ignoreGlobs, {
-            symbolIndex: this.symbolIndex,
-            callGraphBuilder: this.callGraphBuilder
-        });
         const precomputeEnabled = process.env.SMART_CONTEXT_DISABLE_PRECOMPUTE === 'true' ? false : !isTestEnv;
         this.clusterSearchEngine = new ClusterSearchEngine({
             rootPath: this.rootPath,
@@ -177,7 +212,7 @@ export class SmartContextServer {
         });
         this.applyIgnorePatterns(this.ignoreGlobs);
         this.registerConfigurationListeners();
-        const indexingEnabled = process.env.SMART_CONTEXT_DISABLE_STREAMING_INDEX === 'true' ? false : !isTestEnv;
+        const indexingEnabled = process.env.SMART_CONTEXT_DISABLE_STREAMING_INDEX === 'true' ? false : (isTestEnv ? false : true);
         if (indexingEnabled) {
             this.incrementalIndexer = new IncrementalIndexer(
                 this.rootPath,
@@ -198,25 +233,44 @@ export class SmartContextServer {
             snapshotDir: process.env.SMART_CONTEXT_SNAPSHOT_DIR
         };
 
-        this.astManager.init(engineConfig)
-            .then(() => {
+        this.setupHandlers();
+        this.server.onerror = (error) => console.error("[MCP Error]", error);
+
+        const astManager = this.astManager;
+        const incrementalIndexer = this.incrementalIndexer;
+        const clusterSearchEngine = this.clusterSearchEngine;
+
+        this.initPromise = (async () => {
+            try {
+                await astManager.init(engineConfig);
                 if (ENABLE_DEBUG_LOGS) {
-                    console.error(`[AST] Active backend: ${this.astManager.getActiveBackend() ?? 'unknown'}`);
+                    console.error(`[AST] Active backend: ${astManager.getActiveBackend() ?? 'unknown'}`);
                 }
-                return this.astManager.warmup();
-            })
-            .then(() => {
-                this.incrementalIndexer?.start();
-                this.clusterSearchEngine.startBackgroundTasks();
-            })
-            .catch(error => {
+                await astManager.warmup();
+                
+                if (incrementalIndexer) {
+                    await incrementalIndexer.start();
+                }
+                clusterSearchEngine.startBackgroundTasks();
+
+                // Tier 2: Background PageRank computation for Impact Analysis
+                void (async () => {
+                    await this.waitForInitialScan();
+                    const hotSpots = await clusterSearchEngine.getHotSpots?.();
+                    if (hotSpots) {
+                        const prMap = new Map<string, number>();
+                        for (const hs of hotSpots) {
+                            prMap.set(`${hs.filePath}:${hs.symbol.name}`, hs.score / 100); 
+                        }
+                        impactAnalyzer.setPagerankScores(prMap);
+                    }
+                })();
+            } catch (error) {
                 if (ENABLE_DEBUG_LOGS) {
                     console.error("AstManager initialization failed:", error);
                 }
-            });
-
-        this.setupHandlers();
-        this.server.onerror = (error) => console.error("[MCP Error]", error);
+            }
+        })();
 
         if (!isTestEnv && !SmartContextServer.hasSigintListener) {
             this.sigintListener = async () => {
@@ -346,6 +400,16 @@ export class SmartContextServer {
         return relative.replace(/\\/g, '/');
     }
 
+    private async generateSkeletonWithCache(
+        absPath: string,
+        content: string,
+        options: SkeletonOptions = {}
+    ): Promise<string> {
+        return this.skeletonCache.getSkeleton(absPath, options, (filePath, opts) =>
+            this.skeletonGenerator.generateSkeleton(filePath, content, opts)
+        );
+    }
+
     private async buildSmartFileProfile(absPath: string, content: string, stats: FileStats | fs.Stats): Promise<SmartFileProfile> {
         await this.dependencyGraph.ensureBuilt();
         const relativePath = path.relative(this.rootPath, absPath) || path.basename(absPath);
@@ -358,7 +422,7 @@ export class SmartContextServer {
 
         let skeleton = '// Skeleton generation failed or not applicable for this file type.';
         try {
-            skeleton = await this.skeletonGenerator.generateSkeleton(absPath, content);
+            skeleton = await this.generateSkeletonWithCache(absPath, content);
         } catch (error: any) {
             if (content.length < 5000) {
                 skeleton = `// Skeleton generation failed: ${error?.message || 'unknown error'}.\n${content}`;
@@ -492,7 +556,8 @@ export class SmartContextServer {
         return {
             bodyHidden: true,
             readFullHint,
-            readFragmentHint
+            readFragmentHint,
+            skeletonSummaryNote: "접힌 블록 내부의 주석(예: [Summary] calls: ..., refs: ...)은 AI가 생성한 요약 정보이며 실제 소스 코드가 아닙니다."
         };
     }
 
@@ -881,8 +946,6 @@ export class SmartContextServer {
         return Math.max(0, Math.min(1, value));
     }
 
-
-
     private async pathExists(absPath: string): Promise<boolean> {
         try {
             return await this.fileSystem.exists(absPath);
@@ -983,8 +1046,10 @@ export class SmartContextServer {
             this.fileSystem.stat(absPath)
         ]);
 
+        const versionInfo = await this.fileVersionManager.getVersion(absPath);
+
         const metadata: ReadCodeResult["metadata"] = {
-            lines: content.length === 0 ? 0 : content.split(/\r?\n/).length,
+            lines: content.length === 0 ? 0 : content.split(new RegExp("\\r?\\n")).length,
             language: path.extname(absPath).replace('.', '') || null,
             path: this.normalizeRelativePath(absPath)
         };
@@ -1001,7 +1066,7 @@ export class SmartContextServer {
                 break;
             }
             case "skeleton": {
-                payload = await this.skeletonGenerator.generateSkeleton(absPath, content, args.skeletonOptions);
+                payload = await this.generateSkeletonWithCache(absPath, content, args.skeletonOptions);
                 break;
             }
             case "fragment": {
@@ -1016,7 +1081,8 @@ export class SmartContextServer {
         return {
             content: payload,
             metadata,
-            truncated
+            truncated,
+            versionInfo
         };
     }
 
@@ -1425,6 +1491,21 @@ export class SmartContextServer {
             }
         });
 
+        if (args.fileVersions) {
+            for (const [relPath, expected] of Object.entries(args.fileVersions)) {
+                try {
+                    const absPath = this._getAbsPathAndVerify(relPath);
+                    await this.fileVersionManager.getVersion(absPath);
+                    if (!this.fileVersionManager.validateVersion(absPath, expected)) {
+                        const current = await this.fileVersionManager.getVersion(absPath);
+                        throw new McpError(ErrorCode.InvalidParams, `[VersionMismatch] File version mismatch for ${relPath}. Expected v${expected.expectedVersion} (hash ${expected.expectedHash}), but found v${current.version} (hash ${current.contentHash}). Please re-read the file.`);
+                    }
+                } catch (error: any) {
+                    throw error;
+                }
+            }
+        }
+
         const dryRun = Boolean(args.dryRun);
         const createDirs = Boolean(args.createMissingDirectories);
         const ignoreMistakes = Boolean(args.ignoreMistakes);
@@ -1458,10 +1539,27 @@ export class SmartContextServer {
             };
         }
 
+        const updatedFileStates: EditCodeResult['updatedFileStates'] = {};
+
         if (!dryRun && touchedFiles.size > 0) {
             await this.invalidateTouchedFiles(touchedFiles);
             for (const file of touchedFiles) {
                 this.symbolIndex.markFileModified(file);
+                try {
+                    if (await this.pathExists(file)) {
+                        const content = await this.fileSystem.readFile(file);
+                        const stats = await this.fileSystem.stat(file);
+                        const info = this.fileVersionManager.incrementVersion(file, content, stats.mtime);
+                        const fileEdits = args.edits.filter(e => this.pathNormalizer.normalize(e.filePath) === file);
+                        updatedFileStates[this.normalizeRelativePath(file)] = {
+                            newVersion: info.version,
+                            newHash: info.contentHash,
+                            affectedLineRange: this.deriveAffectedLineRange(fileEdits as any)
+                        };
+                    }
+                } catch (error) {
+                    console.error(`[FileVersionManager] Failed to update version for ${file}`, error);
+                }
             }
         }
 
@@ -1470,7 +1568,8 @@ export class SmartContextServer {
             results,
             transactionId,
             warnings: warnings.length ? warnings : undefined,
-            message: refactorGuidance
+            message: refactorGuidance,
+            updatedFileStates
         };
     }
 
@@ -1819,6 +1918,7 @@ export class SmartContextServer {
                     this.symbolIndex.clearCache();
                     this.callGraphBuilder.clearCaches();
                     this.typeDependencyTracker.clearCaches();
+                    await this.skeletonCache.clearAll();
 
                     if (shouldRestartIndexer) {
                         console.debug('[SmartContextServer] Starting incremental indexer for full scan...');
@@ -2037,6 +2137,21 @@ export class SmartContextServer {
                         command: { type: "string", enum: ["undo", "redo", "guidance", "status", "metrics", "reindex"] }
                     },
                     required: ["command"]
+                }
+            },
+            {
+                name: "reconstruct_interface",
+                description: "Reconstructs an interface from usage patterns when the symbol is missing or broken. " +
+                            "Agent Guidance: Use this when a symbol cannot be resolved through normal means.",
+                inputSchema: {
+                    type: "object",
+                    properties: {
+                        symbolName: {
+                            type: "string",
+                            description: "The name of the symbol/interface to reconstruct."
+                        }
+                    },
+                    required: ["symbolName"]
                 }
             }
         ];
@@ -2388,6 +2503,7 @@ export class SmartContextServer {
                             this.fileSystem.readFile(absPath),
                             this.fileSystem.stat(absPath)
                         ]);
+                        const versionInfo = await this.fileVersionManager.getVersion(absPath);
 
                         if (fullMode) {
                             const maxBytes = this.readFileMaxBytes;
@@ -2398,6 +2514,7 @@ export class SmartContextServer {
 
                             const result = {
                                 content: payload,
+                                versionInfo,
                                 meta: {
                                     truncated,
                                     bytesReturned: Buffer.byteLength(payload, 'utf8'),
@@ -2414,7 +2531,7 @@ export class SmartContextServer {
                         }
 
                         const profile = await this.buildSmartFileProfile(absPath, content, stats);
-                        return { content: [{ type: "text", text: JSON.stringify(profile, null, 2) }] };
+                        return { content: [{ type: "text", text: JSON.stringify({ ...profile, versionInfo }, null, 2) }] };
                     } catch (error: any) {
                         console.error(`Failed to read/build Smart File Profile for ${absPath}:`, error);
                         return this._createErrorResponse("InternalError", error.message);
@@ -2430,12 +2547,12 @@ export class SmartContextServer {
 
                     try {
                         const [content, stats] = await Promise.all([
-                            this.fileSystem.readFile(absPath),
-                            this.fileSystem.stat(absPath)
-                        ]);
-                        const profile = await this.buildSmartFileProfile(absPath, content, stats);
-                        return { content: [{ type: "text", text: JSON.stringify(profile, null, 2) }] };
-                    } catch (error: any) {
+                        this.fileSystem.readFile(absPath),
+                        this.fileSystem.stat(absPath)
+                    ]);
+                    const versionInfo = await this.fileVersionManager.getVersion(absPath);
+                    const profile = await this.buildSmartFileProfile(absPath, content, stats);
+                    return { content: [{ type: "text", text: JSON.stringify({ ...profile, versionInfo }, null, 2) }] };} catch (error: any) {
                         console.error(`Failed to build Smart File Profile for ${absPath}:`, error);
                         return this._createErrorResponse("InternalError", error.message);
                     }
@@ -2449,7 +2566,7 @@ export class SmartContextServer {
                         const structure = await this.skeletonGenerator.generateStructureJson(absPath, content);
                         return { content: [{ type: "text", text: JSON.stringify(structure, null, 2) }] };
                     } else {
-                        const skeleton = await this.skeletonGenerator.generateSkeleton(absPath, content);
+                        const skeleton = await this.generateSkeletonWithCache(absPath, content);
                         return { content: [{ type: "text", text: skeleton }] };
                     }
                 }
@@ -2893,6 +3010,22 @@ export class SmartContextServer {
                         ],
                     };
                 }
+                case "reconstruct_interface": {
+                    if (!args?.symbolName) {
+                        return this._createErrorResponse("MissingParameter", "Provide 'symbolName' to reconstruct_interface.");
+                    }
+                    const { symbolName } = args as any;
+                    const ghost = await this.ghostInterfaceBuilder.reconstruct(symbolName);
+                    if (!ghost) {
+                        return {
+                            content: [{ type: "text", text: `Could not find any usage patterns for symbol '${symbolName}'.` }]
+                        };
+                    }
+                    return {
+                        content: [{ type: "text", text: JSON.stringify(ghost, null, 2) }]
+                    };
+                }
+
                 default:
                     return this._createErrorResponse("UnknownTool", `Tool '${toolName}' not found.`);
             }
@@ -2915,13 +3048,56 @@ export class SmartContextServer {
         }
     }
 
+            public async waitForInitialScan(): Promise<void> {
+        if (this.incrementalIndexer) {
+            await this.incrementalIndexer.waitForInitialScan();
+        }
+    }
+
     public async shutdown(): Promise<void> {
         if (this.sigintListener) {
             process.removeListener("SIGINT", this.sigintListener);
             this.sigintListener = undefined;
         }
+
+        // Phase 1: Shutdown background workers and indexers
+        await this.initPromise;
+        
+        if (this.incrementalIndexer) {
+            await this.incrementalIndexer.stop();
+        }
+
+        if (this.symbolIndex) {
+            await this.symbolIndex.dispose();
+        }
+
+        if (this.searchEngine) {
+            await this.searchEngine.dispose();
+        }
+
+        if (this.clusterSearchEngine) {
+            this.clusterSearchEngine.stopBackgroundTasks();
+        }
+
+        if (this.configurationManager && this.ownsConfigurationManager) {
+            await this.configurationManager.dispose();
+        }
+
+        // Phase 2: Close caches and databases
+        if (this.skeletonCache) {
+            await this.skeletonCache.close();
+        }
+
+        if (this.indexDatabase) {
+            this.indexDatabase.dispose();
+        }
+
+        await this.astManager.dispose();
+
         await this.server.close();
     }
+
+
 
     public async run() {
         if (ENABLE_DEBUG_LOGS) {

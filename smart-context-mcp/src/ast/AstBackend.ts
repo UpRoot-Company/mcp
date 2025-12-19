@@ -24,4 +24,6 @@ export interface AstBackend {
     getLanguage(languageId: string): Promise<any>; // Returns language object (e.g. tree-sitter Language)
 
     getParser?(languageId: string): Promise<any>;
+
+    dispose?: () => void;
 }

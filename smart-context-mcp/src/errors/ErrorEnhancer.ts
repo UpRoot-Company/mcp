@@ -1,5 +1,6 @@
 import { SymbolIndex } from '../ast/SymbolIndex.js';
-import { EnhancedErrorDetails } from '../types.js';
+import { EnhancedErrorDetails, ToolSuggestion } from '../types.js';
+import { AgentWorkflowGuidance } from '../engine/AgentPlaybook.js';
 
 export class ErrorEnhancer {
     /**
@@ -9,35 +10,32 @@ export class ErrorEnhancer {
         symbolName: string,
         symbolIndex: SymbolIndex
     ): EnhancedErrorDetails {
-        // symbolIndex.findSimilar was added in Phase 1
-        const similar = symbolIndex.findSimilar(symbolName, 5);
+        const similar = (symbolIndex as any).findSimilar(symbolName, 5) || [];
+        
+        const suggestions: ToolSuggestion[] = [
+            {
+                toolName: "search_project",
+                rationale: "Search for the symbol name in code contents if it might not be indexed.",
+                exampleArgs: { query: symbolName, type: "symbol" },
+                priority: "high"
+            }
+        ];
+
+        // Add recovery strategy from playbook
+        const strategy = AgentWorkflowGuidance.recovery.find(r => r.code === "AMBIGUOUS_MATCH");
+        if (strategy) {
+            suggestions.push({
+                toolName: strategy.action.toolName,
+                rationale: strategy.action.rationale,
+                exampleArgs: strategy.action.exampleArgs,
+                priority: "medium"
+            });
+        }
 
         return {
-            similarSymbols: similar.map(s => s.name),
-            nextActionHint: similar.length > 0
-                ? "Try one of the similar symbols above, or use search_project"
-                : "Use search_project with type='symbol' to search across all files",
-            toolSuggestions: [
-                {
-                    toolName: "search_project",
-                    rationale: "Search for symbols across the entire codebase",
-                    exampleArgs: {
-                        query: symbolName,
-                        type: "symbol",
-                        maxResults: 10
-                    },
-                    priority: "high"
-                },
-                {
-                    toolName: "read_code",
-                    rationale: "If you know the file location, read it directly",
-                    exampleArgs: {
-                        filePath: "<path-to-file>",
-                        view: "full"
-                    },
-                    priority: "medium"
-                }
-            ]
+            similarSymbols: similar.map((s: any) => s.name),
+            nextActionHint: `Symbol '${symbolName}' not found. Try searching or check for typos.`,
+            toolSuggestions: suggestions
         };
     }
 
@@ -45,33 +43,90 @@ export class ErrorEnhancer {
      * Enhance "Search not found" errors
      */
     static enhanceSearchNotFound(
-        query: string,
-
+        query: string
     ): EnhancedErrorDetails {
         const isLikelyFilename = /^[A-Z0-9-_]+\.(ts|js|tsx|jsx|md|json)$/i.test(query);
-        const isLikelyPattern = query.includes('*') || query.includes('ADR-');
-
-        if (isLikelyFilename || isLikelyPattern) {
-            return {
-                nextActionHint: "Your query looks like a filename. Use type='filename' to search filenames instead of content",
-                toolSuggestions: [
-                    {
-                        toolName: "search_project",
-                        rationale: "Search by filename (searches filenames, not content)",
-                        exampleArgs: {
-                            query: query,
-                            type: "filename",
-                            maxResults: 10
-                        },
-                        priority: "high"
-                    }
-                ]
-            };
+        
+        const suggestions: ToolSuggestion[] = [];
+        
+        if (isLikelyFilename) {
+            suggestions.push({
+                toolName: "search_project",
+                rationale: "Try searching with type='filename' for more accurate file matching.",
+                exampleArgs: { query, type: "filename" },
+                priority: "high"
+            });
         }
 
         return {
-            nextActionHint: "Try broadening your search query or using different keywords",
-            toolSuggestions: []
+            nextActionHint: `No results found for '${query}'. Try adjusting your search type or query.`,
+            toolSuggestions: suggestions
+        };
+    }
+
+    /**
+     * Enhance "Edit target not found" (NO_MATCH) errors
+     */
+    static enhanceNoMatch(filePath: string, targetString?: string): EnhancedErrorDetails {
+        const strategy = AgentWorkflowGuidance.recovery.find(r => r.code === "NO_MATCH");
+        const suggestions: ToolSuggestion[] = [];
+
+        if (strategy) {
+            suggestions.push({
+                toolName: strategy.action.toolName,
+                rationale: strategy.action.rationale,
+                exampleArgs: { ...strategy.action.exampleArgs, filePath },
+                priority: "high"
+            });
+        }
+
+        return {
+            nextActionHint: `Target block not found in ${filePath}. Use read_code(fragment) to verify the current content.`,
+            toolSuggestions: suggestions
+        };
+    }
+
+    /**
+     * Enhance "Hash mismatch" errors
+     */
+    static enhanceHashMismatch(filePath: string): EnhancedErrorDetails {
+        const strategy = AgentWorkflowGuidance.recovery.find(r => r.code === "HASH_MISMATCH");
+        const suggestions: ToolSuggestion[] = [];
+
+        if (strategy) {
+            suggestions.push({
+                toolName: strategy.action.toolName,
+                rationale: strategy.action.rationale,
+                exampleArgs: { ...strategy.action.exampleArgs, filePath },
+                priority: "high"
+            });
+        }
+
+        return {
+            nextActionHint: `File ${filePath} has changed since it was last read. Refresh its metadata.`,
+            toolSuggestions: suggestions
+        };
+    }
+
+    /**
+     * Enhance "Index stale" errors
+     */
+    static enhanceIndexStale(): EnhancedErrorDetails {
+        const strategy = AgentWorkflowGuidance.recovery.find(r => r.code === "INDEX_STALE");
+        const suggestions: ToolSuggestion[] = [];
+
+        if (strategy) {
+            suggestions.push({
+                toolName: strategy.action.toolName,
+                rationale: strategy.action.rationale,
+                exampleArgs: strategy.action.exampleArgs,
+                priority: "medium"
+            });
+        }
+
+        return {
+            nextActionHint: "The project index may be outdated. Check index status or wait for reindexing.",
+            toolSuggestions: suggestions
         };
     }
 }
