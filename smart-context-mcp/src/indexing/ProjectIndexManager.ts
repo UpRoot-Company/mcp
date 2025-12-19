@@ -20,14 +20,10 @@ export class ProjectIndexManager {
   
   private resolveExistingIndexPath(): string {
     const unifiedIndexPath = path.join(PathManager.getIndexDir(), 'index.json');
-    const preferredIndexPath = path.join(this.projectRoot, '.mcp', 'smart-context', 'index.json');
     const legacyIndexPath = path.join(this.projectRoot, '.smart-context-index', 'index.json');
 
     if (fssync.existsSync(unifiedIndexPath)) {
       return unifiedIndexPath;
-    }
-    if (fssync.existsSync(preferredIndexPath)) {
-      return preferredIndexPath;
     }
     if (fssync.existsSync(legacyIndexPath)) {
       return legacyIndexPath;

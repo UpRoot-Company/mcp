@@ -128,7 +128,7 @@ describe("SkeletonCache", () => {
 
         await cache.clearAll();
 
-        const hashed = (await fs.readdir(path.join(testDir, '.mcp', 'smart-context', 'skeletons'), { withFileTypes: true }).catch(() => []));
+        const hashed = (await fs.readdir(path.join(testDir, '.smart-context', 'data', 'cache', 'skeletons'), { withFileTypes: true }).catch(() => []));
         expect(hashed.length).toBe(0);
         expect(cache.getStats().memorySize).toBe(0);
     });
