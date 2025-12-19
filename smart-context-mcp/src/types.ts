@@ -47,6 +47,8 @@ export interface CallSiteInfo {
     line: number;
     column: number;
     text?: string;
+    arguments?: string[];
+    isAwaited?: boolean;
 }
 
 export interface ReadFragmentResult {

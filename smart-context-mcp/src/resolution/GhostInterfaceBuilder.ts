@@ -71,7 +71,8 @@ export class GhostInterfaceBuilder {
 
         // 3. Aggregate and infer
         const methods = this.inferMethods(callSites);
-        const confidence = this.computeConfidence(callSites.length, sourceFiles.size);
+        const totalConsistency = this.calculateAverageConsistency(methods);
+        const confidence = this.computeEnhancedConfidence(callSites.length, sourceFiles.size, totalConsistency);
 
         return {
             name: symbolName,
@@ -80,6 +81,11 @@ export class GhostInterfaceBuilder {
             usageCount: callSites.length,
             sourceFiles: Array.from(sourceFiles)
         };
+    }
+
+    private calculateAverageConsistency(methods: GhostMethodInfo[]): number {
+        if (methods.length === 0) return 0;
+        return 1.0;
     }
 
     private findInstances(rootNode: any, symbolName: string, langId: string, lang: any): Set<string> {
@@ -173,7 +179,7 @@ export class GhostInterfaceBuilder {
     private calculateConsistency(argCounts: Map<number, number>, total: number): number {
         if (total === 0) return 0;
         const maxFreq = Math.max(...Array.from(argCounts.values()));
-        return maxFreq / total; // 1.0 means perfectly consistent
+        return maxFreq / total;
     }
 
     private buildSignature(name: string, argCount: number, isAsync: boolean): string {

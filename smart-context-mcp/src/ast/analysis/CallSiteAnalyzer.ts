@@ -39,7 +39,9 @@ export class CallSiteAnalyzer {
                 line: parsed.node.startPosition.row + 1,
                 column: parsed.node.startPosition.column + 1,
                 text: parsed.node.text,
-                node: parsed.node
+                node: parsed.node,
+                arguments: this.extractArguments(parsed.node, langId),
+                isAwaited: this.checkIfAwaited(parsed.node, langId)
             });
         }
         return results;
@@ -127,6 +129,37 @@ export class CallSiteAnalyzer {
         }
 
         return null;
+    }
+
+    private extractArguments(node: any, langId: string): string[] {
+        const args: string[] = [];
+        if (['typescript', 'tsx', 'javascript'].includes(langId)) {
+            const argsNode = node.child?.(1) || node.lastChild; // Simplified
+            if (argsNode?.type === 'arguments') {
+                for (let i = 0; i < argsNode.namedChildCount; i++) {
+                    args.push(argsNode.namedChild(i).text);
+                }
+            }
+        }
+        if (langId === 'python') {
+            const argsNode = node.lastChild;
+            if (argsNode?.type === 'argument_list') {
+                for (let i = 0; i < argsNode.namedChildCount; i++) {
+                    args.push(argsNode.namedChild(i).text);
+                }
+            }
+        }
+        return args;
+    }
+
+    private checkIfAwaited(node: any, langId: string): boolean {
+        if (['typescript', 'tsx', 'javascript'].includes(langId)) {
+            return node.parent?.type === 'await_expression';
+        }
+        if (langId === 'python') {
+            return node.parent?.type === 'await';
+        }
+        return false;
     }
 
     private findOwningDefinition(node: any, definitionNodeMap: Map<string, DefinitionSymbol>): DefinitionSymbol | undefined {
