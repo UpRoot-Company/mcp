@@ -480,13 +480,18 @@ export class IndexDatabase {
         this.statements.pruneGhosts.run(cutoff);
     }
 
-    public dispose(): void {
+        public dispose(): void {
         try {
             this.db.close();
         } catch (error) {
             console.error('[IndexDatabase] Failed to close database:', error);
         }
     }
+
+    public close(): void {
+        this.dispose();
+    }
+
 
     private normalize(relPath: string): string {
         let normalized = relPath.replace(/\\/g, '/');

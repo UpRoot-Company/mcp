@@ -29,6 +29,13 @@ describe('SmartContextServer - scout_files', () => {
     });
 
     afterAll(async () => {
+        await server.shutdown();
+        if (fs.existsSync(testFilesDir)) {
+            fs.rmSync(testFilesDir, { recursive: true, force: true });
+        }
+    });
+
+    afterAll(async () => {
         if (fs.existsSync(testFilesDir)) {
             fs.rmSync(testFilesDir, { recursive: true, force: true });
         }

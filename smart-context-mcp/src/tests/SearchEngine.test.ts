@@ -3,6 +3,7 @@ import { performance } from "perf_hooks";
 import { MemoryFileSystem } from "../platform/FileSystem.js";
 import { SearchEngine } from "../engine/Search.js";
 import { SymbolInfo, SymbolIndex } from "../types.js";
+import { AstManager } from "../ast/AstManager.js";
 
 const joinLines = (lines: string[]): string => lines.join("\n");
 
@@ -41,6 +42,11 @@ describe("SearchEngine trigram index integration", () => {
 
         searchEngine = new SearchEngine(rootPath, fileSystem, []);
         await searchEngine.warmup();
+    });
+
+    afterAll(async () => {
+        searchEngine.dispose();
+        AstManager.resetForTesting();
     });
 
     it("returns file matches for keyword queries", async () => {

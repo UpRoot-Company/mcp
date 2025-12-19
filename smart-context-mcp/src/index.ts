@@ -2924,13 +2924,42 @@ export class SmartContextServer {
         }
     }
 
-    public async shutdown(): Promise<void> {
+            public async shutdown(): Promise<void> {
         if (this.sigintListener) {
             process.removeListener("SIGINT", this.sigintListener);
             this.sigintListener = undefined;
         }
+
+        // Phase 1: Shutdown background workers and indexers
+        if (this.incrementalIndexer) {
+            await this.incrementalIndexer.stop();
+        }
+
+        if (this.symbolIndex) {
+            await this.symbolIndex.dispose();
+        }
+
+        if (this.searchEngine) {
+            this.searchEngine.dispose();
+        }
+
+        if (this.clusterSearchEngine) {
+            this.clusterSearchEngine.stopBackgroundTasks();
+        }
+
+        // Phase 2: Close caches and databases
+        if (this.skeletonCache) {
+            await this.skeletonCache.close();
+        }
+
+        if (this.indexDatabase) {
+            this.indexDatabase.dispose();
+        }
+
         await this.server.close();
     }
+
+
 
     public async run() {
         if (ENABLE_DEBUG_LOGS) {

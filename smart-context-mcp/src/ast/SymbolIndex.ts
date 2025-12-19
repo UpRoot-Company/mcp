@@ -32,6 +32,7 @@ export class SymbolIndex {
     private pendingUpdates: Set<string> = new Set();
     private updateDebounceTimer?: NodeJS.Timeout;
     private disposed = false;
+    private incrementalUpdatePromise: Promise<void> | null = null;
 
 
     constructor(rootPath: string, skeletonGenerator: SkeletonGenerator, ignorePatterns: string[], db?: IndexDatabase) {
@@ -359,7 +360,7 @@ export class SymbolIndex {
         return matrix[b.length][a.length];
     }
 
-    public dispose(): void {
+    public async dispose(): Promise<void> {
         if (this.disposed) {
             return;
         }
@@ -368,6 +369,11 @@ export class SymbolIndex {
             clearTimeout(this.updateDebounceTimer);
             this.updateDebounceTimer = undefined;
         }
+
+        if (this.incrementalUpdatePromise) {
+            await this.incrementalUpdatePromise;
+        }
+
         this.pendingUpdates.clear();
         this.editTracker.clear();
     }
@@ -390,7 +396,11 @@ export class SymbolIndex {
         }
 
         this.updateDebounceTimer = setTimeout(() => {
-            void this.incrementalUpdate();
+            if (!this.incrementalUpdatePromise) {
+                this.incrementalUpdatePromise = this.incrementalUpdate().finally(() => {
+                    this.incrementalUpdatePromise = null;
+                });
+            }
         }, 500);
     }
 
@@ -412,6 +422,7 @@ export class SymbolIndex {
         this.pendingUpdates.clear();
 
         for (const relativePath of filesToUpdate) {
+            if (this.disposed) break;
             try {
                 // Check if file still exists
                 const fullPath = path.join(this.rootPath, relativePath);
@@ -455,7 +466,7 @@ export class SymbolIndex {
 
     private createIgnoreFilter(patterns: string[]) {
         const filter = ignore.default().add(patterns);
-                filter.add(['.git', 'node_modules', '.mcp', '.smart-context', 'dist', 'coverage', '.DS_Store']);
+        filter.add(['.git', 'node_modules', '.mcp', '.smart-context', 'dist', 'coverage', '.DS_Store']);
         return filter;
     }
 }

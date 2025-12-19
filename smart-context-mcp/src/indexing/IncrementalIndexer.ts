@@ -45,6 +45,7 @@ export class IncrementalIndexer {
         low: new Map()
     };
     private processing = false;
+    private processingPromise: Promise<void> | null = null;
     private watcher?: chokidar.FSWatcher;
     private stopped = false;
     private started = false;
@@ -140,18 +141,23 @@ export class IncrementalIndexer {
 
     private periodicPersistenceTimer?: NodeJS.Timeout;
 
-    public async stop(): Promise<void> {
+        public async stop(): Promise<void> {
         this.stopped = true;
         this.started = false;
 
         this.unregisterConfigurationEvents();
 
-        if (this.debouncedPersist) {
-            this.debouncedPersist.cancel();
-        }
-
         if (this.periodicPersistenceTimer) {
             clearInterval(this.periodicPersistenceTimer);
+        }
+
+        // Wait for current processing batch to complete
+        if (this.processingPromise) {
+            await this.processingPromise;
+        }
+
+        if (this.debouncedPersist) {
+            this.debouncedPersist.cancel();
         }
 
         // Final persist before stop
@@ -164,6 +170,7 @@ export class IncrementalIndexer {
             await this.watcher.close();
         }
     }
+
 
     public async waitForInitialScan(): Promise<void> {
         if (this.initialScanPromise) {
@@ -239,7 +246,12 @@ export class IncrementalIndexer {
             this.lastDepthLogAt = now;
         }
 
-        void this.processQueue();
+                if (!this.processingPromise) {
+            this.processingPromise = this.processQueue().finally(() => {
+                this.processingPromise = null;
+            });
+        }
+
     }
 
     private async processQueue(): Promise<void> {
@@ -489,8 +501,26 @@ export class IncrementalIndexer {
 
     private async handleDeletion(filePath: string): Promise<void> {
         try {
-            if (!this.isWithinRoot(filePath)) return;
-            this.removeFromQueues(path.resolve(filePath));
+                        if (!this.isWithinRoot(filePath)) return;
+            const absolutePath = path.resolve(filePath);
+            this.removeFromQueues(absolutePath);
+
+            // Tier 3: Ghost Archeology - Register symbols from deleted file as ghosts
+            if (this.indexDatabase) {
+                const relativePath = path.relative(this.rootPath, absolutePath).replace(/\\\\/g, '/');
+                const symbols = this.indexDatabase.readSymbols(relativePath);
+                if (symbols && symbols.length > 0) {
+                    for (const symbol of symbols) {
+                        this.indexDatabase.addGhost({
+                            name: symbol.name,
+                            lastSeenPath: relativePath,
+                            type: symbol.type,
+                            lastKnownSignature: 'signature' in symbol ? symbol.signature : undefined,
+                            deletedAt: Date.now()
+                        });
+                    }
+                }
+            }
 
             await this.dependencyGraph.removeFile(filePath);
 
@@ -498,6 +528,7 @@ export class IncrementalIndexer {
                 this.indexManager.removeFileEntry(this.currentIndex, filePath);
                 this.debouncedPersist();
             }
+
         } catch (error) {
             console.warn(`[IncrementalIndexer] failed to remove ${filePath}:`, error);
         }

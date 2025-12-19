@@ -9,6 +9,10 @@ describe('AstManager', () => {
         await astManager.init({ parserBackend: 'wasm' });
     });
 
+    afterEach(() => {
+        AstManager.resetForTesting();
+    });
+
     it('should be a singleton', () => {
         const instance1 = AstManager.getInstance();
         const instance2 = AstManager.getInstance();

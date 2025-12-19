@@ -1,6 +1,7 @@
-import { describe, test, expect, beforeEach } from '@jest/globals';
+import { describe, test, expect, beforeEach, afterEach } from '@jest/globals';
 import { SearchEngine } from '../engine/Search.js';
 import { MemoryFileSystem } from '../platform/FileSystem.js';
+import { AstManager } from '../ast/AstManager.js';
 import * as path from 'path';
 
 describe('Hybrid Search', () => {
@@ -14,6 +15,11 @@ describe('Hybrid Search', () => {
     
     // Initialize search engine
     search = new SearchEngine(rootPath, fileSystem);
+  });
+
+  afterEach(() => {
+    search.dispose();
+    AstManager.resetForTesting();
   });
   
   test('should find file by filename match even if trigram misses', async () => {

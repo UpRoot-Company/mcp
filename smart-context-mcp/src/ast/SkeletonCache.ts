@@ -18,6 +18,7 @@ export class SkeletonCache {
     private l1Hits = 0;
     private l2Hits = 0;
     private misses = 0;
+    private readonly pendingWrites = new Set<Promise<void>>();
 
     constructor(
         projectRoot: string,
@@ -57,14 +58,20 @@ export class SkeletonCache {
             return diskCached.skeleton;
         }
 
-        this.misses++;
+                this.misses++;
         const skeleton = await generator(filePath, options);
         const cached: CachedSkeleton = { mtime, skeleton, optionsHash };
         this.memoryCache.set(cacheKey, cached);
-        void this.saveToDisk(filePath, cached).catch(error => {
+
+        const writePromise = this.saveToDisk(filePath, cached).catch(error => {
             console.warn(`[SkeletonCache] Failed to save cache for ${path.basename(filePath)}:`, error);
+        }).finally(() => {
+            this.pendingWrites.delete(writePromise);
         });
+
+        this.pendingWrites.add(writePromise);
         return skeleton;
+
     }
 
     public async invalidate(filePath: string): Promise<void> {
@@ -79,10 +86,16 @@ export class SkeletonCache {
         await fs.rm(dirPath, { recursive: true, force: true });
     }
 
-    public async clearAll(): Promise<void> {
+        public async clearAll(): Promise<void> {
         this.memoryCache.clear();
         await fs.rm(this.diskCacheDir, { recursive: true, force: true });
     }
+
+    public async close(): Promise<void> {
+        await Promise.all(Array.from(this.pendingWrites));
+        this.memoryCache.clear();
+    }
+
 
     public getStats(): { memorySize: number; diskCacheDir: string; l1Hits: number; l2Hits: number; misses: number } {
         return {
@@ -131,8 +144,10 @@ export class SkeletonCache {
     private hashOptions(options: SkeletonOptions): string {
         const normalized = JSON.stringify({
             detailLevel: options.detailLevel || 'standard',
-            includeComments: options.includeComments === true,
+                        includeComments: options.includeComments === true,
             includeMemberVars: options.includeMemberVars !== false,
+            includeSummary: options.includeSummary === true,
+
             maxMemberPreview: Math.max(1, options.maxMemberPreview ?? 3)
         });
         return createHash('md5').update(normalized).digest('hex').slice(0, 8);
