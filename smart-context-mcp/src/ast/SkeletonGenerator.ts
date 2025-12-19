@@ -107,14 +107,14 @@ export class SkeletonGenerator {
                         continue;
                     }
                     if (this.shouldFoldByDetailLevel(node, resolvedOptions.detailLevel, content)) {
-                        // Tier 2: Always generate Semantic Summary for folded blocks
-                        const summary = await this.generateSemanticSummary(node, lang, langId);
                         let replacement = config.replacement;
-
-                        if (summary) {
-                            replacement = langId === 'python' 
-                                ? `# [Summary] ${summary}`
-                                : `{ /* [Summary] ${summary} */ }`;
+                        if (resolvedOptions.includeSummary) {
+                            const summary = await this.generateSemanticSummary(node, lang, langId);
+                            if (summary) {
+                                replacement = langId === 'python' 
+                                    ? `# ${summary}`
+                                    : `{ /* ${summary} */ }`;
+                            }
                         }
 
                         rangesToFold.push({
