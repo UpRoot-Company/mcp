@@ -208,4 +208,12 @@ export class AstManager {
         const ext = path.extname(filePath).toLowerCase();
         return this.languageConfig?.getLanguageMapping(ext);
     }
+
+    public async dispose(): Promise<void> {
+        if (this.backend && typeof (this.backend as any).dispose === 'function') {
+            (this.backend as any).dispose();
+        }
+        this.languageConfig?.dispose();
+        this.initialized = false;
+    }
 }

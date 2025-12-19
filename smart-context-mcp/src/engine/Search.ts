@@ -130,8 +130,8 @@ export class SearchEngine {
         this.resultProcessor = new ResultProcessor();
     }
 
-    public dispose(): void {
-        this.trigramIndex.dispose();
+    public async dispose(): Promise<void> {
+        await this.trigramIndex.dispose();
     }
 
     public async updateExcludeGlobs(patterns: string[]): Promise<void> {

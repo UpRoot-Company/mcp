@@ -78,12 +78,12 @@ export class TrigramIndex {
         this.ignoreFilter = createIgnore().add(this.options.ignoreGlobs);
         this.cacheDir = PathManager.getIndexDir();
         this.persistPath = path.join(this.cacheDir, "trigram-index.json");
-        
-        // Start non-blocking build
-        this.buildPromise = this.buildIndex();
     }
 
     public async ensureReady(): Promise<void> {
+        if (!this.isReady && !this.isBuilding && !this.buildPromise) {
+            this.buildPromise = this.buildIndex();
+        }
         if (this.buildPromise) {
             await this.buildPromise;
         }
@@ -342,11 +342,14 @@ export class TrigramIndex {
         this.needsPersistAfterBuild = true;
     }
 
-    public dispose(): void {
+    public async dispose(): Promise<void> {
         this.disposed = true;
         if (this.persistTimer) {
             clearTimeout(this.persistTimer);
             this.persistTimer = undefined;
+        }
+        if (this.persistPromise) {
+            await this.persistPromise;
         }
     }
 

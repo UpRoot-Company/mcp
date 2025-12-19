@@ -142,21 +142,26 @@ export class IncrementalIndexer {
     private periodicPersistenceTimer?: NodeJS.Timeout;
 
         public async stop(): Promise<void> {
+        console.log('[IncrementalIndexer] Stop called');
         this.stopped = true;
         this.started = false;
 
         this.unregisterConfigurationEvents();
 
         if (this.periodicPersistenceTimer) {
+            console.log('[IncrementalIndexer] Clearing persistence timer');
             clearInterval(this.periodicPersistenceTimer);
         }
 
         // Wait for current processing batch to complete
         if (this.processingPromise) {
+            console.log('[IncrementalIndexer] Waiting for processingPromise to resolve...');
             await this.processingPromise;
+            console.log('[IncrementalIndexer] processingPromise resolved');
         }
 
         if (this.debouncedPersist) {
+            console.log('[IncrementalIndexer] Cancelling debounced persist');
             this.debouncedPersist.cancel();
         }
 
@@ -167,8 +172,15 @@ export class IncrementalIndexer {
         }
 
         if (this.watcher) {
+            console.log('[IncrementalIndexer] Closing watcher');
             await this.watcher.close();
         }
+
+        if (this.indexDatabase && typeof this.indexDatabase.close === 'function') {
+            console.log('[IncrementalIndexer] Closing database');
+            this.indexDatabase.close();
+        }
+        console.log('[IncrementalIndexer] Stop complete');
     }
 
 

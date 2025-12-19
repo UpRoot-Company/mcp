@@ -77,6 +77,7 @@ export class SmartContextServer {
     private configurationManager: ConfigurationManager;
     private fileVersionManager: FileVersionManager;
     private sigintListener?: () => Promise<void>;
+    private initPromise: Promise<void>;
     private static hasSigintListener = false;
     private static readonly READ_CODE_MAX_BYTES = 1_000_000;
     private static readonly READ_FILE_DEFAULT_MAX_BYTES = 65_536;
@@ -186,7 +187,7 @@ export class SmartContextServer {
         });
         this.applyIgnorePatterns(this.ignoreGlobs);
         this.registerConfigurationListeners();
-        const indexingEnabled = process.env.SMART_CONTEXT_DISABLE_STREAMING_INDEX === 'true' ? false : !isTestEnv;
+        const indexingEnabled = process.env.SMART_CONTEXT_DISABLE_STREAMING_INDEX === 'true' ? false : (isTestEnv ? false : true);
         if (indexingEnabled) {
             this.incrementalIndexer = new IncrementalIndexer(
                 this.rootPath,
@@ -207,25 +208,31 @@ export class SmartContextServer {
             snapshotDir: process.env.SMART_CONTEXT_SNAPSHOT_DIR
         };
 
-        this.astManager.init(engineConfig)
-            .then(() => {
+        this.setupHandlers();
+        this.server.onerror = (error) => console.error("[MCP Error]", error);
+
+        const astManager = this.astManager;
+        const incrementalIndexer = this.incrementalIndexer;
+        const clusterSearchEngine = this.clusterSearchEngine;
+
+        this.initPromise = (async () => {
+            try {
+                await astManager.init(engineConfig);
                 if (ENABLE_DEBUG_LOGS) {
-                    console.error(`[AST] Active backend: ${this.astManager.getActiveBackend() ?? 'unknown'}`);
+                    console.error(`[AST] Active backend: ${astManager.getActiveBackend() ?? 'unknown'}`);
                 }
-                return this.astManager.warmup();
-            })
-            .then(() => {
-                this.incrementalIndexer?.start();
-                this.clusterSearchEngine.startBackgroundTasks();
-            })
-            .catch(error => {
+                await astManager.warmup();
+                
+                if (incrementalIndexer) {
+                    await incrementalIndexer.start();
+                }
+                clusterSearchEngine.startBackgroundTasks();
+            } catch (error) {
                 if (ENABLE_DEBUG_LOGS) {
                     console.error("AstManager initialization failed:", error);
                 }
-            });
-
-        this.setupHandlers();
-        this.server.onerror = (error) => console.error("[MCP Error]", error);
+            }
+        })();
 
         if (!isTestEnv && !SmartContextServer.hasSigintListener) {
             this.sigintListener = async () => {
@@ -2971,13 +2978,21 @@ export class SmartContextServer {
         }
     }
 
-            public async shutdown(): Promise<void> {
+            public async waitForInitialScan(): Promise<void> {
+        if (this.incrementalIndexer) {
+            await this.incrementalIndexer.waitForInitialScan();
+        }
+    }
+
+    public async shutdown(): Promise<void> {
         if (this.sigintListener) {
             process.removeListener("SIGINT", this.sigintListener);
             this.sigintListener = undefined;
         }
 
         // Phase 1: Shutdown background workers and indexers
+        await this.initPromise;
+        
         if (this.incrementalIndexer) {
             await this.incrementalIndexer.stop();
         }
@@ -2987,11 +3002,15 @@ export class SmartContextServer {
         }
 
         if (this.searchEngine) {
-            this.searchEngine.dispose();
+            await this.searchEngine.dispose();
         }
 
         if (this.clusterSearchEngine) {
             this.clusterSearchEngine.stopBackgroundTasks();
+        }
+
+        if (this.configurationManager && this.ownsConfigurationManager) {
+            await this.configurationManager.dispose();
         }
 
         // Phase 2: Close caches and databases
@@ -3002,6 +3021,8 @@ export class SmartContextServer {
         if (this.indexDatabase) {
             this.indexDatabase.dispose();
         }
+
+        await this.astManager.dispose();
 
         await this.server.close();
     }
