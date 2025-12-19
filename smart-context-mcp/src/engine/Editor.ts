@@ -376,6 +376,9 @@ export class EditorEngine {
         return changed ? result : value;
     }
 
+    /**
+     * @deprecated Use explicit escapeMode instead.
+     */
     private generateEscapeAwareVariants(edit: Edit): EditVariant[] {
         const variants: EditVariant[] = [{ edit, mode: "raw" }];
 
@@ -946,6 +949,17 @@ export class EditorEngine {
     }
 
     private findMatchWithEscapeVariants(content: string, edit: Edit, lineCounter: LineCounter): Match {
+        if (edit.escapeMode) {
+            const effectiveEdit = { ...edit };
+            if (edit.escapeMode === 'interpreted') {
+                effectiveEdit.targetString = this.decodeEscapeSequences(edit.targetString);
+                if (effectiveEdit.replacementString) {
+                    effectiveEdit.replacementString = this.decodeEscapeSequences(effectiveEdit.replacementString);
+                }
+            }
+            return this.findMatch(content, effectiveEdit, lineCounter);
+        }
+
         const variants = this.generateEscapeAwareVariants(edit);
         const attemptedModes: EscapeVariantMode[] = [];
         let primaryError: MatchNotFoundError | undefined;

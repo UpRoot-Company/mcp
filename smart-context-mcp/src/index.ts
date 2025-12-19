@@ -41,6 +41,7 @@ import { metrics } from "./utils/MetricsCollector.js";
 import { PathNormalizer } from "./utils/PathNormalizer.js";
 import { ConfigurationManager } from "./config/ConfigurationManager.js";
 import { PathManager } from "./utils/PathManager.js";
+import { FileVersionManager } from "./engine/FileVersionManager.js";
 
 export { ConfigurationManager } from "./config/ConfigurationManager.js";
 
@@ -74,6 +75,7 @@ export class SmartContextServer {
     private transactionLog: TransactionLog;
     private incrementalIndexer?: IncrementalIndexer;
     private configurationManager: ConfigurationManager;
+    private fileVersionManager: FileVersionManager;
     private sigintListener?: () => Promise<void>;
     private static hasSigintListener = false;
     private static readonly READ_CODE_MAX_BYTES = 1_000_000;
@@ -130,7 +132,14 @@ export class SmartContextServer {
         );
 
         this.configurationManager = configurationManager ?? new ConfigurationManager(this.rootPath);
+        this.configurationManager = configurationManager ?? new ConfigurationManager(this.rootPath);
         this.ownsConfigurationManager = !configurationManager;
+        this.ig = (ignore.default as any)();
+        this.applyIgnorePatterns(this.configurationManager.getIgnoreGlobs(), { skipPropagation: true });
+
+        this.fileVersionManager = new FileVersionManager(this.fileSystem);
+
+        // 경로 정규화 초기화 (절대경로 ↔ 상대경로 자동 변환)        this.ownsConfigurationManager = !configurationManager;
         this.ig = (ignore.default as any)();
         this.applyIgnorePatterns(this.configurationManager.getIgnoreGlobs(), { skipPropagation: true });
 
@@ -991,8 +1000,10 @@ export class SmartContextServer {
             this.fileSystem.stat(absPath)
         ]);
 
+        const versionInfo = await this.fileVersionManager.getVersion(absPath);
+
         const metadata: ReadCodeResult["metadata"] = {
-            lines: content.length === 0 ? 0 : content.split(/\r?\n/).length,
+            lines: content.length === 0 ? 0 : content.split(new RegExp("\\r?\\n")).length,
             language: path.extname(absPath).replace('.', '') || null,
             path: this.normalizeRelativePath(absPath)
         };
@@ -1024,7 +1035,8 @@ export class SmartContextServer {
         return {
             content: payload,
             metadata,
-            truncated
+            truncated,
+            versionInfo
         };
     }
 
@@ -1433,6 +1445,21 @@ export class SmartContextServer {
             }
         });
 
+        if (args.fileVersions) {
+            for (const [relPath, expected] of Object.entries(args.fileVersions)) {
+                try {
+                    const absPath = this._getAbsPathAndVerify(relPath);
+                    await this.fileVersionManager.getVersion(absPath);
+                    if (!this.fileVersionManager.validateVersion(absPath, expected)) {
+                        const current = await this.fileVersionManager.getVersion(absPath);
+                        throw new McpError(ErrorCode.InvalidParams, `[VersionMismatch] File version mismatch for ${relPath}. Expected v${expected.expectedVersion} (hash ${expected.expectedHash}), but found v${current.version} (hash ${current.contentHash}). Please re-read the file.`);
+                    }
+                } catch (error: any) {
+                    throw error;
+                }
+            }
+        }
+
         const dryRun = Boolean(args.dryRun);
         const createDirs = Boolean(args.createMissingDirectories);
         const ignoreMistakes = Boolean(args.ignoreMistakes);
@@ -1466,10 +1493,27 @@ export class SmartContextServer {
             };
         }
 
+        const updatedFileStates: EditCodeResult['updatedFileStates'] = {};
+
         if (!dryRun && touchedFiles.size > 0) {
             await this.invalidateTouchedFiles(touchedFiles);
             for (const file of touchedFiles) {
                 this.symbolIndex.markFileModified(file);
+                try {
+                    if (await this.pathExists(file)) {
+                        const content = await this.fileSystem.readFile(file);
+                        const stats = await this.fileSystem.stat(file);
+                        const info = this.fileVersionManager.incrementVersion(file, content, stats.mtime);
+                        const fileEdits = args.edits.filter(e => this.pathNormalizer.normalize(e.filePath) === file);
+                        updatedFileStates[this.normalizeRelativePath(file)] = {
+                            newVersion: info.version,
+                            newHash: info.contentHash,
+                            affectedLineRange: this.deriveAffectedLineRange(fileEdits as any)
+                        };
+                    }
+                } catch (error) {
+                    console.error(`[FileVersionManager] Failed to update version for ${file}`, error);
+                }
             }
         }
 
@@ -1478,7 +1522,8 @@ export class SmartContextServer {
             results,
             transactionId,
             warnings: warnings.length ? warnings : undefined,
-            message: refactorGuidance
+            message: refactorGuidance,
+            updatedFileStates
         };
     }
 
@@ -2397,6 +2442,7 @@ export class SmartContextServer {
                             this.fileSystem.readFile(absPath),
                             this.fileSystem.stat(absPath)
                         ]);
+                        const versionInfo = await this.fileVersionManager.getVersion(absPath);
 
                         if (fullMode) {
                             const maxBytes = this.readFileMaxBytes;
@@ -2407,6 +2453,7 @@ export class SmartContextServer {
 
                             const result = {
                                 content: payload,
+                                versionInfo,
                                 meta: {
                                     truncated,
                                     bytesReturned: Buffer.byteLength(payload, 'utf8'),
@@ -2423,7 +2470,7 @@ export class SmartContextServer {
                         }
 
                         const profile = await this.buildSmartFileProfile(absPath, content, stats);
-                        return { content: [{ type: "text", text: JSON.stringify(profile, null, 2) }] };
+                        return { content: [{ type: "text", text: JSON.stringify({ ...profile, versionInfo }, null, 2) }] };
                     } catch (error: any) {
                         console.error(`Failed to read/build Smart File Profile for ${absPath}:`, error);
                         return this._createErrorResponse("InternalError", error.message);
@@ -2439,12 +2486,12 @@ export class SmartContextServer {
 
                     try {
                         const [content, stats] = await Promise.all([
-                            this.fileSystem.readFile(absPath),
-                            this.fileSystem.stat(absPath)
-                        ]);
-                        const profile = await this.buildSmartFileProfile(absPath, content, stats);
-                        return { content: [{ type: "text", text: JSON.stringify(profile, null, 2) }] };
-                    } catch (error: any) {
+                        this.fileSystem.readFile(absPath),
+                        this.fileSystem.stat(absPath)
+                    ]);
+                    const versionInfo = await this.fileVersionManager.getVersion(absPath);
+                    const profile = await this.buildSmartFileProfile(absPath, content, stats);
+                    return { content: [{ type: "text", text: JSON.stringify({ ...profile, versionInfo }, null, 2) }] };} catch (error: any) {
                         console.error(`Failed to build Smart File Profile for ${absPath}:`, error);
                         return this._createErrorResponse("InternalError", error.message);
                     }
