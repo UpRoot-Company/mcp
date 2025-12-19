@@ -17,7 +17,7 @@ describe('SkeletonGenerator', () => {
         }
         `;
         const skeleton = await generator.generateSkeleton('test.ts', code);
-        expect(skeleton).toContain('function add(a: number, b: number): number { /* ... implementation hidden ... */ }');
+        expect(skeleton).toContain('function add(a: number, b: number): number { /* ... */ }');
         expect(skeleton).not.toContain('return a + b');
     });
 
@@ -31,7 +31,7 @@ describe('SkeletonGenerator', () => {
         `;
         const skeleton = await generator.generateSkeleton('test.ts', code);
         expect(skeleton).toContain('class MyClass {');
-        expect(skeleton).toContain('method(): void { /* ... implementation hidden ... */ }');
+        expect(skeleton).toContain('method(): void { /* ... */ }');
         expect(skeleton).not.toContain("console.log('body')");
     });
 
@@ -45,7 +45,7 @@ describe('SkeletonGenerator', () => {
         `;
         const skeleton = await generator.generateSkeleton('test.ts', code);
         // Should become: function outer() { ... }
-        expect(skeleton).toContain('function outer() { /* ... implementation hidden ... */ }');
+        expect(skeleton).toContain('function outer() { /* ... */ }');
         expect(skeleton).not.toContain('if (true)');
     });
 
@@ -77,7 +77,7 @@ def global_func():
         
         expect(skeleton).toContain('class MyClass:');
         expect(skeleton).toContain('def method(self):');
-        expect(skeleton).toContain('...');
+        // The implementation is folded, we just check it is not there
         expect(skeleton).not.toContain('print("hello")');
         expect(skeleton).not.toContain('return 1');
     });
@@ -390,8 +390,7 @@ def python_func(arg1, arg2):
             }
             `;
             const skeleton = await generator.generateSkeleton('test.ts', code, { includeSummary: true });
-            expect(skeleton).toContain('implementation hidden');
-            expect(skeleton).toContain('calls: db.users.insert, logger.info');
+            expect(skeleton).toContain('/* calls: db.users.insert, logger.info; complexity: 1 LOC, 0 branches */');
         });
     });
 });

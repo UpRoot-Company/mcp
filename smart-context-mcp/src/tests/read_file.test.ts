@@ -178,9 +178,9 @@ function doSomethingIsolated() {
         const profile: SmartFileProfile = JSON.parse(response.content[0].text);
 
         expect(profile.structure.skeleton).toContain('class TestClassA {');
-        expect(profile.structure.skeleton).toContain('constructor(name: string) { /* ... implementation hidden ... */ }');
-        expect(profile.structure.skeleton).toContain('public greet(message: string): string { /* ... implementation hidden ... */ }');
-        expect(profile.structure.skeleton).toContain('export function helperFunctionA(): void { /* ... implementation hidden ... */ }');
+        expect(profile.structure.skeleton).toContain('constructor(name: string) { /* ... */ }');
+        expect(profile.structure.skeleton).toContain('public greet(message: string): string { /* ... */ }');
+        expect(profile.structure.skeleton).toContain('export function helperFunctionA(): void { /* ... */ }');
     });
 
     it('should handle non-existent file gracefully', async () => {

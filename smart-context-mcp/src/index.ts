@@ -556,7 +556,8 @@ export class SmartContextServer {
         return {
             bodyHidden: true,
             readFullHint,
-            readFragmentHint
+            readFragmentHint,
+            skeletonSummaryNote: "접힌 블록 내부의 주석(예: [Summary] calls: ..., refs: ...)은 AI가 생성한 요약 정보이며 실제 소스 코드가 아닙니다."
         };
     }
 

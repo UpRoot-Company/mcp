@@ -504,6 +504,7 @@ export interface SmartFileProfile {
         bodyHidden: boolean;
         readFullHint: string;
         readFragmentHint: string;
+        skeletonSummaryNote?: string;
     };
 }
 

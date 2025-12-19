@@ -12,28 +12,20 @@ interface FoldQuery {
 
 const LANGUAGE_CONFIG: Record<string, FoldQuery> = {
     typescript: {
-        query: `
-            (statement_block) @fold
-        `,
-        replacement: '{ /* ... implementation hidden ... */ }'
+        query: `\n            (statement_block) @fold\n        `,
+        replacement: '{ /* ... */ }'
     },
     tsx: {
-        query: `
-            (statement_block) @fold
-        `,
-        replacement: '{ /* ... implementation hidden ... */ }'
+        query: `\n            (statement_block) @fold\n        `,
+        replacement: '{ /* ... */ }'
     },
     javascript: {
-        query: `
-            (statement_block) @fold
-        `,
-        replacement: '{ /* ... implementation hidden ... */ }'
+        query: `\n            (statement_block) @fold\n        `,
+        replacement: '{ /* ... */ }'
     },
     python: {
-        query: `
-            (block) @fold
-        `,
-        replacement: '... # implementation hidden',
+        query: `\n            (block) @fold\n        `,
+        replacement: '# ...',
         shouldFold: (node: any) => {
             if (node.parent && node.parent.type === 'class_definition') {
                 return false;
@@ -115,14 +107,14 @@ export class SkeletonGenerator {
                         continue;
                     }
                     if (this.shouldFoldByDetailLevel(node, resolvedOptions.detailLevel, content)) {
+                        // Tier 2: Always generate Semantic Summary for folded blocks
+                        const summary = await this.generateSemanticSummary(node, lang, langId);
                         let replacement = config.replacement;
 
-                        // Tier 2: Semantic Summary
-                        if (resolvedOptions.includeSummary) {
-                            const summary = await this.generateSemanticSummary(node, lang, langId);
-                            if (summary) {
-                                replacement = replacement?.replace('implementation hidden', `implementation hidden; ${summary}`);
-                            }
+                        if (summary) {
+                            replacement = langId === 'python' 
+                                ? `# [Summary] ${summary}`
+                                : `{ /* [Summary] ${summary} */ }`;
                         }
 
                         rangesToFold.push({
