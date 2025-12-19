@@ -721,6 +721,31 @@ export interface GetBatchGuidanceArgs {
 }
 
 
+export interface GhostMethodInfo {
+    name: string;
+    callCount: number;
+    fileCount: number;
+    inferredSignature: string;
+    confidence: 'high' | 'medium' | 'low';
+}
+
+export interface GhostInterface {
+    name: string;
+    methods: GhostMethodInfo[];
+    confidence: 'high' | 'medium' | 'low';
+    usageCount: number;
+    sourceFiles: string[];
+}
+
+export interface ReconstructInterfaceArgs {
+    symbolName: string;
+}
+
+export interface ReconstructInterfaceResult {
+    ghostInterface: GhostInterface;
+    message: string;
+}
+
 export type ManageProjectCommand = "undo" | "redo" | "guidance" | "status" | "metrics" | "reindex";
 
 export interface ManageProjectArgs {

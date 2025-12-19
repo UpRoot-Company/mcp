@@ -1,13 +1,23 @@
 import * as fs from 'fs';
 import { SymbolIndex, SymbolSearchResult } from '../ast/SymbolIndex.js';
 import { SkeletonGenerator } from '../ast/SkeletonGenerator.js';
-import { SymbolInfo } from '../types.js';
+import { SymbolInfo, GhostInterface } from '../types.js';
+import { GhostInterfaceBuilder } from './GhostInterfaceBuilder.js';
 
 export class FallbackResolver {
     constructor(
         private symbolIndex: SymbolIndex,
-        private skeletonGenerator: SkeletonGenerator
+        private skeletonGenerator: SkeletonGenerator,
+        private ghostBuilder?: GhostInterfaceBuilder
     ) {}
+
+    /**
+     * Tier 4: Ghost Interface Archeology
+     */
+    async reconstructGhostInterface(symbolName: string): Promise<GhostInterface | null> {
+        if (!this.ghostBuilder) return null;
+        return this.ghostBuilder.reconstruct(symbolName);
+    }
 
     /**
      * Tier 2: Direct AST parsing for recent edits

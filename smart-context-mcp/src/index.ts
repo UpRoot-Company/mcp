@@ -18,6 +18,8 @@ import { EditCoordinator } from "./engine/EditCoordinator.js";
 import { SkeletonGenerator } from "./ast/SkeletonGenerator.js";
 import { SkeletonCache } from "./ast/SkeletonCache.js";
 import { FallbackResolver } from "./resolution/FallbackResolver.js";
+import { GhostInterfaceBuilder } from "./resolution/GhostInterfaceBuilder.js";
+import { CallSiteAnalyzer } from "./ast/analysis/CallSiteAnalyzer.js";
 import { ErrorEnhancer } from "./errors/ErrorEnhancer.js";
 import { AstManager } from "./ast/AstManager.js";
 import { SymbolIndex } from "./ast/SymbolIndex.js";
@@ -62,6 +64,8 @@ export class SmartContextServer {
     private skeletonGenerator: SkeletonGenerator;
     private skeletonCache: SkeletonCache;
     private fallbackResolver: FallbackResolver;
+    private ghostInterfaceBuilder: GhostInterfaceBuilder;
+    private callSiteAnalyzer: CallSiteAnalyzer;
     private astManager: AstManager;
     private symbolIndex: SymbolIndex;
     private moduleResolver: ModuleResolver;
@@ -153,11 +157,31 @@ export class SmartContextServer {
         this.indexDatabase = new IndexDatabase(this.rootPath);
         this.transactionLog = new TransactionLog(this.indexDatabase.getHandle());
         this.symbolIndex = new SymbolIndex(this.rootPath, this.skeletonGenerator, this.ignoreGlobs, this.indexDatabase);
-        this.fallbackResolver = new FallbackResolver(this.symbolIndex, this.skeletonGenerator);
         this.moduleResolver = new ModuleResolver(this.rootPath);
         this.dependencyGraph = new DependencyGraph(this.rootPath, this.symbolIndex, this.moduleResolver, this.indexDatabase);
-        this.referenceFinder = new ReferenceFinder(this.rootPath, this.dependencyGraph, this.symbolIndex, this.skeletonGenerator, this.moduleResolver);
         this.callGraphBuilder = new CallGraphBuilder(this.rootPath, this.symbolIndex, this.moduleResolver);
+        
+        this.callSiteAnalyzer = new CallSiteAnalyzer();
+        this.searchEngine = new SearchEngine(this.rootPath, this.fileSystem, this.ignoreGlobs, {
+            symbolIndex: this.symbolIndex,
+            callGraphBuilder: this.callGraphBuilder
+        });
+
+        this.ghostInterfaceBuilder = new GhostInterfaceBuilder(
+            this.searchEngine, 
+            this.callSiteAnalyzer, 
+            this.astManager, 
+            this.fileSystem, 
+            this.rootPath
+        );
+
+        this.fallbackResolver = new FallbackResolver(
+            this.symbolIndex, 
+            this.skeletonGenerator, 
+            this.ghostInterfaceBuilder
+        );
+
+        this.referenceFinder = new ReferenceFinder(this.rootPath, this.dependencyGraph, this.symbolIndex, this.skeletonGenerator, this.moduleResolver);
         this.typeDependencyTracker = new TypeDependencyTracker(this.rootPath, this.symbolIndex);
         this.dataFlowTracer = new DataFlowTracer(this.rootPath, this.symbolIndex, this.fileSystem);
         const semanticDiffProvider = new AstAwareDiff(this.skeletonGenerator);
@@ -170,10 +194,6 @@ export class SmartContextServer {
             fileSystem: this.fileSystem
         });
         void this.recoverPendingTransactions();
-        this.searchEngine = new SearchEngine(this.rootPath, this.fileSystem, this.ignoreGlobs, {
-            symbolIndex: this.symbolIndex,
-            callGraphBuilder: this.callGraphBuilder
-        });
         const precomputeEnabled = process.env.SMART_CONTEXT_DISABLE_PRECOMPUTE === 'true' ? false : !isTestEnv;
         this.clusterSearchEngine = new ClusterSearchEngine({
             rootPath: this.rootPath,
@@ -2099,6 +2119,21 @@ export class SmartContextServer {
                     },
                     required: ["command"]
                 }
+            },
+            {
+                name: "reconstruct_interface",
+                description: "Reconstructs an interface from usage patterns when the symbol is missing or broken. " +
+                            "Agent Guidance: Use this when a symbol cannot be resolved through normal means.",
+                inputSchema: {
+                    type: "object",
+                    properties: {
+                        symbolName: {
+                            type: "string",
+                            description: "The name of the symbol/interface to reconstruct."
+                        }
+                    },
+                    required: ["symbolName"]
+                }
             }
         ];
 
@@ -2956,6 +2991,22 @@ export class SmartContextServer {
                         ],
                     };
                 }
+                case "reconstruct_interface": {
+                    if (!args?.symbolName) {
+                        return this._createErrorResponse("MissingParameter", "Provide 'symbolName' to reconstruct_interface.");
+                    }
+                    const { symbolName } = args as any;
+                    const ghost = await this.ghostInterfaceBuilder.reconstruct(symbolName);
+                    if (!ghost) {
+                        return {
+                            content: [{ type: "text", text: `Could not find any usage patterns for symbol '${symbolName}'.` }]
+                        };
+                    }
+                    return {
+                        content: [{ type: "text", text: JSON.stringify(ghost, null, 2) }]
+                    };
+                }
+
                 default:
                     return this._createErrorResponse("UnknownTool", `Tool '${toolName}' not found.`);
             }

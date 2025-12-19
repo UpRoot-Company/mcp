@@ -10,30 +10,39 @@ export class CallSiteAnalyzer {
         langId: string, 
         definitionNodeMap: Map<string, DefinitionSymbol>
     ) {
-        const query = this.getCallQuery(langId, lang);
-        if (!query) return;
-
-        const matches = query.matches(rootNode);
-        for (const match of matches) {
-            const parsed = this.parseCallMatch(match);
-            if (!parsed) continue;
-            const owner = this.findOwningDefinition(parsed.node, definitionNodeMap);
+        const calls = this.extractCallSites(rootNode, lang, langId);
+        for (const callInfo of calls) {
+            const owner = this.findOwningDefinition(callInfo.node, definitionNodeMap);
             if (!owner) continue;
-
-            const callInfo: CallSiteInfo = {
-                calleeName: parsed.calleeName,
-                calleeObject: parsed.calleeObject,
-                callType: parsed.callType,
-                line: parsed.node.startPosition.row + 1,
-                column: parsed.node.startPosition.column + 1,
-                text: parsed.node.text
-            };
 
             if (!owner.calls) {
                 owner.calls = [];
             }
             owner.calls.push(callInfo);
         }
+    }
+
+    public extractCallSites(rootNode: any, lang: any, langId: string): (CallSiteInfo & { node: any })[] {
+        const query = this.getCallQuery(langId, lang);
+        if (!query) return [];
+
+        const results: (CallSiteInfo & { node: any })[] = [];
+        const matches = query.matches(rootNode);
+        for (const match of matches) {
+            const parsed = this.parseCallMatch(match);
+            if (!parsed) continue;
+
+            results.push({
+                calleeName: parsed.calleeName,
+                calleeObject: parsed.calleeObject,
+                callType: parsed.callType,
+                line: parsed.node.startPosition.row + 1,
+                column: parsed.node.startPosition.column + 1,
+                text: parsed.node.text,
+                node: parsed.node
+            });
+        }
+        return results;
     }
 
     private getCallQuery(langId: string, lang: any): Query | null {
