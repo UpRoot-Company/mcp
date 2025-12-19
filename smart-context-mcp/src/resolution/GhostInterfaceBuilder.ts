@@ -109,41 +109,91 @@ export class GhostInterfaceBuilder {
     }
 
     private inferMethods(callSites: (CallSiteInfo & { filePath: string })[]): GhostMethodInfo[] {
-        const methodMap = new Map<string, { count: number, files: Set<string>, signatures: Set<string> }>();
+        const methodMap = new Map<string, {
+            count: number,
+            files: Set<string>,
+            argCounts: Map<number, number>,
+            isAsyncCount: number,
+            rawCalls: string[]
+        }>();
 
         for (const call of callSites) {
-            // If it's a method call, the property name is the method name
-            // If it's a direct call and calleeName is our symbolName, it might be a constructor or a direct function call
             const methodName = call.callType === 'method' ? call.calleeName : (call.callType === 'constructor' ? 'constructor' : 'default');
             
-            const existing = methodMap.get(methodName) || { count: 0, files: new Set<string>(), signatures: new Set<string>() };
+            const existing = methodMap.get(methodName) || {
+                count: 0,
+                files: new Set<string>(),
+                argCounts: new Map<number, number>(),
+                isAsyncCount: 0,
+                rawCalls: []
+            };
+
             existing.count++;
             existing.files.add(call.filePath);
-            if (call.text) {
-                // Heuristic: take the property part if it's a method call
-                existing.signatures.add(call.text);
-            }
+            
+            // Track argument counts to detect consistency
+            const argCount = call.arguments?.length || 0;
+            existing.argCounts.set(argCount, (existing.argCounts.get(argCount) || 0) + 1);
+
+            // Heuristic for async: check if call was awaited or part of an async flow
+            if (call.isAwaited) existing.isAsyncCount++;
+
+            if (call.text) existing.rawCalls.push(call.text);
+            
             methodMap.set(methodName, existing);
         }
 
-        return Array.from(methodMap.entries()).map(([name, data]) => ({
-            name,
-            callCount: data.count,
-            fileCount: data.files.size,
-            inferredSignature: this.chooseBestSignature(name, Array.from(data.signatures)),
-            confidence: this.computeConfidence(data.count, data.files.size)
-        }));
+        return Array.from(methodMap.entries()).map(([name, data]) => {
+            const bestArgCount = this.getMostFrequent(data.argCounts);
+            const isProbablyAsync = data.isAsyncCount / data.count > 0.5;
+            const consistency = this.calculateConsistency(data.argCounts, data.count);
+            
+            return {
+                name,
+                callCount: data.count,
+                fileCount: data.files.size,
+                inferredSignature: this.buildSignature(name, bestArgCount, isProbablyAsync),
+                confidence: this.computeEnhancedConfidence(data.count, data.files.size, consistency)
+            };
+        });
+    }
+
+    private getMostFrequent(map: Map<number, number>): number {
+        let maxCount = -1;
+        let mostFrequent = 0;
+        for (const [val, count] of map.entries()) {
+            if (count > maxCount) {
+                maxCount = count;
+                mostFrequent = val;
+            }
+        }
+        return mostFrequent;
+    }
+
+    private calculateConsistency(argCounts: Map<number, number>, total: number): number {
+        if (total === 0) return 0;
+        const maxFreq = Math.max(...Array.from(argCounts.values()));
+        return maxFreq / total; // 1.0 means perfectly consistent
+    }
+
+    private buildSignature(name: string, argCount: number, isAsync: boolean): string {
+        const args = Array.from({ length: argCount }, (_, i) => `arg${i}: any`).join(', ');
+        const returnType = isAsync ? 'Promise<any>' : 'any';
+        return `${name}(${args}): ${returnType}`;
+    }
+
+    private computeEnhancedConfidence(callCount: number, fileCount: number, consistency: number): 'high' | 'medium' | 'low' {
+        let base: 'high' | 'medium' | 'low' = 'low';
+        if (callCount >= 8 && fileCount >= 2 && consistency > 0.8) base = 'high';
+        else if (callCount >= 3 || (fileCount >= 2 && consistency > 0.5)) base = 'medium';
+        
+        // Downgrade if consistency is very low
+        if (consistency < 0.4 && base === 'high') return 'medium';
+        return base;
     }
 
     private chooseBestSignature(name: string, signatures: string[]): string {
         if (signatures.length === 0) return `${name}(...)`;
-        // Prefer shorter signatures or ones that look like definitions
         return signatures.sort((a, b) => a.length - b.length)[0];
-    }
-
-    private computeConfidence(callCount: number, fileCount: number): 'high' | 'medium' | 'low' {
-        if (callCount >= 10 && fileCount >= 3) return 'high';
-        if (callCount >= 3) return 'medium';
-        return 'low';
     }
 }

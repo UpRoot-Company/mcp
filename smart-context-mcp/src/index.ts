@@ -15,6 +15,7 @@ import { ContextEngine } from "./engine/Context.js";
 import { EditorEngine, AmbiguousMatchError } from "./engine/Editor.js";
 import { HistoryEngine } from "./engine/History.js";
 import { EditCoordinator } from "./engine/EditCoordinator.js";
+import { ImpactAnalyzer } from "./engine/ImpactAnalyzer.js";
 import { SkeletonGenerator } from "./ast/SkeletonGenerator.js";
 import { SkeletonCache } from "./ast/SkeletonCache.js";
 import { FallbackResolver } from "./resolution/FallbackResolver.js";
@@ -61,6 +62,7 @@ export class SmartContextServer {
     private editorEngine: EditorEngine;
     private historyEngine: HistoryEngine;
     private editCoordinator: EditCoordinator;
+    private impactAnalyzer: ImpactAnalyzer;
     private skeletonGenerator: SkeletonGenerator;
     private skeletonCache: SkeletonCache;
     private fallbackResolver: FallbackResolver;
@@ -161,6 +163,8 @@ export class SmartContextServer {
         this.dependencyGraph = new DependencyGraph(this.rootPath, this.symbolIndex, this.moduleResolver, this.indexDatabase);
         this.callGraphBuilder = new CallGraphBuilder(this.rootPath, this.symbolIndex, this.moduleResolver);
         
+        const impactAnalyzer = new ImpactAnalyzer(this.dependencyGraph, this.callGraphBuilder, this.symbolIndex);
+        this.impactAnalyzer = impactAnalyzer;
         this.callSiteAnalyzer = new CallSiteAnalyzer();
         this.searchEngine = new SearchEngine(this.rootPath, this.fileSystem, this.ignoreGlobs, {
             symbolIndex: this.symbolIndex,
@@ -191,7 +195,8 @@ export class SmartContextServer {
         this.editCoordinator = new EditCoordinator(this.editorEngine, this.historyEngine, {
             rootPath: this.rootPath,
             transactionLog: this.transactionLog,
-            fileSystem: this.fileSystem
+            fileSystem: this.fileSystem,
+            impactAnalyzer: this.impactAnalyzer
         });
         void this.recoverPendingTransactions();
         const precomputeEnabled = process.env.SMART_CONTEXT_DISABLE_PRECOMPUTE === 'true' ? false : !isTestEnv;
@@ -247,6 +252,19 @@ export class SmartContextServer {
                     await incrementalIndexer.start();
                 }
                 clusterSearchEngine.startBackgroundTasks();
+
+                // Tier 2: Background PageRank computation for Impact Analysis
+                void (async () => {
+                    await this.waitForInitialScan();
+                    const hotSpots = await clusterSearchEngine.getHotSpots?.();
+                    if (hotSpots) {
+                        const prMap = new Map<string, number>();
+                        for (const hs of hotSpots) {
+                            prMap.set(`${hs.filePath}:${hs.symbol.name}`, hs.score / 100); 
+                        }
+                        impactAnalyzer.setPagerankScores(prMap);
+                    }
+                })();
             } catch (error) {
                 if (ENABLE_DEBUG_LOGS) {
                     console.error("AstManager initialization failed:", error);

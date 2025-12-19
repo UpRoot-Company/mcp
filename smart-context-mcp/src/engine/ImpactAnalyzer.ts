@@ -1,15 +1,20 @@
 import { DependencyGraph } from '../ast/DependencyGraph.js';
 import { CallGraphBuilder } from '../ast/CallGraphBuilder.js';
 import { SymbolIndex } from '../ast/SymbolIndex.js';
-import { Edit, ImpactPreview, ImpactRiskLevel } from '../types.js';
+import { Edit, ImpactPreview, ImpactRiskLevel, SymbolInfo, DefinitionSymbol } from '../types.js';
 import * as path from 'path';
 
 export class ImpactAnalyzer {
     constructor(
         private dependencyGraph: DependencyGraph,
         private callGraphBuilder: CallGraphBuilder,
-        private symbolIndex: SymbolIndex
+        private symbolIndex: SymbolIndex,
+        private pagerankScores?: Map<string, number> // Tier 1 PageRank scores
     ) {}
+
+    public setPagerankScores(scores: Map<string, number>) {
+        this.pagerankScores = scores;
+    }
 
     public async analyzeImpact(filePath: string, edits: Edit[]): Promise<ImpactPreview> {
         // 1. Identify modified symbols
@@ -19,11 +24,14 @@ export class ImpactAnalyzer {
         // 2. Transitive file dependencies (Downstream = outgoing)
         const impactedFiles = await this.dependencyGraph.getTransitiveDependencies(filePath, 'outgoing');
         
-        // 3. Risk Scoring
-        const riskScore = await this.calculateRiskScore(filePath, modifiedSymbols, impactedFiles);
+        // 3. Breaking change detection (e.g. visibility changes)
+        const breakingChanges = await this.detectBreakingChanges(symbolsInFile, edits);
+
+        // 4. Risk Scoring
+        const riskScore = await this.calculateRiskScore(filePath, modifiedSymbols, impactedFiles, breakingChanges);
         const riskLevel = this.mapScoreToRiskLevel(riskScore);
 
-        // 4. Collect suggested tests
+        // 5. Collect suggested tests
         const suggestedTests = await this.findRelatedTests(filePath, impactedFiles);
 
         return {
@@ -36,11 +44,11 @@ export class ImpactAnalyzer {
             },
             editCount: edits.length,
             suggestedTests,
-            notes: this.generateImpactNotes(riskScore, modifiedSymbols)
+            notes: this.generateImpactNotes(riskScore, modifiedSymbols, breakingChanges)
         };
     }
 
-    private identifyModifiedSymbols(symbols: any[], edits: Edit[]): string[] {
+    private identifyModifiedSymbols(symbols: SymbolInfo[], edits: Edit[]): string[] {
         const modified: string[] = [];
         for (const edit of edits) {
             if (edit.lineRange) {
@@ -54,26 +62,51 @@ export class ImpactAnalyzer {
         return Array.from(new Set(modified));
     }
 
-    private async calculateRiskScore(filePath: string, modifiedSymbols: string[], impactedFiles: string[]): Promise<number> {
+    private async detectBreakingChanges(symbols: SymbolInfo[], edits: Edit[]): Promise<string[]> {
+        const breaking: string[] = [];
+        for (const edit of edits) {
+            // Heuristic: If an export is deleted or modified in a way that changes its name/type
+            // This is simplified; a full impl would compare AST before/after
+            if (edit.replacementString === "" && edit.targetString.includes("export")) {
+                breaking.push(`Potential deletion of exported symbol in block: "${edit.targetString.slice(0, 30)}..."`);
+            }
+        }
+        return breaking;
+    }
+
+    private async calculateRiskScore(filePath: string, modifiedSymbols: string[], impactedFiles: string[], breakingChanges: string[]): Promise<number> {
         let score = 0;
 
-        // Factor 1: Blast radius (File count)
-        score += Math.min(impactedFiles.length * 5, 40);
+        // Factor 1: Blast radius (File count) - Up to 30 points
+        score += Math.min(impactedFiles.length * 3, 30);
 
-        // Factor 2: Modified symbols count
-        score += Math.min(modifiedSymbols.length * 10, 30);
+        // Factor 2: Modified symbols count - Up to 20 points
+        score += Math.min(modifiedSymbols.length * 5, 20);
 
-        // Factor 3: Entry point or important file
-        if (filePath.includes('index.ts') || filePath.includes('main.ts')) {
-            score += 20;
+        // Factor 3: PageRank / Architectural Importance - Up to 30 points
+        if (this.pagerankScores) {
+            let maxPR = 0;
+            for (const sym of modifiedSymbols) {
+                const pr = this.pagerankScores.get(`${filePath}:${sym}`) || 0;
+                maxPR = Math.max(maxPR, pr);
+            }
+            score += maxPR * 30;
         }
 
-        return score;
+        // Factor 4: Breaking changes - Up to 20 points
+        score += Math.min(breakingChanges.length * 10, 20);
+
+        // Factor 5: Entry point bonus
+        if (filePath.includes('index.ts') || filePath.includes('main.ts') || filePath.includes('App.tsx')) {
+            score += 10;
+        }
+
+        return Math.min(score, 100);
     }
 
     private mapScoreToRiskLevel(score: number): ImpactRiskLevel {
-        if (score >= 60) return 'high';
-        if (score >= 30) return 'medium';
+        if (score >= 70) return 'high';
+        if (score >= 35) return 'medium';
         return 'low';
     }
 
@@ -84,16 +117,23 @@ export class ImpactAnalyzer {
         for (const file of allFiles) {
             const base = path.basename(file, path.extname(file));
             const testFile = path.join(path.dirname(file), `${base}.test.ts`);
-            // In a real impl, we'd check if this file exists on disk
             tests.push(testFile);
         }
         return Array.from(new Set(tests)).slice(0, 5);
     }
 
-    private generateImpactNotes(score: number, modifiedSymbols: string[]): string[] {
+    private generateImpactNotes(score: number, modifiedSymbols: string[], breakingChanges: string[]): string[] {
         const notes: string[] = [];
-        if (score >= 60) notes.push("HIGH RISK: This change affects core architectural components.");
-        if (modifiedSymbols.length > 0) notes.push(`Modified symbols: ${modifiedSymbols.join(', ')}`);
+        if (score >= 70) notes.push("CRITICAL RISK: This change affects high-importance architectural components.");
+        else if (score >= 35) notes.push("MEDIUM RISK: Significant downstream impact detected.");
+        
+        if (breakingChanges.length > 0) {
+            notes.push(...breakingChanges.map(bc => `BREAKING CHANGE: ${bc}`));
+        }
+        
+        if (modifiedSymbols.length > 0) {
+            notes.push(`Modified symbols: ${modifiedSymbols.join(', ')}`);
+        }
         return notes;
     }
 }

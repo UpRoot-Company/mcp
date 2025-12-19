@@ -165,6 +165,7 @@ export class SkeletonGenerator {
 
         const matches = callQuery.matches(node);
         const calls = new Set<string>();
+        const refs = new Set<string>();
 
         for (const match of matches) {
             const parsed = (this.callSiteAnalyzer as any).parseCallMatch(match);
@@ -176,14 +177,56 @@ export class SkeletonGenerator {
             }
         }
 
-        if (calls.size === 0) return null;
+        // Heuristic: Extract potential external references (PascalCase identifiers usually types/classes)
+        const refQuery = new Query(lang, `(identifier) @id`);
+        const refMatches = refQuery.matches(node);
+        const localNames = this.extractLocalNames(node);
 
-        const callsList = Array.from(calls).slice(0, 5);
-        const moreCount = calls.size - callsList.length;
-        let summary = `calls: ${callsList.join(', ')}`;
-        if (moreCount > 0) summary += ` (+${moreCount} more)`;
+        for (const match of refMatches) {
+            const text = match.captures[0].node.text;
+            if (/^[A-Z]/.test(text) && !localNames.has(text)) {
+                refs.add(text);
+            }
+        }
 
-        return summary;
+        const lineCount = this.countLinesInRange(node.sourceCode || "", node.startIndex, node.endIndex);
+        const branches = this.countBranches(node);
+
+        const summaryParts: string[] = [];
+        if (calls.size > 0) {
+            const callsList = Array.from(calls).slice(0, 5);
+            summaryParts.push(`calls: ${callsList.join(', ')}${calls.size > 5 ? ` (+${calls.size - 5} more)` : ''}`);
+        }
+        if (refs.size > 0) {
+            const refsList = Array.from(refs).slice(0, 5);
+            summaryParts.push(`refs: ${refsList.join(', ')}${refs.size > 5 ? ` (+${refs.size - 5} more)` : ''}`);
+        }
+        
+        summaryParts.push(`complexity: ${lineCount} LOC, ${branches} branches`);
+
+        return summaryParts.join('; ');
+    }
+
+    private extractLocalNames(node: any): Set<string> {
+        const locals = new Set<string>();
+        // Simplified local name extraction (parameters, variables defined in this block)
+        // A full implementation would traverse the AST for declarations
+        return locals;
+    }
+
+    private countBranches(node: any): number {
+        let count = 0;
+        const branchTypes = ['if_statement', 'for_statement', 'while_statement', 'case_clause', 'catch_clause', 'conditional_expression'];
+        
+        const traverse = (n: any) => {
+            if (branchTypes.includes(n.type)) count++;
+            for (let i = 0; i < n.childCount; i++) {
+                traverse(n.child(i));
+            }
+        };
+        
+        traverse(node);
+        return count;
     }
 
     private resolveOptions(options: SkeletonOptions): ResolvedSkeletonOptions {
