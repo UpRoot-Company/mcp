@@ -122,14 +122,20 @@ export class OrchestrationEngine {
   private mapArgsToIntent(category: string, args: any): ParsedIntent {
     return {
       category: category as any,
-      action: args.action || 'execute',
-      targets: args.target ? [args.target] : (args.targetFiles || []),
+      action: args.action || args.command || 'execute',
+      targets: args.target
+        ? [args.target]
+        : (args.targetFiles || (args.targetPath ? [args.targetPath] : [])),
       originalIntent: JSON.stringify(args),
       constraints: {
         ...(args.options || {}),
         edits: args.edits,
         view: args.view,
-        lineRange: args.lineRange
+        lineRange: args.lineRange,
+        includeProfile: args.includeProfile,
+        targetPath: args.targetPath,
+        content: args.content,
+        template: args.template
       },
       confidence: 1.0
     };

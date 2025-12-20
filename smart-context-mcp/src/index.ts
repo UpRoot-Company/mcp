@@ -162,6 +162,7 @@ export class SmartContextServer {
         this.internalRegistry.register('edit_code', (args) => this.editCodeRaw(args));
         this.internalRegistry.register('manage_project', (args) => this.manageProjectRaw(args));
         this.internalRegistry.register('file_profiler', (args) => this.readFileProfileRaw(args));
+        this.internalRegistry.register('write_file', (args) => this.executeWriteFile(args));
         this.internalRegistry.register('impact_analyzer', (args) => this.executeImpactAnalyzer(args));
         this.internalRegistry.register('edit_coordinator', (args) => this.executeEditCoordinator(args));
         this.internalRegistry.register('hotspot_detector', () => this.hotSpotDetector.detectHotSpots());
@@ -307,7 +308,18 @@ export class SmartContextServer {
                     properties: {
                         target: { type: 'string' },
                         view: { type: 'string', enum: ['full', 'skeleton', 'fragment'] },
-                        lineRange: { type: 'string' }
+                        lineRange: {
+                            oneOf: [
+                                { type: 'string' },
+                                {
+                                    type: 'array',
+                                    items: { type: 'number' },
+                                    minItems: 2,
+                                    maxItems: 2
+                                }
+                            ]
+                        },
+                        includeProfile: { type: 'boolean' }
                     },
                     required: ['target']
                 }
@@ -317,7 +329,12 @@ export class SmartContextServer {
                 description: 'Creates new files or scaffolds content.',
                 inputSchema: {
                     type: 'object',
-                    properties: { intent: { type: 'string' } },
+                    properties: {
+                        intent: { type: 'string' },
+                        targetPath: { type: 'string' },
+                        template: { type: 'string' },
+                        content: { type: 'string' }
+                    },
                     required: ['intent']
                 }
             },
@@ -326,7 +343,12 @@ export class SmartContextServer {
                 description: 'Manages project state and transactions.',
                 inputSchema: {
                     type: 'object',
-                    properties: { command: { type: 'string', enum: ['status', 'undo', 'redo', 'reindex'] } },
+                    properties: {
+                        command: {
+                            type: 'string',
+                            enum: ['status', 'undo', 'redo', 'reindex', 'rebuild', 'history', 'test']
+                        }
+                    },
                     required: ['command']
                 }
             }

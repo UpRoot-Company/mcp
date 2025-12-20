@@ -18,13 +18,15 @@ export class NavigatePillar {
     });
 
 
-    // Eager Loading: 단일 결과인 경우 프로필 정보 추가
+    // Eager Loading: 단일 결과인 경우 Smart File Profile 추가
     if (results.results && results.results.length === 1) {
-      const profile = await this.registry.execute('read_code', { 
-        filePath: results.results[0].path, 
-        view: 'skeleton' 
-      });
-      return { ...results, smartProfile: profile };
+      const primary = results.results[0];
+      const profile = await this.registry.execute('file_profiler', { filePath: primary.path });
+      return {
+        ...results,
+        codePreview: primary.context || undefined,
+        smartProfile: profile
+      };
     }
 
     return results;

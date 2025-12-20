@@ -9,7 +9,11 @@ export interface IntentConstraints {
   limit?: number;
   edits?: any[];
   view?: 'full' | 'skeleton' | 'fragment';
-  lineRange?: string;
+  lineRange?: string | [number, number];
+  includeProfile?: boolean;
+  targetPath?: string;
+  content?: string;
+  template?: string;
   include?: {
     callGraph?: boolean;
     hotSpots?: boolean;
