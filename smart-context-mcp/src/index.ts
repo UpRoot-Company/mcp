@@ -381,6 +381,7 @@ export class SmartContextServer {
         ];
 
         const compatTools: any[] = [];
+        const exposeLegacyTools = process.env.SMART_CONTEXT_EXPOSE_LEGACY_TOOLS === "true";
         if (process.env.SMART_CONTEXT_EXPOSE_COMPAT_TOOLS === "true") {
             compatTools.push(
                 {
@@ -413,7 +414,11 @@ export class SmartContextServer {
             );
         }
 
-        return [...legacyTools, ...pillarTools, ...compatTools];
+        return [
+            ...(exposeLegacyTools ? legacyTools : []),
+            ...pillarTools,
+            ...compatTools
+        ];
     }
 
     private async handleCallTool(name: string, args: any): Promise<any> {

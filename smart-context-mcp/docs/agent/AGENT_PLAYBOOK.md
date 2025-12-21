@@ -45,4 +45,9 @@ Every response includes a `guidance` field.
 ---
 
 ## 4. Legacy Compatibility
-If you accidentally call a legacy tool (e.g., `read_code`), the system will automatically route it to the appropriate pillar. However, using the 6 pillars directly is highly recommended for optimal performance and context usage.
+Legacy tools are hidden by default in the MCP tool list. If you need them for compatibility, enable:
+
+- `SMART_CONTEXT_EXPOSE_LEGACY_TOOLS=true` (expose legacy tools in tool list)
+- `SMART_CONTEXT_LEGACY_AUTOMAP=true` (auto-map unknown legacy calls to pillars)
+
+Even with legacy tools enabled, using the 6 pillars directly is recommended for optimal performance and consistent guidance.

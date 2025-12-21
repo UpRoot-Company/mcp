@@ -1,10 +1,11 @@
 # Tool Reference Guide
 
-Complete documentation of all Smart Context MCP tools with parameters, examples, and usage patterns.
+Six Pillars are the primary interface. Legacy tools are still documented for compatibility, but are opt-in and should be avoided for new flows.
 
 **Table of Contents:**
+- [Six Pillars (Recommended)](#six-pillars-recommended)
 - [Quick Tool Selector](#quick-tool-selector)
-- [Tool Catalog](#tool-catalog)
+- [Legacy Tool Catalog (Opt-in)](#legacy-tool-catalog-opt-in)
   - [search_project](#search_project)
   - [read_code](#read_code)
   - [edit_code](#edit_code)
@@ -19,22 +20,40 @@ Complete documentation of all Smart Context MCP tools with parameters, examples,
 
 ---
 
+## Six Pillars (Recommended)
+
+The Six Pillars are the primary interface. Legacy tools are hidden by default and can be exposed with:
+
+- `SMART_CONTEXT_EXPOSE_LEGACY_TOOLS=true`
+- `SMART_CONTEXT_LEGACY_AUTOMAP=true` (auto-map unknown legacy calls)
+
+| Pillar | Intent | Example |
+|---|---|---|
+| `understand` | Understand code structure/logic | `understand({ goal: "Auth flow in UserService" })` |
+| `change` | Modify code safely | `change({ intent: "Add domain whitelist", options: { dryRun: true } })` |
+| `navigate` | Find symbols/files | `navigate({ target: "PaymentProcessor" })` |
+| `read` | Read file contents | `read({ target: "src/auth.ts", view: "fragment" })` |
+| `write` | Create files | `write({ intent: "Add test file", targetPath: "tests/auth.test.ts" })` |
+| `manage` | Manage state | `manage({ command: "undo" })` |
+
 ## Quick Tool Selector
 
-Use this decision tree to find the right tool:
+Use this decision tree to choose the **Six Pillars** first:
 
 ```
 What do you need to do?
-├─ Find code/files?                    → search_project
-├─ Read specific code?                 → read_code or read_file
-├─ Read part of a file?                → read_fragment
-├─ Modify/create/delete code?          → edit_code or write_file
-├─ Understand relationships?           → analyze_relationship
-├─ Get editing guidance?               → get_batch_guidance
-├─ Explore file structure?             → list_directory or analyze_file
-├─ Undo/redo changes?                  → manage_project
-└─ Get detailed file analysis?         → analyze_file
+├─ Understand structure/architecture?  → understand
+├─ Modify code safely?                 → change
+├─ Find symbols/files?                 → navigate
+├─ Read file content?                  → read
+├─ Create a file?                      → write
+└─ Manage project state?               → manage
 ```
+
+If you must use legacy tools, enable them via:
+
+- `SMART_CONTEXT_EXPOSE_LEGACY_TOOLS=true`
+- `SMART_CONTEXT_LEGACY_AUTOMAP=true`
 
 **Token Cost Comparison (estimated for typical 10K file project):**
 
@@ -51,7 +70,7 @@ What do you need to do?
 
 ---
 
-## Tool Catalog
+## Legacy Tool Catalog (Opt-in)
 
 ### search_project
 

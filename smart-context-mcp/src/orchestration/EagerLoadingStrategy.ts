@@ -9,7 +9,9 @@ export class EagerLoadingStrategy {
     registry: InternalToolRegistry
   ): Promise<void> {
     if (intent.category === "understand") {
-      await this.ensureHotSpots(context, registry);
+      if (intent.constraints.include?.hotSpots !== false) {
+        await this.ensureHotSpots(context, registry);
+      }
       const hotSpotCount = this.getHotSpotCount(context);
       const deep = intent.constraints.depth === "deep";
       const forceDeps = intent.constraints.include?.dependencies === true;

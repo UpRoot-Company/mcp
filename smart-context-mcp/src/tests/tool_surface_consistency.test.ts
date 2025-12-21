@@ -34,13 +34,6 @@ describe("Tool surface consistency", () => {
         const tools = (server as any).listIntentTools() as ListedTool[];
 
         const expectedIntentTools = [
-            "read_code",
-            "search_project",
-            "analyze_relationship",
-            "edit_code",
-            "get_batch_guidance",
-            "manage_project",
-            "reconstruct_interface",
             "understand",
             "change",
             "navigate",
@@ -78,8 +71,10 @@ describe("Tool surface consistency", () => {
         }
         });
 
-    it("Opt-in tools are exposed only when enabled", () => {
+    it("Legacy tools are exposed only when enabled", () => {
+        const prevLegacy = process.env.SMART_CONTEXT_EXPOSE_LEGACY_TOOLS;
         const prev = process.env.SMART_CONTEXT_EXPOSE_COMPAT_TOOLS;
+        process.env.SMART_CONTEXT_EXPOSE_LEGACY_TOOLS = "true";
         process.env.SMART_CONTEXT_EXPOSE_COMPAT_TOOLS = "true";
 
         try {
@@ -111,6 +106,11 @@ describe("Tool surface consistency", () => {
                 delete process.env.SMART_CONTEXT_EXPOSE_COMPAT_TOOLS;
             } else {
                 process.env.SMART_CONTEXT_EXPOSE_COMPAT_TOOLS = prev;
+            }
+            if (prevLegacy === undefined) {
+                delete process.env.SMART_CONTEXT_EXPOSE_LEGACY_TOOLS;
+            } else {
+                process.env.SMART_CONTEXT_EXPOSE_LEGACY_TOOLS = prevLegacy;
             }
         }
     });

@@ -18,6 +18,7 @@
   "scripts": {
     "test": "NODE_OPTIONS=--experimental-vm-modules jest dist --runInBand",
     "test:coverage": "NODE_OPTIONS=--experimental-vm-modules jest dist --coverage",
+    "test:coverage:orchestration": "NODE_OPTIONS=--experimental-vm-modules jest dist --runInBand --coverage --collectCoverageFrom=\"dist/orchestration/**/*.js\" --coveragePathIgnorePatterns=\"/dist/tests/\"",
     "build": "tsc",
     "start": "tsx src/index.ts"
   },

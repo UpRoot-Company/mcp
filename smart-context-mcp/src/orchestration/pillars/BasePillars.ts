@@ -23,12 +23,15 @@ export class ReadPillar {
       lineRange
     });
 
+    const needsFullContent = view === 'full' || includeHash;
+    const includeSkeleton = view === 'skeleton';
+
     const [profile, skeleton, fullContent] = await Promise.all([
       includeProfile ? this.registry.execute('file_profiler', { filePath: resolvedPath }) : Promise.resolve(null),
-      view === 'skeleton' ? Promise.resolve(content) : this.registry.execute('read_code', { filePath: resolvedPath, view: 'skeleton' }),
-      view === 'full'
-        ? Promise.resolve(content)
-        : (includeProfile ? this.registry.execute('read_code', { filePath: resolvedPath, view: 'full' }) : Promise.resolve(null))
+      includeSkeleton ? Promise.resolve(content) : Promise.resolve(null),
+      needsFullContent
+        ? (view === 'full' ? Promise.resolve(content) : this.registry.execute('read_code', { filePath: resolvedPath, view: 'full' }))
+        : Promise.resolve(null)
     ]);
 
     const hashSource = typeof fullContent === 'string' ? fullContent : content;

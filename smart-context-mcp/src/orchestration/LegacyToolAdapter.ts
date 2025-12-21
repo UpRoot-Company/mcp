@@ -15,21 +15,60 @@ export class LegacyToolAdapter {
         category: 'read',
         args: { target: a.filePath, view: a.view || 'skeleton', lineRange: a.lineRange }
       }),
+      'read_file': (a) => ({
+        category: 'read',
+        args: { target: a.filePath, view: a.full ? 'full' : 'skeleton', includeProfile: true }
+      }),
+      'read_fragment': (a) => ({
+        category: 'read',
+        args: { target: a.filePath, view: 'fragment', lineRange: a.lineRange }
+      }),
       'search_project': (a) => ({
         category: 'navigate',
         args: { target: a.query, limit: a.maxResults }
       }),
+      'search_files': (a) => ({
+        category: 'navigate',
+        args: { target: a.query || a.keywords?.join?.(' ') || a.patterns?.join?.(' ') || '' }
+      }),
       'analyze_relationship': (a) => ({
         category: 'understand',
-        args: { goal: `Analyze ${a.mode} of ${a.target}`, depth: a.maxDepth > 3 ? 'deep' : 'standard' }
+        args: {
+          goal: `Analyze ${a.mode} of ${a.target}`,
+          depth: a.maxDepth > 3 ? 'deep' : 'standard',
+          include: {
+            callGraph: a.mode === 'calls',
+            dependencies: a.mode === 'dependencies'
+          }
+        }
       }),
       'edit_code': (a) => ({
         category: 'change',
         args: { intent: 'Apply specific edits', targetFiles: [a.filePath], edits: a.edits, options: { dryRun: a.dryRun } }
       }),
+      'edit_file': (a) => ({
+        category: 'change',
+        args: { intent: 'Apply specific edits', targetFiles: [a.filePath], edits: a.edits, options: { dryRun: a.dryRun } }
+      }),
+      'write_file': (a) => ({
+        category: 'write',
+        args: { intent: 'Write file content', targetPath: a.filePath, content: a.content }
+      }),
+      'analyze_file': (a) => ({
+        category: 'read',
+        args: { target: a.filePath, view: 'skeleton', includeProfile: true }
+      }),
       'list_directory': (a) => ({
         category: 'navigate',
-        args: { target: a.path }
+        args: { target: a.path || a.target }
+      }),
+      'get_hierarchy': (a) => ({
+        category: 'navigate',
+        args: { target: a.path || a.target }
+      }),
+      'get_batch_guidance': (a) => ({
+        category: 'change',
+        args: { intent: 'Plan batch edits', targetFiles: a.filePaths, options: { dryRun: true, batchMode: true } }
       }),
       'manage_project': (a) => ({
         category: 'manage',
