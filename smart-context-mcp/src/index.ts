@@ -59,6 +59,7 @@ export class SmartContextServer {
     private incrementalIndexer?: IncrementalIndexer;
     private searchEngine: SearchEngine;
     private editCoordinator: EditCoordinator;
+    private historyEngine: HistoryEngine;
     private configurationManager: ConfigurationManager;
     private astManager: AstManager;
     private skeletonGenerator: SkeletonGenerator;
@@ -121,6 +122,7 @@ export class SmartContextServer {
         });
 
         const historyEngine = new HistoryEngine(this.rootPath, this.fileSystem);
+        this.historyEngine = historyEngine;
         const editorEngine = new EditorEngine(this.rootPath, this.fileSystem, new AstAwareDiff(this.skeletonGenerator));
         const transactionLog = new TransactionLog(indexDatabase.getHandle());
 
@@ -249,7 +251,10 @@ export class SmartContextServer {
                 description: 'Manage project state (status, undo, redo, reindex).',
                 inputSchema: {
                     type: 'object',
-                    properties: { command: { type: 'string', enum: ['status', 'undo', 'redo', 'reindex'] } },
+                    properties: {
+                        command: { type: 'string', enum: ['status', 'undo', 'redo', 'reindex', 'history', 'test'] },
+                        target: { type: 'string' }
+                    },
                     required: ['command']
                 }
             },
@@ -319,7 +324,8 @@ export class SmartContextServer {
                                 }
                             ]
                         },
-                        includeProfile: { type: 'boolean' }
+                        includeProfile: { type: 'boolean' },
+                        includeHash: { type: 'boolean' }
                     },
                     required: ['target']
                 }
@@ -347,7 +353,8 @@ export class SmartContextServer {
                         command: {
                             type: 'string',
                             enum: ['status', 'undo', 'redo', 'reindex', 'rebuild', 'history', 'test']
-                        }
+                        },
+                        target: { type: 'string' }
                     },
                     required: ['command']
                 }
@@ -1089,6 +1096,35 @@ export class SmartContextServer {
                 await this.searchEngine.rebuild();
                 await this.dependencyGraph.build();
                 return { success: true, output: "Reindex completed." };
+            case 'history':
+                {
+                    const history = await this.historyEngine.getHistory();
+                    const log = this.editCoordinator.getTransactionLog();
+                    const pending = log ? log.getPendingTransactions() : [];
+                    return {
+                        success: true,
+                        output: "History retrieved.",
+                        history: {
+                            undo: history.undoStack,
+                            redo: history.redoStack,
+                            pendingTransactions: pending
+                        }
+                    };
+                }
+            case 'test':
+                {
+                    const target = args?.target;
+                    if (!target) {
+                        return { success: false, output: "Missing target for test command." };
+                    }
+                    const absPath = this.resolveAbsolutePath(target);
+                    const report = await this.impactAnalyzer.analyzeImpact(absPath, []);
+                    return {
+                        success: true,
+                        output: "Suggested tests generated.",
+                        suggestedTests: report?.suggestedTests ?? []
+                    };
+                }
             default:
                 return { success: false, output: `Unknown manage_project command: ${command}` };
         }
@@ -1294,5 +1330,19 @@ export class SmartContextServer {
     }
 }
 
-const server = new SmartContextServer(process.cwd());
-server.run().catch(console.error);
+const isDirectRun = (() => {
+    const entry = process.argv[1];
+    if (!entry) {
+        return false;
+    }
+    try {
+        return import.meta.url === url.pathToFileURL(entry).href;
+    } catch {
+        return false;
+    }
+})();
+
+if (isDirectRun) {
+    const server = new SmartContextServer(process.cwd());
+    server.run().catch(console.error);
+}

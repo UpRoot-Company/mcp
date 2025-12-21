@@ -50,7 +50,7 @@ export class WorkflowPlanner {
           { id: 'search', tool: 'search_project', params: { query: subject, type: 'symbol' } },
           { id: 'read_full', tool: 'read_code', params: { view: 'full' }, inputFrom: 'search.output.results[0].path' },
           { id: 'impact', tool: 'impact_analyzer', params: {}, inputFrom: 'search.output.results[0].path', parallel: true },
-          { id: 'dry_run', tool: 'edit_coordinator', params: { dryRun: true, intent: intent.originalIntent }, inputFrom: 'search.output.results[0].path' }
+          { id: 'dry_run', tool: 'edit_coordinator', params: { dryRun: true, edits: constraints.edits || [] }, inputFrom: 'search.output.results[0].path' }
         ];
 
       case 'navigate':

@@ -11,6 +11,7 @@ export interface IntentConstraints {
   view?: 'full' | 'skeleton' | 'fragment';
   lineRange?: string | [number, number];
   includeProfile?: boolean;
+  includeHash?: boolean;
   targetPath?: string;
   content?: string;
   template?: string;

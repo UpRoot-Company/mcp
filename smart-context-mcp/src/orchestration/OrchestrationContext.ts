@@ -120,6 +120,10 @@ export class OrchestrationContext {
     return [...this.errors];
   }
 
+  public clearErrors(): void {
+    this.errors = [];
+  }
+
   public getDuration(): number {
     return Date.now() - this.startTime;
   }

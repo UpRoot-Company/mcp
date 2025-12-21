@@ -8,7 +8,8 @@ export class ManagePillar {
   constructor(private readonly registry: InternalToolRegistry) {}
 
   public async execute(intent: ParsedIntent, context: OrchestrationContext): Promise<any> {
-    const { action } = intent;
+    const { action, targets } = intent;
+    const target = targets[0];
     
     switch (action) {
       case 'undo':
@@ -19,6 +20,10 @@ export class ManagePillar {
         return await this.registry.execute('manage_project', { command: 'status' });
       case 'rebuild':
         return await this.registry.execute('manage_project', { command: 'reindex' });
+      case 'history':
+        return await this.registry.execute('manage_project', { command: 'history' });
+      case 'test':
+        return await this.registry.execute('manage_project', { command: 'test', target });
       default:
         // Check intent directly if action mapping is imprecise
         if (intent.originalIntent.includes('undo')) return await this.registry.execute('manage_project', { command: 'undo' });
@@ -27,10 +32,10 @@ export class ManagePillar {
           return await this.registry.execute('manage_project', { command: 'reindex' });
         }
         if (intent.originalIntent.includes('history')) {
-          return { success: false, output: 'History view is not yet supported via manage pillar.' };
+          return await this.registry.execute('manage_project', { command: 'history' });
         }
         if (intent.originalIntent.includes('test')) {
-          return { success: false, output: 'Test command is not available in manage pillar.' };
+          return await this.registry.execute('manage_project', { command: 'test', target });
         }
         return await this.registry.execute('manage_project', { command: 'status' });
     }

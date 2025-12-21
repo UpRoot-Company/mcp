@@ -13,6 +13,7 @@ export class ReadPillar {
     const target = constraints.targetPath || targets[0] || originalIntent;
     const view = constraints.view ?? (constraints.depth === 'deep' ? 'full' : 'skeleton');
     const includeProfile = constraints.includeProfile !== false;
+    const includeHash = constraints.includeHash !== false;
     const resolvedPath = await this.resolveTargetPath(target);
     const lineRange = this.normalizeLineRange(constraints.lineRange);
 
@@ -31,7 +32,7 @@ export class ReadPillar {
     ]);
 
     const hashSource = typeof fullContent === 'string' ? fullContent : content;
-    const hash = this.computeHash(hashSource);
+    const hash = includeHash ? this.computeHash(hashSource) : null;
     const metadata = {
       filePath: profile?.metadata?.relativePath ?? profile?.metadata?.filePath ?? resolvedPath,
       hash,

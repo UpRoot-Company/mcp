@@ -73,6 +73,10 @@ export class EditCoordinator {
         }
     }
 
+    public getTransactionLog(): TransactionLog | undefined {
+        return this.transactionLog;
+    }
+
     /**
      * Apply edits to a file and, if not a dry run, record the operation in history.
      *

@@ -10,12 +10,16 @@ import { ReadPillar, WritePillar } from './pillars/BasePillars.js';
 import { ManagePillar } from './pillars/ManagePillar.js';
 import { InsightSynthesizer } from './InsightSynthesizer.js';
 import { GuidanceGenerator } from './GuidanceGenerator.js';
+import { AutoCorrectionStrategy } from './AutoCorrectionStrategy.js';
+import { EagerLoadingStrategy } from './EagerLoadingStrategy.js';
 
 
 export class OrchestrationEngine {
   private pillars: Map<string, any> = new Map();
   private synthesizer = new InsightSynthesizer();
   private guidanceGenerator = new GuidanceGenerator();
+  private autoCorrection = new AutoCorrectionStrategy();
+  private eagerLoading = new EagerLoadingStrategy();
 
   constructor(
     private readonly intentRouter: IntentRouter,
@@ -42,6 +46,15 @@ export class OrchestrationEngine {
     const plan = this.planner.plan(intent);
     if (plan.steps.length > 0) {
       await this.executePlan(plan, context);
+      if (context.getErrors().length > 0) {
+        const corrected = await this.autoCorrection.attempt(intent, context, this.registry);
+        if (corrected) {
+          context.clearErrors();
+        }
+      }
+      if (context.getErrors().length === 0) {
+        await this.eagerLoading.execute(intent, context, this.registry);
+      }
       return this.synthesizeResponse(intent, context);
     }
 
@@ -52,17 +65,25 @@ export class OrchestrationEngine {
 
     const result = await pillar.execute(intent, context);
 
+    const impactPreviews = result.impactReport ? [result.impactReport] : [];
     const insights = this.synthesizer.synthesize({
-      skeletons: result.structure ? [{ content: result.structure }] : [],
+      skeletons: result.structure ? [{ content: result.structure }] : (result.profile ? [{ ...result.profile.structure, symbols: result.profile.structure?.symbols }] : []),
       calls: result.relationships?.calls,
       dependencies: result.relationships?.dependencies,
-      hotSpots: result.impactReport?.hotSpots || []
+      hotSpots: result.impactReport?.hotSpots || [],
+      impactPreviews
     });
 
+    const pageRankCoverage = insights.pageRankSummary?.coverage ?? 0;
     const guidance = this.guidanceGenerator.generate({
       lastPillar: category,
       lastResult: result,
-      insights: insights.insights
+      insights: insights.insights,
+      synthesis: {
+        hotSpots: result.impactReport?.hotSpots ?? [],
+        impactIncluded: impactPreviews.length > 0,
+        pageRankCoverage
+      }
     });
 
     return {
@@ -133,6 +154,7 @@ export class OrchestrationEngine {
         view: args.view,
         lineRange: args.lineRange,
         includeProfile: args.includeProfile,
+        includeHash: args.includeHash,
         targetPath: args.targetPath,
         content: args.content,
         template: args.template
@@ -206,19 +228,73 @@ export class OrchestrationEngine {
     const lastResult = context.getLastResult();
     const errors = context.getErrors();
 
+    const data = this.collectSynthesisData(context);
+    const insights = this.synthesizer.synthesize(data);
+    const pageRankCoverage = insights.pageRankSummary?.coverage ?? (data.pageRank ? data.pageRank.size : 0);
+    const guidance = this.guidanceGenerator.generate({
+      lastPillar: intent.category,
+      lastResult: lastResult?.output ?? {},
+      insights: insights.insights,
+      error: errors[0],
+      history: context.getFullHistory(),
+      synthesis: {
+        hotSpots: data.hotSpots,
+        pageRankCoverage,
+        impactIncluded: data.impactPreviews.length > 0
+      }
+    });
+
     return {
       summary: `Response for ${intent.category} request.`,
       status: errors.length === 0 ? 'success' : 'partial_success',
       data: lastResult?.output,
-            history: context.getFullHistory().map((h: any) => ({ tool: h.tool, status: h.status })),
-
+      history: context.getFullHistory().map((h: any) => ({ tool: h.tool, status: h.status })),
+      insights: insights.insights,
+      visualization: insights.visualization,
+      internalToolsUsed: context.getFullHistory().map((h: any) => h.tool),
       errors: errors.length > 0 ? errors : undefined,
-      // Guidance field will be enhanced in Phase 3
-      guidance: {
-        message: 'Analysis complete. Ready for next steps.',
-        suggestedActions: []
-      }
+      guidance
     };
+  }
+
+  private collectSynthesisData(context: OrchestrationContext): {
+    skeletons: any[];
+    calls: any;
+    dependencies: any;
+    hotSpots: any[];
+    pageRank?: Map<string, number>;
+    impactPreviews: any[];
+  } {
+    const skeletons: any[] = [];
+    let calls: any = undefined;
+    let dependencies: any = undefined;
+    let hotSpots: any[] = [];
+    const impactPreviews: any[] = [];
+
+    for (const step of context.getFullHistory()) {
+      if (step.tool === 'read_code' && typeof step.output === 'string') {
+        skeletons.push({ content: step.output });
+      }
+      if (step.tool === 'file_profiler' && step.output?.structure) {
+        skeletons.push({ ...step.output.structure, symbols: step.output.structure?.symbols });
+      }
+      if (step.tool === 'analyze_relationship') {
+        if (!calls && step.args?.mode === 'calls') calls = step.output;
+        if (!dependencies && step.args?.mode === 'dependencies') dependencies = step.output;
+      }
+      if (step.tool === 'hotspot_detector' && Array.isArray(step.output)) {
+        hotSpots = step.output;
+      }
+      if (step.tool === 'impact_analyzer' && step.output) {
+        impactPreviews.push(step.output);
+      }
+      if (step.tool === 'edit_coordinator') {
+        if (step.output?.impactPreview) impactPreviews.push(step.output.impactPreview);
+        if (Array.isArray(step.output?.impactPreviews)) impactPreviews.push(...step.output.impactPreviews);
+      }
+    }
+
+    return { skeletons, calls, dependencies, hotSpots, impactPreviews };
   }
 
 }
