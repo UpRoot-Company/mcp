@@ -28,7 +28,7 @@ export class UnderstandPillar {
     const filePath = primaryResult.path;
 
         // 2. Parallel Deep Data Collection (Eager Loading)
-    const [skeleton, calls, deps] = await Promise.all([
+    const [skeleton, calls, deps, hotSpots] = await Promise.all([
       this.registry.execute('read_code', { filePath, view: 'skeleton' }),
       constraints.include?.callGraph !== false ? 
         this.registry.execute('analyze_relationship', { 
@@ -42,7 +42,10 @@ export class UnderstandPillar {
           target: filePath, 
           mode: 'dependencies', 
           direction: 'upstream' 
-        }) : Promise.resolve(null)
+        }) : Promise.resolve(null),
+      constraints.include?.hotSpots !== false
+        ? this.registry.execute('hotspot_detector', {})
+        : Promise.resolve([])
     ]);
 
 
@@ -50,11 +53,12 @@ export class UnderstandPillar {
     return {
       summary: `Analysis results for "${subject}".`,
       primaryFile: filePath,
-      structure: skeleton.content,
+      structure: skeleton,
       relationships: {
         calls: calls,
         dependencies: deps
       },
+      hotSpots,
 
       guidance: {
         message: 'Code structure analyzed. Use the "change" pillar if you need to modify it.',

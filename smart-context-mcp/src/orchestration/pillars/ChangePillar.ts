@@ -33,12 +33,13 @@ export class ChangePillar {
     }));
 
     // 2. Impact Analysis (Parallel)
-    const impactPromise = includeImpact ?
-      this.registry.execute('impact_analyzer', { target: targetPath, edits }) :
-      Promise.resolve(null);
+    const impactPromise = includeImpact
+      ? this.registry.execute('impact_analyzer', { target: targetPath, edits })
+      : Promise.resolve(null);
 
     // 3. Execute Edit (Includes DryRun)
-    const editResult = await this.registry.execute('edit_code', {
+    const editResult = await this.registry.execute('edit_coordinator', {
+      filePath: targetPath,
       edits,
       dryRun
     });
@@ -47,24 +48,26 @@ export class ChangePillar {
     let autoCorrected = false;
 
     if (!editResult.success && edits.length > 0) {
-      const needsFallback = edits.some((edit: any) => !edit.fuzzyMode);
-      if (needsFallback) {
-        const correctedEdits = edits.map((edit: any) => ({
-          ...edit,
-          fuzzyMode: edit.fuzzyMode ?? 'whitespace'
-        }));
-        const correctedResult = await this.registry.execute('edit_code', {
-          edits: correctedEdits,
+      const attempts = [
+        { label: 'whitespace', edits: edits.map((edit: any) => ({ ...edit, fuzzyMode: edit.fuzzyMode ?? 'whitespace' })) },
+        { label: 'structural', edits: edits.map((edit: any) => ({ ...edit, normalization: edit.normalization ?? 'structural' })) },
+        { label: 'fuzzy', edits: edits.map((edit: any) => ({ ...edit, fuzzyMode: edit.fuzzyMode ?? 'levenshtein' })) }
+      ];
+      for (const attempt of attempts) {
+        const correctedResult = await this.registry.execute('edit_coordinator', {
+          filePath: targetPath,
+          edits: attempt.edits,
           dryRun
         });
         if (correctedResult.success) {
           finalResult = correctedResult;
           autoCorrected = true;
+          break;
         }
       }
     }
 
-    const impact = await impactPromise;
+    const impact = dryRun ? (finalResult.impactPreview ?? null) : await impactPromise;
 
     return {
       success: finalResult.success,

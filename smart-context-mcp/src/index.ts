@@ -277,7 +277,17 @@ export class SmartContextServer {
                     type: 'object',
                     properties: {
                         goal: { type: 'string' },
-                        depth: { type: 'string', enum: ['shallow', 'standard', 'deep'] }
+                        depth: { type: 'string', enum: ['shallow', 'standard', 'deep'] },
+                        scope: { type: 'string', enum: ['symbol', 'file', 'module', 'project'] },
+                        include: {
+                            type: 'object',
+                            properties: {
+                                callGraph: { type: 'boolean' },
+                                hotSpots: { type: 'boolean' },
+                                pageRank: { type: 'boolean' },
+                                dependencies: { type: 'boolean' }
+                            }
+                        }
                     },
                     required: ['goal']
                 }
@@ -290,8 +300,17 @@ export class SmartContextServer {
                     properties: {
                         intent: { type: 'string' },
                         target: { type: 'string' },
+                        targetFiles: { type: 'array', items: { type: 'string' } },
                         edits: { type: 'array' },
-                        options: { type: 'object' }
+                        options: {
+                            type: 'object',
+                            properties: {
+                                dryRun: { type: 'boolean' },
+                                includeImpact: { type: 'boolean' },
+                                autoRollback: { type: 'boolean' },
+                                batchMode: { type: 'boolean' }
+                            }
+                        }
                     },
                     required: ['intent']
                 }

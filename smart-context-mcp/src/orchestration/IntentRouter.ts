@@ -18,6 +18,7 @@ export interface IntentConstraints {
   include?: {
     callGraph?: boolean;
     hotSpots?: boolean;
+    pageRank?: boolean;
     dependencies?: boolean;
   };
 }

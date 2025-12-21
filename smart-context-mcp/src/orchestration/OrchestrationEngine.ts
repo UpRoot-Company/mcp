@@ -43,19 +43,21 @@ export class OrchestrationEngine {
       ? this.intentRouter.parse(args)
       : this.mapArgsToIntent(category, args);
 
-    const plan = this.planner.plan(intent);
-    if (plan.steps.length > 0) {
-      await this.executePlan(plan, context);
-      if (context.getErrors().length > 0) {
-        const corrected = await this.autoCorrection.attempt(intent, context, this.registry);
-        if (corrected) {
-          context.clearErrors();
+    if (typeof args === 'string') {
+      const plan = this.planner.plan(intent);
+      if (plan.steps.length > 0) {
+        await this.executePlan(plan, context);
+        if (context.getErrors().length > 0) {
+          const corrected = await this.autoCorrection.attempt(intent, context, this.registry);
+          if (corrected) {
+            context.clearErrors();
+          }
         }
+        if (context.getErrors().length === 0) {
+          await this.eagerLoading.execute(intent, context, this.registry);
+        }
+        return this.synthesizeResponse(intent, context);
       }
-      if (context.getErrors().length === 0) {
-        await this.eagerLoading.execute(intent, context, this.registry);
-      }
-      return this.synthesizeResponse(intent, context);
     }
 
     const pillar = this.pillars.get(category);
@@ -107,14 +109,23 @@ export class OrchestrationEngine {
         const started = Date.now();
         try {
           const output = await this.registry.execute(step.tool, params);
+          const failed = output?.success === false || output?.isError === true;
           context.addStep({
             id: step.id,
             tool: step.tool,
             args: params,
             output,
-            status: 'success',
+            status: failed ? 'failure' : 'success',
             duration: Date.now() - started
           });
+          if (failed) {
+            context.addError({
+              code: output?.errorCode ?? output?.code ?? 'STEP_FAILED',
+              message: output?.message ?? 'Step execution failed',
+              tool: step.tool,
+              target: params?.filePath ?? params?.target
+            });
+          }
         } catch (error: any) {
           context.addStep({
             id: step.id,
@@ -150,6 +161,10 @@ export class OrchestrationEngine {
       originalIntent: JSON.stringify(args),
       constraints: {
         ...(args.options || {}),
+        depth: args.depth,
+        scope: args.scope,
+        limit: args.limit,
+        include: args.include,
         edits: args.edits,
         view: args.view,
         lineRange: args.lineRange,
