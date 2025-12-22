@@ -11,9 +11,12 @@ export class UnderstandPillar {
     const { targets, constraints, originalIntent } = intent;
     const subject = targets[0] || originalIntent;
     const depth = constraints.depth || 'standard';
-    
+    const include = constraints.include ?? {};
+    const includeDependencies = include.dependencies !== false || include.pageRank === true;
+    const includeCalls = include.callGraph !== false;
+
     // 1. 초기 검색 수행
-    const searchResult = await this.registry.execute('search_project', { 
+    const searchResult = await this.runTool(context, 'search_project', { 
       query: subject, 
       type: constraints.scope === 'project' ? 'file' : 'symbol',
       maxResults: 5
@@ -28,24 +31,25 @@ export class UnderstandPillar {
     const filePath = primaryResult.path;
 
         // 2. Parallel Deep Data Collection (Eager Loading)
-    const [skeleton, calls, deps, hotSpots] = await Promise.all([
-      this.registry.execute('read_code', { filePath, view: 'skeleton' }),
-      constraints.include?.callGraph !== false ? 
-        this.registry.execute('analyze_relationship', { 
+    const [skeleton, calls, deps, hotSpots, profile] = await Promise.all([
+      this.runTool(context, 'read_code', { filePath, view: 'skeleton' }),
+      includeCalls ?
+        this.runTool(context, 'analyze_relationship', { 
           target: filePath, 
           mode: 'calls', 
           direction: 'both', 
           maxDepth: depth === 'deep' ? 3 : 1 
         }) : Promise.resolve(null),
-      constraints.include?.dependencies !== false ?
-        this.registry.execute('analyze_relationship', { 
+      includeDependencies ?
+        this.runTool(context, 'analyze_relationship', { 
           target: filePath, 
           mode: 'dependencies', 
-          direction: 'upstream' 
+          direction: 'both' 
         }) : Promise.resolve(null),
-      constraints.include?.hotSpots !== false
-        ? this.registry.execute('hotspot_detector', {})
-        : Promise.resolve([])
+      include.hotSpots !== false
+        ? this.runTool(context, 'hotspot_detector', {})
+        : Promise.resolve([]),
+      this.runTool(context, 'file_profiler', { filePath })
     ]);
 
 
@@ -54,11 +58,28 @@ export class UnderstandPillar {
       summary: `Analysis results for "${subject}".`,
       primaryFile: filePath,
       structure: skeleton,
+      skeleton,
+      symbols: profile?.structure?.symbols ?? [],
+      callGraph: calls ?? undefined,
+      dependencies: Array.isArray(deps?.edges) ? deps.edges : [],
       relationships: {
         calls: calls,
         dependencies: deps
       },
       hotSpots,
+      report: {
+        summary: `Analysis summary for ${filePath}.`,
+        architecturalRole: 'utility',
+        complexity: {
+          loc: profile?.metadata?.lineCount ?? 0,
+          branches: 0,
+          dependencies: Array.isArray(deps?.edges) ? deps.edges.length : 0,
+          fanIn: Array.isArray(deps?.edges) ? deps.edges.filter((e: any) => e?.to === filePath).length : 0,
+          fanOut: Array.isArray(deps?.edges) ? deps.edges.filter((e: any) => e?.from === filePath).length : 0
+        },
+        risks: [],
+        recommendations: []
+      },
 
       guidance: {
         message: 'Code structure analyzed. Use the "change" pillar if you need to modify it.',
@@ -68,5 +89,19 @@ export class UnderstandPillar {
       }
     };
 
+  }
+
+  private async runTool(context: OrchestrationContext, tool: string, args: any) {
+    const started = Date.now();
+    const output = await this.registry.execute(tool, args);
+    context.addStep({
+      id: `${tool}_${context.getFullHistory().length + 1}`,
+      tool,
+      args,
+      output,
+      status: output?.success === false || output?.isError ? 'failure' : 'success',
+      duration: Date.now() - started
+    });
+    return output;
   }
 }

@@ -16,9 +16,10 @@ export class EagerLoadingStrategy {
       const deep = intent.constraints.depth === "deep";
       const forceDeps = intent.constraints.include?.dependencies === true;
       const forceCalls = intent.constraints.include?.callGraph === true;
+      const forcePageRank = intent.constraints.include?.pageRank === true;
       const eager = deep || hotSpotCount >= 5;
 
-      if (eager || forceDeps) {
+      if (eager || forceDeps || forcePageRank) {
         await this.ensureRelationships(context, registry);
       }
       if (eager || forceCalls) {

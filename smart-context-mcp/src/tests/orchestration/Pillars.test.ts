@@ -22,6 +22,10 @@ describe("Pillars", () => {
     registry.register("read_code", async () => "SKELETON" as any);
     registry.register("analyze_relationship", async () => ({ nodes: [], edges: [] } as any));
     registry.register("hotspot_detector", async () => ([{ filePath: "src/demo.ts" }] as any));
+    registry.register("file_profiler", async () => ({
+      metadata: { filePath: "src/demo.ts", lineCount: 1, language: "ts" },
+      structure: { symbols: [] }
+    } as any));
 
     const pillar = new UnderstandPillar(registry);
     const intent = {
@@ -43,6 +47,8 @@ describe("Pillars", () => {
       impactPreview: { riskLevel: "low", summary: { impactedFiles: [] } }
     } as any));
     registry.register("impact_analyzer", async () => ({ riskLevel: "low" } as any));
+    registry.register("analyze_relationship", async () => ({ nodes: [], edges: [] } as any));
+    registry.register("hotspot_detector", async () => ([] as any));
 
     const pillar = new ChangePillar(registry);
     const intent = {

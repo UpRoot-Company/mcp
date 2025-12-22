@@ -1,5 +1,6 @@
 
 import crypto from 'crypto';
+import path from 'path';
 import { InternalToolRegistry } from '../InternalToolRegistry.js';
 import { OrchestrationContext } from '../OrchestrationContext.js';
 import { ParsedIntent } from '../IntentRouter.js';
@@ -17,7 +18,7 @@ export class ReadPillar {
     const resolvedPath = await this.resolveTargetPath(target);
     const lineRange = this.normalizeLineRange(constraints.lineRange);
 
-    const content = await this.registry.execute('read_code', {
+    const content = await this.runTool(context, 'read_code', {
       filePath: resolvedPath,
       view,
       lineRange
@@ -27,26 +28,26 @@ export class ReadPillar {
     const includeSkeleton = view === 'skeleton';
 
     const [profile, skeleton, fullContent] = await Promise.all([
-      includeProfile ? this.registry.execute('file_profiler', { filePath: resolvedPath }) : Promise.resolve(null),
+      this.runTool(context, 'file_profiler', { filePath: resolvedPath }),
       includeSkeleton ? Promise.resolve(content) : Promise.resolve(null),
       needsFullContent
-        ? (view === 'full' ? Promise.resolve(content) : this.registry.execute('read_code', { filePath: resolvedPath, view: 'full' }))
+        ? (view === 'full' ? Promise.resolve(content) : this.runTool(context, 'read_code', { filePath: resolvedPath, view: 'full' }))
         : Promise.resolve(null)
     ]);
 
     const hashSource = typeof fullContent === 'string' ? fullContent : content;
-    const hash = includeHash ? this.computeHash(hashSource) : null;
+    const hash = includeHash ? this.computeHash(hashSource) : '';
     const metadata = {
       filePath: profile?.metadata?.relativePath ?? profile?.metadata?.filePath ?? resolvedPath,
       hash,
-      lineCount: profile?.metadata?.lineCount ?? (typeof fullContent === 'string' ? fullContent.split(/\r?\n/).length : 0),
+      lineCount: profile?.metadata?.lineCount ?? (typeof fullContent === 'string' ? fullContent.split(/\r?\n/).length : (typeof content === 'string' ? content.split(/\r?\n/).length : 0)),
       language: profile?.metadata?.language ?? null
     };
 
     return {
       content,
       metadata,
-      profile: profile ?? undefined,
+      profile: includeProfile ? (profile ?? undefined) : undefined,
       skeleton: typeof skeleton === 'string' ? skeleton : undefined,
       guidance: {
         message: view === 'full' ? 'Full content loaded.' : 'Content loaded. Use view="full" for full content.',
@@ -85,6 +86,20 @@ export class ReadPillar {
   private computeHash(content: string): string {
     return crypto.createHash('sha256').update(content ?? '').digest('hex');
   }
+
+  private async runTool(context: OrchestrationContext, tool: string, args: any) {
+    const started = Date.now();
+    const output = await this.registry.execute(tool, args);
+    context.addStep({
+      id: `${tool}_${context.getFullHistory().length + 1}`,
+      tool,
+      args,
+      output,
+      status: output?.success === false || output?.isError ? 'failure' : 'success',
+      duration: Date.now() - started
+    });
+    return output;
+  }
 }
 
 export class WritePillar {
@@ -93,7 +108,8 @@ export class WritePillar {
   public async execute(intent: ParsedIntent, context: OrchestrationContext): Promise<any> {
     const { constraints, targets, originalIntent } = intent;
     const targetPath = constraints.targetPath || targets[0];
-    const content = constraints.content ?? '';
+    const template = constraints.template;
+    let content = constraints.content ?? '';
 
     if (!targetPath) {
       return {
@@ -109,7 +125,7 @@ export class WritePillar {
 
     let existingContent: string | null = null;
     try {
-      existingContent = await this.registry.execute('read_code', { filePath: targetPath, view: 'full' });
+      existingContent = await this.runTool(context, 'read_code', { filePath: targetPath, view: 'full' });
     } catch {
       existingContent = null;
     }
@@ -117,13 +133,20 @@ export class WritePillar {
     if (existingContent === null) {
       // Ensure file exists (creates directories if needed).
       try {
-        await this.registry.execute('write_file', { filePath: targetPath, content: '' });
+        await this.runTool(context, 'write_file', { filePath: targetPath, content: '' });
       } catch {
-        await this.registry.execute('edit_code', {
+        await this.runTool(context, 'edit_code', {
           edits: [{ filePath: targetPath, operation: 'create', replacementString: '' }],
           dryRun: false,
           createMissingDirectories: true
         });
+      }
+    }
+
+    if (content === '' && template) {
+      const templated = await this.resolveTemplateContent(template, targetPath, originalIntent, context);
+      if (typeof templated === 'string') {
+        content = templated;
       }
     }
 
@@ -151,7 +174,7 @@ export class WritePillar {
           replacementString: content
         };
 
-    const editResult = await this.registry.execute('edit_coordinator', {
+    const editResult = await this.runTool(context, 'edit_coordinator', {
       filePath: targetPath,
       edits: [edit],
       dryRun: false
@@ -160,12 +183,90 @@ export class WritePillar {
     return {
       success: editResult.success ?? true,
       createdFiles: [{ path: targetPath, description: `Written from intent: ${originalIntent}` }],
-      transactionId: editResult.operation?.id ?? null,
+      transactionId: editResult.operation?.id ?? '',
       guidance: {
         message: editResult.success ? 'File written.' : 'File write failed.',
         suggestedActions: editResult.success ? [{ pillar: 'read', action: 'view_full', target: targetPath }] : []
       }
     };
+  }
+
+  private async resolveTemplateContent(
+    template: string,
+    targetPath: string,
+    intent: string,
+    context: OrchestrationContext
+  ): Promise<string | null> {
+    const trimmed = template.trim();
+    if (!trimmed) return null;
+
+    if (this.looksLikePath(trimmed)) {
+      try {
+        const raw = await this.runTool(context, 'read_code', { filePath: trimmed, view: 'full' });
+        if (typeof raw === 'string' && raw.length > 0) {
+          return raw;
+        }
+      } catch {
+        // fall through to built-in templates
+      }
+    }
+
+    const normalized = trimmed.toLowerCase();
+    const ext = path.extname(targetPath).toLowerCase();
+    const baseName = path.basename(targetPath, ext);
+    const className = this.toPascalCase(baseName || 'Generated');
+
+    if (normalized.includes('test') || normalized.includes('jest') || normalized.includes('spec')) {
+      if (ext === '.ts' || ext === '.tsx') {
+        return `import { describe, it, expect } from "@jest/globals";\n\n` +
+          `describe("${className}", () => {\n  it("todo", () => {\n    expect(true).toBe(true);\n  });\n});\n`;
+      }
+      if (ext === '.js' || ext === '.jsx') {
+        return `describe("${className}", () => {\n  it("todo", () => {\n    expect(true).toBe(true);\n  });\n});\n`;
+      }
+    }
+
+    if (normalized.includes('class') || normalized.includes('service') || normalized.includes('module')) {
+      if (ext === '.ts' || ext === '.tsx') {
+        return `export class ${className} {\n  constructor() {}\n}\n`;
+      }
+      if (ext === '.js' || ext === '.jsx') {
+        return `class ${className} {\n  constructor() {}\n}\n\nmodule.exports = { ${className} };\n`;
+      }
+    }
+
+    if (normalized.includes('readme') || ext === '.md') {
+      return `# ${className}\n\n${intent}\n`;
+    }
+
+    return `// Template: ${template}\n`;
+  }
+
+  private looksLikePath(value: string): boolean {
+    return /[\\/]/.test(value) || /\.[a-z0-9]+$/i.test(value);
+  }
+
+  private toPascalCase(value: string): string {
+    return value
+      .replace(/[^a-zA-Z0-9]+/g, ' ')
+      .trim()
+      .split(/\s+/)
+      .map(part => part.charAt(0).toUpperCase() + part.slice(1))
+      .join('');
+  }
+
+  private async runTool(context: OrchestrationContext, tool: string, args: any) {
+    const started = Date.now();
+    const output = await this.registry.execute(tool, args);
+    context.addStep({
+      id: `${tool}_${context.getFullHistory().length + 1}`,
+      tool,
+      args,
+      output,
+      status: output?.success === false || output?.isError ? 'failure' : 'success',
+      duration: Date.now() - started
+    });
+    return output;
   }
 }
 

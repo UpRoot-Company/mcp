@@ -12,6 +12,7 @@ import { InsightSynthesizer } from './InsightSynthesizer.js';
 import { GuidanceGenerator } from './GuidanceGenerator.js';
 import { AutoCorrectionStrategy } from './AutoCorrectionStrategy.js';
 import { EagerLoadingStrategy } from './EagerLoadingStrategy.js';
+import { CachingStrategy } from './CachingStrategy.js';
 
 
 export class OrchestrationEngine {
@@ -24,7 +25,8 @@ export class OrchestrationEngine {
   constructor(
     private readonly intentRouter: IntentRouter,
     private readonly planner: WorkflowPlanner,
-    private readonly registry: InternalToolRegistry
+    private readonly registry: InternalToolRegistry,
+    private readonly cacheStrategy: CachingStrategy = new CachingStrategy()
   ) {
     this.pillars.set('understand', new UnderstandPillar(registry));
     this.pillars.set('change', new ChangePillar(registry));
@@ -38,8 +40,22 @@ export class OrchestrationEngine {
    * Processes a pillar request.
    */
   public async executePillar(category: string, args: any): Promise<any> {
+    if (typeof args !== 'string' && this.isCacheable(category, args)) {
+      return this.cacheStrategy.getCachedOrExecute(
+        category,
+        args,
+        () => this.executePillarInternal(category, args),
+        {
+          shouldCache: (value) => value?.success !== false && value?.status !== 'partial_success'
+        }
+      );
+    }
+    return this.executePillarInternal(category, args);
+  }
+
+  private async executePillarInternal(category: string, args: any): Promise<any> {
     const context = new OrchestrationContext();
-    const intent = typeof args === 'string' 
+    const intent = typeof args === 'string'
       ? this.intentRouter.parse(args)
       : this.mapArgsToIntent(category, args);
 
@@ -88,12 +104,89 @@ export class OrchestrationEngine {
       }
     });
 
-    return {
+    const response: any = {
       ...result,
       insights: insights.insights,
       visualization: insights.visualization,
-      guidance
+      guidance,
+      internalToolsUsed: context.getFullHistory().map((h: any) => h.tool)
     };
+    if (intent.category === 'understand') {
+      const edges = result?.relationships?.dependencies?.edges ?? [];
+      const includePageRank = intent.constraints.include?.pageRank !== false;
+      const includeDependencies = intent.constraints.include?.dependencies !== false || includePageRank;
+      if (includePageRank) {
+        const pageRankScores = this.computePageRankFromEdges(edges);
+        response.pageRankScores = Object.fromEntries(pageRankScores.entries());
+        if (result?.report?.complexity) {
+          response.report = {
+            ...result.report,
+            architecturalRole: this.classifyRole(pageRankScores.get(result.primaryFile ?? '') ?? 0, result.report.complexity)
+          };
+        }
+      }
+      if (includeDependencies) {
+        response.impactRadius = Array.isArray(edges) ? edges.length : 0;
+      }
+      if (result?.report?.complexity && !includePageRank) {
+        response.report = {
+          ...result.report,
+          architecturalRole: result.report.architecturalRole ?? 'utility'
+        };
+      }
+    }
+    return response;
+  }
+
+  private computePageRankFromEdges(edges: Array<{ source?: string; target?: string; from?: string; to?: string }>): Map<string, number> {
+    const normalized = edges
+      .map(edge => ({ from: edge.from ?? edge.source, to: edge.to ?? edge.target }))
+      .filter(edge => edge.from && edge.to) as Array<{ from: string; to: string }>;
+    if (normalized.length === 0) return new Map();
+
+    const nodes = new Set<string>();
+    for (const edge of normalized) {
+      nodes.add(edge.from);
+      nodes.add(edge.to);
+    }
+    const ids = Array.from(nodes);
+    const n = ids.length;
+    if (n === 0) return new Map();
+
+    const outgoing = new Map<string, string[]>();
+    for (const id of ids) outgoing.set(id, []);
+    for (const edge of normalized) {
+      outgoing.get(edge.from)!.push(edge.to);
+    }
+
+    const damping = 0.85;
+    let ranks = new Map<string, number>(ids.map(id => [id, 1 / n]));
+    for (let iter = 0; iter < 12; iter++) {
+      const next = new Map<string, number>(ids.map(id => [id, (1 - damping) / n]));
+      for (const id of ids) {
+        const outs = outgoing.get(id) ?? [];
+        const share = (ranks.get(id) ?? 0) / (outs.length || n);
+        if (outs.length === 0) {
+          for (const other of ids) {
+            next.set(other, (next.get(other) ?? 0) + damping * share);
+          }
+        } else {
+          for (const to of outs) {
+            next.set(to, (next.get(to) ?? 0) + damping * share);
+          }
+        }
+      }
+      ranks = next;
+    }
+
+    return ranks;
+  }
+
+  private classifyRole(score: number, complexity: { fanIn: number; fanOut: number }): 'core' | 'utility' | 'integration' | 'peripheral' {
+    if (score >= 0.15 || (complexity.fanIn + complexity.fanOut) >= 15) return 'core';
+    if (complexity.fanIn >= 5 && complexity.fanOut >= 5) return 'integration';
+    if (complexity.fanOut > complexity.fanIn) return 'utility';
+    return 'peripheral';
   }
 
   private async executePlan(plan: { steps: any[]; parallelizableGroups: string[][] }, context: OrchestrationContext): Promise<void> {
@@ -170,6 +263,7 @@ export class OrchestrationEngine {
         lineRange: args.lineRange,
         includeProfile: args.includeProfile,
         includeHash: args.includeHash,
+        context: args.context,
         targetPath: args.targetPath,
         content: args.content,
         template: args.template
@@ -310,6 +404,12 @@ export class OrchestrationEngine {
     }
 
     return { skeletons, calls, dependencies, hotSpots, impactPreviews };
+  }
+
+  private isCacheable(category: string, args: any): boolean {
+    if (!args || typeof args !== 'object') return false;
+    if (category === 'change' || category === 'write' || category === 'manage') return false;
+    return category === 'read' || category === 'navigate' || category === 'understand';
   }
 
 }

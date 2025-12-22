@@ -22,6 +22,10 @@ describe("BasePillars Read", () => {
       calls.push({ tool: "read_code", view: args.view });
       return "full content" as any;
     });
+    registry.register("file_profiler", async () => ({
+      metadata: { filePath: "src/demo.ts", lineCount: 1, language: "ts" },
+      structure: { symbols: [] }
+    } as any));
 
     const pillar = new ReadPillar(registry);
     const result = await pillar.execute(buildIntent({
@@ -40,6 +44,10 @@ describe("BasePillars Read", () => {
       calls.push({ tool: "read_code", view: args.view });
       return args.view === "full" ? "full content" : "skeleton";
     });
+    registry.register("file_profiler", async () => ({
+      metadata: { filePath: "src/demo.ts", lineCount: 2, language: "ts" },
+      structure: { symbols: [] }
+    } as any));
 
     const pillar = new ReadPillar(registry);
     const result = await pillar.execute(buildIntent({

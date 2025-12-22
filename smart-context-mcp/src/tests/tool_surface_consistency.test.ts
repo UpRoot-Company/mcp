@@ -69,9 +69,10 @@ describe("Tool surface consistency", () => {
             }
 
         }
+        await server.shutdown();
         });
 
-    it("Legacy tools are exposed only when enabled", () => {
+    it("Legacy tools are exposed only when enabled", async () => {
         const prevLegacy = process.env.SMART_CONTEXT_EXPOSE_LEGACY_TOOLS;
         const prev = process.env.SMART_CONTEXT_EXPOSE_COMPAT_TOOLS;
         process.env.SMART_CONTEXT_EXPOSE_LEGACY_TOOLS = "true";
@@ -101,6 +102,7 @@ describe("Tool surface consistency", () => {
                 "analyze_file",
             ]));
             expect(names.length).toBeGreaterThan(5);
+            await server.shutdown();
         } finally {
             if (prev === undefined) {
                 delete process.env.SMART_CONTEXT_EXPOSE_COMPAT_TOOLS;

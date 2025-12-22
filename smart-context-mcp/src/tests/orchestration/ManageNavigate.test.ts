@@ -26,8 +26,8 @@ describe("ManagePillar", () => {
     const status = await pillar.execute({ ...baseIntent, action: "status" } as any, new OrchestrationContext());
     const history = await pillar.execute({ ...baseIntent, action: "history" } as any, new OrchestrationContext());
 
-    expect(status.command).toBe("status");
-    expect(history.command).toBe("history");
+    expect(status.result.command).toBe("status");
+    expect(history.result.command).toBe("history");
   });
 });
 
@@ -41,6 +41,9 @@ describe("NavigatePillar", () => {
       metadata: { filePath: "src/demo.ts" },
       structure: { symbols: [] }
     } as any));
+    registry.register("read_code", async () => "SKELETON" as any);
+    registry.register("hotspot_detector", async () => ([] as any));
+    registry.register("analyze_relationship", async () => ({ edges: [] } as any));
 
     const pillar = new NavigatePillar(registry);
     const result = await pillar.execute({
@@ -53,6 +56,6 @@ describe("NavigatePillar", () => {
     } as any, new OrchestrationContext());
 
     expect(result.smartProfile).toBeDefined();
-    expect(result.codePreview).toBe("preview");
+    expect(result.codePreview).toBe("SKELETON");
   });
 });

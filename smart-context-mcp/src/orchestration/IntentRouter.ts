@@ -15,6 +15,7 @@ export interface IntentConstraints {
   targetPath?: string;
   content?: string;
   template?: string;
+  context?: "definitions" | "usages" | "tests" | "docs" | "all";
   include?: {
     callGraph?: boolean;
     hotSpots?: boolean;

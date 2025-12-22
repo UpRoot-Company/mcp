@@ -21,13 +21,38 @@ export interface SynthesizedInsights {
     coverage: number;
     topNodes: Array<{ id: string; score: number }>;
   };
+  pageRank?: {
+    topNodes: Array<{
+      path: string;
+      symbol: string;
+      score: number;
+      role: 'core' | 'utility' | 'integration' | 'peripheral';
+    }>;
+    distribution: {
+      core: number;
+      utility: number;
+      integration: number;
+      peripheral: number;
+    };
+  };
   hotSpotSummary?: {
     count: number;
     topFiles: Array<{ filePath: string; count: number }>;
   };
+  hotSpots?: {
+    detected: any[];
+    clusteredByFile: Record<string, any[]>;
+    totalScore: number;
+    riskSummary: string;
+  };
   impactSummary?: {
     riskCounts: { high: number; medium: number; low: number };
     impactedFiles: string[];
+  };
+  impact?: {
+    highRiskFiles: string[];
+    blastRadiusByFile: Record<string, number>;
+    breakingChangeIndicators: string[];
   };
   visualization?: string;  // Mermaid diagram
 }
@@ -80,6 +105,9 @@ export class InsightSynthesizer {
     const pageRankSummary = this.buildPageRankSummary(derivedPageRank);
     const hotSpotSummary = this.buildHotSpotSummary(data.hotSpots ?? []);
     const impactSummary = this.buildImpactSummary(data.impactPreviews ?? []);
+    const pageRankDetail = this.buildPageRankDetail(derivedPageRank);
+    const hotSpotDetail = this.buildHotSpotDetail(data.hotSpots ?? []);
+    const impactDetail = this.buildImpactDetail(data.dependencies, data.impactPreviews ?? []);
 
     return {
       overview: {
@@ -89,8 +117,11 @@ export class InsightSynthesizer {
       },
       insights,
       pageRankSummary,
+      pageRank: pageRankDetail,
       hotSpotSummary,
+      hotSpots: hotSpotDetail,
       impactSummary,
+      impact: impactDetail,
       visualization: this.generateMermaid(data)
     };
   }
@@ -358,6 +389,60 @@ export class InsightSynthesizer {
     };
   }
 
+  private buildPageRankDetail(pageRank?: Map<string, number>): SynthesizedInsights["pageRank"] {
+    if (!pageRank || pageRank.size === 0) return undefined;
+    const entries = Array.from(pageRank.entries()).sort((a, b) => b[1] - a[1]);
+    const topNodes = entries.slice(0, 10).map(([pathValue, score]) => ({
+      path: pathValue,
+      symbol: pathValue,
+      score,
+      role: this.classifyRole(score)
+    }));
+
+    const distribution = { core: 0, utility: 0, integration: 0, peripheral: 0 };
+    for (const [, score] of entries) {
+      distribution[this.classifyRole(score)] += 1;
+    }
+
+    return { topNodes, distribution };
+  }
+
+  private buildHotSpotDetail(hotSpots: any[]): SynthesizedInsights["hotSpots"] {
+    if (!hotSpots || hotSpots.length === 0) return undefined;
+    const clustered: Record<string, any[]> = {};
+    let totalScore = 0;
+    for (const spot of hotSpots) {
+      const filePath = spot?.filePath ?? 'unknown';
+      if (!clustered[filePath]) clustered[filePath] = [];
+      clustered[filePath].push(spot);
+      totalScore += typeof spot?.score === 'number' ? spot.score : 1;
+    }
+    const fileCount = Object.keys(clustered).length;
+    const riskSummary = `${hotSpots.length} hotspots across ${fileCount} files.`;
+    return {
+      detected: hotSpots,
+      clusteredByFile: clustered,
+      totalScore,
+      riskSummary
+    };
+  }
+
+  private buildImpactDetail(deps: any, previews: any[]): SynthesizedInsights["impact"] {
+    const edges = this.extractDependencyEdges(deps);
+    const blastRadiusByFile: Record<string, number> = {};
+    for (const edge of edges) {
+      blastRadiusByFile[edge.from] = (blastRadiusByFile[edge.from] ?? 0) + 1;
+    }
+    const highRiskFiles = Array.from(new Set(
+      previews.filter(p => p?.riskLevel === 'high').flatMap(p => p?.summary?.impactedFiles ?? [])
+    ));
+    return {
+      highRiskFiles,
+      blastRadiusByFile,
+      breakingChangeIndicators: []
+    };
+  }
+
   private countSymbols(skeletons: any[]): number {
     return skeletons.reduce((acc, s) => {
       if (Array.isArray(s?.symbols)) return acc + s.symbols.length;
@@ -366,26 +451,59 @@ export class InsightSynthesizer {
     }, 0);
   }
 
-      private generateMermaid(data: any): string {
-    if (!data.dependencies && !data.calls) return 'graph TD\\n  NoData[No analysis data available]';
+  private generateMermaid(data: any): string {
+    const edges = this.extractDependencyEdges(data.dependencies ?? data.calls);
+    if (edges.length === 0) return 'graph TD\\n  NoData[No analysis data available]';
+
+    const pageRank = data.pageRank ?? this.computePageRankFromCalls(data.calls);
+    const hotSpotFiles = new Set((data.hotSpots ?? []).map((hs: any) => hs?.filePath).filter(Boolean));
+    const ranked: Array<[string, number]> = pageRank && typeof (pageRank as Map<string, number>).entries === 'function'
+      ? (Array.from((pageRank as Map<string, number>).entries()) as Array<[string, number]>)
+      : [];
+    ranked.sort((a, b) => b[1] - a[1]);
+    const topNodes: Array<{ id: string; score: number; role: 'core' | 'utility' | 'integration' | 'peripheral' }> =
+      ranked.slice(0, 12).map(([id, score]) => ({ id, score, role: this.classifyRole(score) }));
+    const topSet = new Set(topNodes.map((node) => node.id));
 
     let mermaid = 'graph TD\\n';
-    
-    if (data.calls && data.calls.nodes) {
-      data.calls.nodes.slice(0, 10).forEach((n: any) => {
-        const label = n.label || n.id;
-        mermaid += `  ${this.sanitizeId(n.id)}["${label}"]\\n`;
-      });
-      data.calls.edges.slice(0, 15).forEach((e: any) => {
-        mermaid += `  ${this.sanitizeId(e.source)} --> ${this.sanitizeId(e.target)}\\n`;
-      });
+    for (const node of topNodes) {
+      const label = node.id.split('/').pop() ?? node.id;
+      const style = hotSpotFiles.has(node.id)
+        ? ':::hotspot'
+        : node.role === 'core'
+          ? ':::core'
+          : node.role === 'integration'
+            ? ':::integration'
+            : node.role === 'utility'
+              ? ':::utility'
+              : '';
+      mermaid += `  ${this.sanitizeId(node.id)}["${label}"]${style}\\n`;
     }
+
+    edges
+      .filter(edge => topSet.has(edge.from) || topSet.has(edge.to))
+      .slice(0, 30)
+      .forEach(edge => {
+        mermaid += `  ${this.sanitizeId(edge.from)} --> ${this.sanitizeId(edge.to)}\\n`;
+      });
+
+    mermaid += '\\n  classDef hotspot fill:#ff6b6b,stroke:#c92a2a\\n';
+    mermaid += '  classDef core fill:#4ecdc4,stroke:#099268\\n';
+    mermaid += '  classDef integration fill:#ffd43b,stroke:#fab005\\n';
+    mermaid += '  classDef utility fill:#74c0fc,stroke:#1c7ed6\\n';
 
     return mermaid;
   }
 
   private sanitizeId(id: string): string {
     return id.replace(/[^a-zA-Z0-9]/g, '_');
+  }
+
+  private classifyRole(score: number): 'core' | 'utility' | 'integration' | 'peripheral' {
+    if (score >= 0.15) return 'core';
+    if (score >= 0.08) return 'integration';
+    if (score >= 0.04) return 'utility';
+    return 'peripheral';
   }
 
 

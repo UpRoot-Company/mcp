@@ -8,37 +8,61 @@ export class ManagePillar {
   constructor(private readonly registry: InternalToolRegistry) {}
 
   public async execute(intent: ParsedIntent, context: OrchestrationContext): Promise<any> {
-    const { action, targets } = intent;
+    const { action, targets, constraints } = intent;
     const target = targets[0];
+    const scope = constraints.scope;
+    const execute = async (command: string) => {
+      const started = Date.now();
+      const output = await this.registry.execute('manage_project', { command, target, scope });
+      context.addStep({
+        id: `${command}_${context.getFullHistory().length + 1}`,
+        tool: 'manage_project',
+        args: { command, target, scope },
+        output,
+        status: output?.success === false || output?.isError ? 'failure' : 'success',
+        duration: Date.now() - started
+      });
+      return output;
+    };
     
     switch (action) {
       case 'undo':
-        return await this.registry.execute('manage_project', { command: 'undo' });
+        return this.wrapResponse(await execute('undo'));
       case 'redo':
-        return await this.registry.execute('manage_project', { command: 'redo' });
+        return this.wrapResponse(await execute('redo'));
       case 'status':
-        return await this.registry.execute('manage_project', { command: 'status' });
+        return this.wrapResponse(await execute('status'));
       case 'rebuild':
-        return await this.registry.execute('manage_project', { command: 'reindex' });
+        return this.wrapResponse(await execute('reindex'));
       case 'history':
-        return await this.registry.execute('manage_project', { command: 'history' });
+        return this.wrapResponse(await execute('history'));
       case 'test':
-        return await this.registry.execute('manage_project', { command: 'test', target });
+        return this.wrapResponse(await execute('test'));
       default:
         // Check intent directly if action mapping is imprecise
-        if (intent.originalIntent.includes('undo')) return await this.registry.execute('manage_project', { command: 'undo' });
-        if (intent.originalIntent.includes('redo')) return await this.registry.execute('manage_project', { command: 'redo' });
+        if (intent.originalIntent.includes('undo')) return this.wrapResponse(await execute('undo'));
+        if (intent.originalIntent.includes('redo')) return this.wrapResponse(await execute('redo'));
         if (intent.originalIntent.includes('rebuild') || intent.originalIntent.includes('reindex')) {
-          return await this.registry.execute('manage_project', { command: 'reindex' });
+          return this.wrapResponse(await execute('reindex'));
         }
         if (intent.originalIntent.includes('history')) {
-          return await this.registry.execute('manage_project', { command: 'history' });
+          return this.wrapResponse(await execute('history'));
         }
         if (intent.originalIntent.includes('test')) {
-          return await this.registry.execute('manage_project', { command: 'test', target });
+          return this.wrapResponse(await execute('test'));
         }
-        return await this.registry.execute('manage_project', { command: 'status' });
+        return this.wrapResponse(await execute('status'));
     }
+  }
+
+  private wrapResponse(raw: any) {
+    const indexStatus = raw?.status?.status ?? raw?.status ?? undefined;
+    const projectState = indexStatus ? { indexStatus, pendingTransactions: raw?.history?.pendingTransactions?.length ?? 0, lastModified: new Date().toISOString() } : undefined;
+    return {
+      success: raw?.success ?? false,
+      result: raw,
+      projectState
+    };
   }
 }
 

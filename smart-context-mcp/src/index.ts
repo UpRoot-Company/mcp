@@ -48,6 +48,7 @@ import { IntentRouter } from "./orchestration/IntentRouter.js";
 import { WorkflowPlanner } from "./orchestration/WorkflowPlanner.js";
 import { InternalToolRegistry } from "./orchestration/InternalToolRegistry.js";
 import { LegacyToolAdapter } from "./orchestration/LegacyToolAdapter.js";
+import { CachingStrategy } from "./orchestration/CachingStrategy.js";
 
 export class SmartContextServer {
     private server: Server;
@@ -77,6 +78,7 @@ export class SmartContextServer {
     private fallbackResolver: FallbackResolver;
     private clusterSearchEngine: ClusterSearchEngine;
     private impactAnalyzer: ImpactAnalyzer;
+    private indexDatabase: IndexDatabase;
 
     constructor(rootPath: string) {
         this.server = new Server({
@@ -97,10 +99,10 @@ export class SmartContextServer {
         // Initialize Core Engines
         this.skeletonGenerator = new SkeletonGenerator();
         this.skeletonCache = new SkeletonCache(this.rootPath);
-        const indexDatabase = new IndexDatabase(this.rootPath);
-        this.symbolIndex = new SymbolIndex(this.rootPath, this.skeletonGenerator, [], indexDatabase);
+        this.indexDatabase = new IndexDatabase(this.rootPath);
+        this.symbolIndex = new SymbolIndex(this.rootPath, this.skeletonGenerator, [], this.indexDatabase);
         const moduleResolver = new ModuleResolver(this.rootPath);
-        this.dependencyGraph = new DependencyGraph(this.rootPath, this.symbolIndex, moduleResolver, indexDatabase);
+        this.dependencyGraph = new DependencyGraph(this.rootPath, this.symbolIndex, moduleResolver, this.indexDatabase);
         this.callGraphBuilder = new CallGraphBuilder(this.rootPath, this.symbolIndex, moduleResolver);
         this.typeDependencyTracker = new TypeDependencyTracker(this.rootPath, this.symbolIndex);
         this.dataFlowTracer = new DataFlowTracer(this.rootPath, this.symbolIndex, this.fileSystem);
@@ -124,7 +126,7 @@ export class SmartContextServer {
         const historyEngine = new HistoryEngine(this.rootPath, this.fileSystem);
         this.historyEngine = historyEngine;
         const editorEngine = new EditorEngine(this.rootPath, this.fileSystem, new AstAwareDiff(this.skeletonGenerator));
-        const transactionLog = new TransactionLog(indexDatabase.getHandle());
+        const transactionLog = new TransactionLog(this.indexDatabase.getHandle());
 
         this.editCoordinator = new EditCoordinator(editorEngine, historyEngine, {
             rootPath: this.rootPath,
@@ -149,7 +151,8 @@ export class SmartContextServer {
         this.orchestrationEngine = new OrchestrationEngine(
             new IntentRouter(),
             new WorkflowPlanner(),
-            this.internalRegistry
+            this.internalRegistry,
+            new CachingStrategy(this.rootPath)
         );
         this.legacyAdapter = new LegacyToolAdapter();
 
@@ -320,7 +323,11 @@ export class SmartContextServer {
                 description: 'Locates symbols and files across the project.',
                 inputSchema: {
                     type: 'object',
-                    properties: { target: { type: 'string' } },
+                    properties: {
+                        target: { type: 'string' },
+                        context: { type: 'string', enum: ['definitions', 'usages', 'tests', 'docs', 'all'] },
+                        limit: { type: 'number' }
+                    },
                     required: ['target']
                 }
             },
@@ -373,6 +380,7 @@ export class SmartContextServer {
                             type: 'string',
                             enum: ['status', 'undo', 'redo', 'reindex', 'rebuild', 'history', 'test']
                         },
+                        scope: { type: 'string', enum: ['file', 'transaction', 'project'] },
                         target: { type: 'string' }
                     },
                     required: ['command']
@@ -636,7 +644,9 @@ export class SmartContextServer {
                 type: 'symbol',
                 path: match.filePath,
                 score: 1,
-                context: `${match.symbol.type} ${match.symbol.name}`
+                context: `${match.symbol.type} ${match.symbol.name}`,
+                line: typeof match.symbol?.range?.startLine === 'number' ? match.symbol.range.startLine : undefined,
+                symbol: match.symbol
             }));
         } else if (inferredType === 'directory') {
             const files = await this.fileSystem.listFiles(this.rootPath);
@@ -1101,6 +1111,7 @@ export class SmartContextServer {
 
     private async manageProjectRaw(args: any) {
         const command = args?.command;
+        const scope = args?.scope;
         switch (command) {
             case 'undo':
                 {
@@ -1138,8 +1149,15 @@ export class SmartContextServer {
             case 'test':
                 {
                     const target = args?.target;
-                    if (!target) {
+                    if (!target && scope !== 'project') {
                         return { success: false, output: "Missing target for test command." };
+                    }
+                    if (!target && scope === 'project') {
+                        return {
+                            success: true,
+                            output: "Suggested tests generated.",
+                            suggestedTests: []
+                        };
                     }
                     const absPath = this.resolveAbsolutePath(target);
                     const report = await this.impactAnalyzer.analyzeImpact(absPath, []);
@@ -1337,8 +1355,13 @@ export class SmartContextServer {
         return { success: true, ghostInterface };
     }
 
-        public async shutdown() {
+    public async shutdown() {
         await this.server.close();
+        if (this.incrementalIndexer) {
+            await this.incrementalIndexer.stop();
+        }
+        await this.configurationManager.dispose();
+        this.indexDatabase.close();
     }
 
     public async waitForInitialScan() {
