@@ -49,10 +49,10 @@ Deep analysis of structure and relationships.
 | goal | string | ✓ | — | Analysis target (symbol, file path, or free text) |
 | depth | "shallow" \| "standard" \| "deep" | ✗ | "standard" | Controls call graph depth (deep = maxDepth 3) |
 | scope | "symbol" \| "file" \| "module" \| "project" | ✗ | "symbol" | Affects search mode for initial lookup |
-| include.callGraph | boolean | ✗ | true | Only runs if a symbol match is found |
-| include.dependencies | boolean | ✗ | true | Disabled only when set to false |
-| include.pageRank | boolean | ✗ | true | When true, pageRankScores and impactRadius are computed |
-| include.hotSpots | boolean | ✗ | true | When false, hotSpots is empty |
+| include.callGraph | boolean | ✗ | false | Only runs if a symbol match is found |
+| include.dependencies | boolean | ✗ | false | Enable to include dependency edges |
+| include.pageRank | boolean | ✗ | false | When true, pageRankScores and impactRadius are computed |
+| include.hotSpots | boolean | ✗ | false | When true, hotSpots is included |
 
 **Behavior**
 
@@ -111,12 +111,13 @@ Read content with optional profile/hash and symbol-to-file resolution.
 | target | string | ✓ | — | File path or symbol |
 | view | "full" \| "skeleton" \| "fragment" | ✗ | "skeleton" | If `depth=deep`, defaults to `full` |
 | lineRange | string \| [number, number] | ✗ | — | "10-20" or `[10, 20]` |
-| includeProfile | boolean | ✗ | true | Attaches `profile` |
-| includeHash | boolean | ✗ | true | Computes `metadata.hash` |
+| includeProfile | boolean | ✗ | false | Attaches `profile` |
+| includeHash | boolean | ✗ | false | Computes `metadata.hash` |
 
 **Behavior**
 
 - If `target` looks like a symbol, it resolves via `search_project`.
+- If `target` is a filename only (e.g. "App.ts"), it resolves via `search_project` (type: filename).
 - Reads via `read_code` (view + lineRange), plus `file_profiler`.
 
 **Output (key fields)**
@@ -174,6 +175,7 @@ Create or overwrite files from intent/template.
 
 **Behavior**
 
+- If `targetPath` is a filename only, it tries to resolve an existing file via `search_project` (type: filename).
 - Creates the file if missing (via `write_file` or `edit_code`).
 - If `content` is empty and `template` is provided, generates content.
 - Writes via `edit_coordinator`.
@@ -713,14 +715,19 @@ Output: Can this be extracted safely? Dependencies to move?
 - Redoing after undo
 - Checking project indexing status
 - Verifying transaction history
-- Getting guidance on agent workflows
-- Viewing performance metrics
+- Rebuilding index artifacts
+- Suggesting tests for a target
 
 **Parameters:**
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| command | string | ✓ | — | "undo", "redo", "guidance", "status", "metrics" |
+| command | string | ✓ | — | "undo", "redo", "status", "reindex", "history", "test" |
+| detail | string | ✗ | "summary" | "summary" or "full" (status only) |
+| includePerFile | boolean | ✗ | false | Include per-file status (status only) |
+| limit | number | ✗ | 20 | Max unresolved sample entries (status only) |
+| suppressLogs | boolean | ✗ | false | Suppress dependency graph logs (status/reindex) |
+| quiet | boolean | ✗ | false | Alias of suppressLogs |
 
 **Command Reference:**
 
@@ -738,19 +745,24 @@ Output: Can this be extracted safely? Dependencies to move?
 ```json
 { "command": "status" }
 ```
-Response shows: indexed files, resolved imports, last rebuild time
+Response shows: summary by default. Use `detail: "full"` or `includePerFile: true` for per-file details.
 
-**guidance** - Workflow recommendations
+**reindex** - Rebuild search/skeleton/index artifacts
 ```json
-{ "command": "guidance" }
+{ "command": "reindex" }
 ```
-Response shows: recommended tool sequence for current context
 
-**metrics** - Performance metrics
+**history** - Transaction history
 ```json
-{ "command": "metrics" }
+{ "command": "history" }
 ```
-Response shows: P50/P95 latencies for each tool
+Response shows: undo/redo stacks and pending transactions
+
+**test** - Suggest tests for a target file
+```json
+{ "command": "test", "target": "src/example.ts" }
+```
+Response shows: suggested tests (relative paths)
 
 **Usage Patterns:**
 
@@ -766,7 +778,7 @@ manage_project({ command: "undo" })
 // Plan major changes
 manage_project({ command: "status" })
 // If unresolvedImports > threshold, investigate first
-manage_project({ command: "guidance" })
+manage_project({ command: "reindex" })
 ```
 
 **🔴 Advanced: Complex workflow with checkpoints**
@@ -785,9 +797,10 @@ edit_code({ edits: [...], dryRun: false })
 
 - **undo:** 50-200ms
 - **redo:** 50-200ms
-- **status:** 100-500ms
-- **guidance:** 50-100ms
-- **metrics:** 50-100ms
+- **status:** 100-500ms (may scan dependencies if not built)
+- **reindex:** 0.5-5s (project size dependent)
+- **history:** 20-100ms
+- **test:** 50-300ms
 
 **Related Tools:**
 - `edit_code` → Make changes

@@ -13,8 +13,8 @@ export class ReadPillar {
     const { targets, constraints, originalIntent } = intent;
     const target = constraints.targetPath || targets[0] || originalIntent;
     const view = constraints.view ?? (constraints.depth === 'deep' ? 'full' : 'skeleton');
-    const includeProfile = constraints.includeProfile !== false;
-    const includeHash = constraints.includeHash !== false;
+    const includeProfile = constraints.includeProfile === true;
+    const includeHash = constraints.includeHash === true;
     const resolvedPath = await this.resolveTargetPath(target);
     const lineRange = this.normalizeLineRange(constraints.lineRange);
 
@@ -50,14 +50,27 @@ export class ReadPillar {
       profile: includeProfile ? (profile ?? undefined) : undefined,
       skeleton: typeof skeleton === 'string' ? skeleton : undefined,
       guidance: {
-        message: view === 'full' ? 'Full content loaded.' : 'Content loaded. Use view="full" for full content.',
-        suggestedActions: view === 'full' ? [] : [{ pillar: 'read', action: 'view_full', target: resolvedPath }]
+        message: view === 'full'
+          ? 'Full content loaded.'
+          : 'Content loaded. Use view="full" or includeProfile/includeHash for more detail.',
+        suggestedActions: view === 'full'
+          ? []
+          : [
+              { pillar: 'read', action: 'view_full', target: resolvedPath },
+              { pillar: 'read', action: 'include_profile', target: resolvedPath, options: { includeProfile: true } }
+            ]
       }
     };
   }
 
   private async resolveTargetPath(target: string): Promise<string> {
     if (this.looksLikePath(target)) {
+      if (!/[\\/]/.test(target)) {
+        const filenameMatch = await this.registry.execute('search_project', { query: target, type: 'filename', maxResults: 1 });
+        if (filenameMatch?.results?.length > 0) {
+          return filenameMatch.results[0].path;
+        }
+      }
       return target;
     }
     const symbolMatch = await this.registry.execute('search_project', { query: target, type: 'symbol', maxResults: 1 });
@@ -123,9 +136,11 @@ export class WritePillar {
       };
     }
 
+    const resolvedPath = await this.resolveTargetPath(targetPath);
+
     let existingContent: string | null = null;
     try {
-      existingContent = await this.runTool(context, 'read_code', { filePath: targetPath, view: 'full' });
+      existingContent = await this.runTool(context, 'read_code', { filePath: resolvedPath, view: 'full' });
     } catch {
       existingContent = null;
     }
@@ -133,10 +148,10 @@ export class WritePillar {
     if (existingContent === null) {
       // Ensure file exists (creates directories if needed).
       try {
-        await this.runTool(context, 'write_file', { filePath: targetPath, content: '' });
+        await this.runTool(context, 'write_file', { filePath: resolvedPath, content: '' });
       } catch {
         await this.runTool(context, 'edit_code', {
-          edits: [{ filePath: targetPath, operation: 'create', replacementString: '' }],
+          edits: [{ filePath: resolvedPath, operation: 'create', replacementString: '' }],
           dryRun: false,
           createMissingDirectories: true
         });
@@ -144,7 +159,7 @@ export class WritePillar {
     }
 
     if (content === '' && template) {
-      const templated = await this.resolveTemplateContent(template, targetPath, originalIntent, context);
+      const templated = await this.resolveTemplateContent(template, resolvedPath, originalIntent, context);
       if (typeof templated === 'string') {
         content = templated;
       }
@@ -153,11 +168,11 @@ export class WritePillar {
     if (content === '' && existingContent === null) {
       return {
         success: true,
-        createdFiles: [{ path: targetPath, description: `Created from intent: ${originalIntent}` }],
+        createdFiles: [{ path: resolvedPath, description: `Created from intent: ${originalIntent}` }],
         transactionId: null,
         guidance: {
           message: 'Empty file created.',
-          suggestedActions: [{ pillar: 'read', action: 'view_full', target: targetPath }]
+          suggestedActions: [{ pillar: 'read', action: 'view_full', target: resolvedPath }]
         }
       };
     }
@@ -175,20 +190,33 @@ export class WritePillar {
         };
 
     const editResult = await this.runTool(context, 'edit_coordinator', {
-      filePath: targetPath,
+      filePath: resolvedPath,
       edits: [edit],
       dryRun: false
     });
 
     return {
       success: editResult.success ?? true,
-      createdFiles: [{ path: targetPath, description: `Written from intent: ${originalIntent}` }],
+      createdFiles: [{ path: resolvedPath, description: `Written from intent: ${originalIntent}` }],
       transactionId: editResult.operation?.id ?? '',
       guidance: {
         message: editResult.success ? 'File written.' : 'File write failed.',
-        suggestedActions: editResult.success ? [{ pillar: 'read', action: 'view_full', target: targetPath }] : []
+        suggestedActions: editResult.success ? [{ pillar: 'read', action: 'view_full', target: resolvedPath }] : []
       }
     };
+  }
+
+  private async resolveTargetPath(targetPath: string): Promise<string> {
+    if (!this.looksLikePath(targetPath)) {
+      return targetPath;
+    }
+    if (!/[\\/]/.test(targetPath)) {
+      const filenameMatch = await this.registry.execute('search_project', { query: targetPath, type: 'filename', maxResults: 1 });
+      if (filenameMatch?.results?.length > 0) {
+        return filenameMatch.results[0].path;
+      }
+    }
+    return targetPath;
   }
 
   private async resolveTemplateContent(

@@ -89,7 +89,12 @@ export class NavigatePillar {
   private async loadHotSpotSet(context: OrchestrationContext, results: any[]): Promise<Set<string>> {
     if (results.length === 0) return new Set();
     if (results.length > 10) return new Set();
-    const hotSpots = await this.runTool(context, 'hotspot_detector', {});
+    let hotSpots: any = [];
+    try {
+      hotSpots = await this.runTool(context, 'hotspot_detector', {});
+    } catch {
+      return new Set();
+    }
     const set = new Set<string>();
     if (Array.isArray(hotSpots)) {
       for (const spot of hotSpots) {
@@ -103,13 +108,17 @@ export class NavigatePillar {
     if (results.length !== 1) return new Map();
     const targetPath = results[0]?.path;
     if (!targetPath) return new Map();
-    const deps = await this.runTool(context, 'analyze_relationship', {
-      target: targetPath,
-      mode: 'dependencies',
-      direction: 'both'
-    });
-    const edges = Array.isArray(deps?.edges) ? deps.edges : [];
-    return this.computePageRankFromEdges(edges);
+    try {
+      const deps = await this.runTool(context, 'analyze_relationship', {
+        target: targetPath,
+        mode: 'dependencies',
+        direction: 'both'
+      });
+      const edges = Array.isArray(deps?.edges) ? deps.edges : [];
+      return this.computePageRankFromEdges(edges);
+    } catch {
+      return new Map();
+    }
   }
 
   private computePageRankFromEdges(edges: Array<{ source?: string; target?: string; from?: string; to?: string }>): Map<string, number> {
@@ -158,13 +167,20 @@ export class NavigatePillar {
 
   private async loadRelatedSymbols(context: OrchestrationContext, target: string): Promise<string[]> {
     if (!target) return [];
-    const matches = await this.runTool(context, 'search_project', {
-      query: target,
-      type: 'symbol',
-      maxResults: 5
-    });
-    const results = matches?.results ?? [];
-    return results.map((item: any) => item?.context ?? item?.path ?? '').filter(Boolean);
+    try {
+      const matches = await this.runTool(context, 'search_project', {
+        query: target,
+        type: 'symbol',
+        maxResults: 5
+      });
+      const results = matches?.results ?? [];
+      return results
+        .filter((item: any) => this.isDefinitionSymbol(item))
+        .map((item: any) => item?.symbol?.name ?? item?.context ?? item?.path ?? '')
+        .filter(Boolean);
+    } catch {
+      return [];
+    }
   }
 
   private async applyContextFilter(
@@ -174,7 +190,12 @@ export class NavigatePillar {
     results: any[],
     limit: number
   ): Promise<any[]> {
-    if (contextMode === 'all' || contextMode === 'definitions') return results;
+    if (contextMode === 'all') return results;
+
+    if (contextMode === 'definitions') {
+      const filtered = results.filter(item => this.isDefinitionSymbol(item));
+      return filtered.length > 0 ? filtered : results;
+    }
 
     if (contextMode === 'usages') {
       const symbolMatch = await this.runTool(context, 'search_project', {
@@ -182,7 +203,7 @@ export class NavigatePillar {
         type: 'symbol',
         maxResults: 1
       });
-      const symbolResult = symbolMatch?.results?.[0];
+      const symbolResult = symbolMatch?.results?.find((item: any) => this.isDefinitionSymbol(item)) ?? symbolMatch?.results?.[0];
       const symbolName = symbolResult?.symbol?.name ?? target;
       const definitionPath = symbolResult?.path;
       if (definitionPath) {
@@ -235,6 +256,12 @@ export class NavigatePillar {
 
   private isDocPath(filePath: string): boolean {
     return /\.md$/i.test(filePath) || /\/docs\//i.test(filePath);
+  }
+
+  private isDefinitionSymbol(item: any): boolean {
+    const type = item?.symbol?.type;
+    if (!type) return true;
+    return type !== 'import' && type !== 'export';
   }
 
   private extractLine(item: any): number {

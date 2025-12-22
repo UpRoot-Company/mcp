@@ -12,13 +12,26 @@ export class UnderstandPillar {
     const subject = constraints.goal || targets[0] || originalIntent;
     const depth = constraints.depth || 'standard';
     const include = constraints.include ?? {};
-    const includeDependencies = include.dependencies !== false || include.pageRank === true;
-    const includeCalls = include.callGraph !== false;
-    const explicitPath = this.extractPath(subject);
+    const includeDependencies = include.dependencies === true || include.pageRank === true;
+    const includeCalls = include.callGraph === true;
+    const explicitPath = this.extractPath(subject) ?? (typeof originalIntent === 'string' ? this.extractPath(originalIntent) : null);
+    const symbolHint = this.extractSymbol(subject) ?? (typeof originalIntent === 'string' ? this.extractSymbol(originalIntent) : null);
+    let resolvedPath = explicitPath;
 
     // 1. 초기 검색 수행
     let searchResult = { results: [] as any[] };
-    if (!explicitPath) {
+    if (explicitPath && !/[\\/]/.test(explicitPath)) {
+      const fileMatches = await this.runTool(context, 'search_project', {
+        query: explicitPath,
+        type: 'filename',
+        maxResults: 5
+      });
+      if (fileMatches?.results?.length) {
+        resolvedPath = fileMatches.results[0].path;
+      }
+    }
+
+    if (!resolvedPath) {
       searchResult = await this.runTool(context, 'search_project', { 
         query: subject, 
         type: constraints.scope === 'project' ? 'file' : 'symbol',
@@ -33,13 +46,27 @@ export class UnderstandPillar {
       }
     }
 
-    if ((!searchResult.results || searchResult.results.length === 0) && !explicitPath) {
+    if ((!searchResult.results || searchResult.results.length === 0) && !resolvedPath) {
       return { success: false, status: 'no_results', summary: 'No relevant code found.', results: [] };
     }
 
-    const primaryResult = explicitPath ? { path: explicitPath } : searchResult.results[0];
-    const filePath = primaryResult.path;
-    const symbolName = primaryResult?.symbol?.name;
+    const primaryResult = resolvedPath ? { path: resolvedPath } : searchResult.results[0];
+    let filePath = primaryResult.path;
+    let symbolName = primaryResult?.symbol?.name;
+    if (includeCalls && !symbolName && symbolHint) {
+      const symbolMatches = await this.runTool(context, 'search_project', {
+        query: symbolHint,
+        type: 'symbol',
+        maxResults: 10
+      });
+      const match = symbolMatches?.results?.find((result: any) => result.path === filePath) ?? symbolMatches?.results?.[0];
+      if (match?.symbol?.name) {
+        symbolName = match.symbol.name;
+        if (!resolvedPath && match?.path) {
+          filePath = match.path;
+        }
+      }
+    }
 
         // 2. Parallel Deep Data Collection (Eager Loading)
     const [skeleton, calls, deps, hotSpots, profile] = await Promise.all([
@@ -58,7 +85,7 @@ export class UnderstandPillar {
           mode: 'dependencies', 
           direction: 'both' 
         }) : Promise.resolve(null),
-      include.hotSpots !== false
+      include.hotSpots === true
         ? this.runTool(context, 'hotspot_detector', {})
         : Promise.resolve([]),
       this.runTool(context, 'file_profiler', { filePath })
@@ -99,9 +126,10 @@ export class UnderstandPillar {
       guidance: {
         message: includeCalls && !symbolName
           ? 'Code structure analyzed. Call graph skipped (no symbol match).'
-          : 'Code structure analyzed. Use the "change" pillar if you need to modify it.',
+          : 'Code structure analyzed. Enable include.{callGraph,dependencies,hotSpots,pageRank} for deeper analysis.',
         suggestedActions: [
-          { pillar: 'read', action: 'view_full', target: filePath }
+          { pillar: 'read', action: 'view_full', target: filePath },
+          { pillar: 'understand', action: 'expand', goal: filePath, include: { callGraph: true, dependencies: true, hotSpots: true, pageRank: true } }
         ]
       }
     };
@@ -110,10 +138,48 @@ export class UnderstandPillar {
 
   private extractPath(text: string): string | null {
     if (!text) return null;
-    const match = text.match(/([\\w./-]+\\.(ts|tsx|js|jsx|json|md))/i);
+    const pathPattern = /([A-Za-z0-9_./-]+\.(ts|tsx|js|jsx|json|md))/i;
+    const match = text.match(pathPattern);
     if (match) return match[1];
+    if (/\s/.test(text)) {
+      const tokens = text.split(/\s+/).map(token =>
+        token.replace(/^[\"'`(]+/, "").replace(/[\"'`),.;]+$/, "")
+      );
+      for (const token of tokens) {
+        if (!token) continue;
+        if (pathPattern.test(token)) {
+          return token;
+        }
+        if (/[\\/]/.test(token) && /\.[a-z0-9]+$/i.test(token)) {
+          return token;
+        }
+      }
+      return null;
+    }
     if (/[\\/]/.test(text) && /\.[a-z0-9]+$/i.test(text.trim())) {
       return text.trim();
+    }
+    return null;
+  }
+
+  private extractSymbol(text: string): string | null {
+    if (!text) return null;
+    const explicitMatch = text.match(/\b(?:method|function|class|symbol)\s+([A-Za-z_$][\w$]*)/i);
+    if (explicitMatch) return explicitMatch[1];
+    const tokens = text.split(/\s+/).map(token =>
+      token.replace(/^[\"'`(]+/, "").replace(/[\"'`),.;]+$/, "")
+    );
+    for (const token of tokens) {
+      if (!token || /[\\/]/.test(token)) continue;
+      const hashMatch = token.match(/^[A-Za-z_$][\w$]*#([A-Za-z_$][\w$]*)$/);
+      if (hashMatch) return hashMatch[1];
+      const dotMatch = token.match(/^[A-Za-z_$][\w$]*\.([A-Za-z_$][\w$]*)$/);
+      if (dotMatch) {
+        const candidate = dotMatch[1].toLowerCase();
+        if (!['ts', 'tsx', 'js', 'jsx', 'json', 'md'].includes(candidate)) {
+          return dotMatch[1];
+        }
+      }
     }
     return null;
   }

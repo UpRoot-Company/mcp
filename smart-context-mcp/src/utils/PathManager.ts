@@ -6,7 +6,7 @@ import * as os from 'os';
  * Root is typically '.smart-context/' at the project root.
  */
 export class PathManager {
-    private static baseDir = process.env.SMART_CONTEXT_DIR || '.smart-context';
+    private static baseDir = PathManager.resolveBaseDir();
     private static rootPath: string = process.cwd();
 
     /**
@@ -14,6 +14,28 @@ export class PathManager {
      */
     static setRoot(root: string) {
         this.rootPath = path.resolve(root);
+    }
+
+    private static resolveBaseDir(): string {
+        const raw = (process.env.SMART_CONTEXT_DIR || '').trim();
+        if (!raw) {
+            return '.smart-context';
+        }
+
+        const normalized = raw.replace(/\\/g, '/').replace(/\/+$/, '');
+        const allowLegacy = process.env.SMART_CONTEXT_ALLOW_LEGACY_MCP_DIR === 'true';
+        if (!allowLegacy) {
+            if (normalized === '.mcp' || normalized === '.mcp/smart-context') {
+                console.warn('[PathManager] SMART_CONTEXT_DIR points to deprecated .mcp path; using .smart-context instead.');
+                return '.smart-context';
+            }
+            if (normalized.includes('/.mcp/')) {
+                console.warn('[PathManager] SMART_CONTEXT_DIR points to deprecated .mcp path; using .smart-context instead.');
+                return '.smart-context';
+            }
+        }
+
+        return raw;
     }
 
     /**

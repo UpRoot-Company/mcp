@@ -35,6 +35,7 @@ export class DependencyGraph {
     private readonly resolver: ModuleResolver;
     private readonly db: IndexDatabase;
     private lastRebuiltAt = 0;
+    private loggingEnabled = true;
 
     private importExtractor: ImportExtractor;
     private exportExtractor: ExportExtractor;
@@ -49,6 +50,17 @@ export class DependencyGraph {
         this.importExtractor = new ImportExtractor(this.rootPath);
         this.exportExtractor = new ExportExtractor(this.rootPath);
         this.reverseIndex = new ReverseImportIndex();
+    }
+
+    public setLoggingEnabled(enabled: boolean): void {
+        this.loggingEnabled = enabled;
+    }
+
+    private log(level: 'log' | 'info' | 'warn' | 'error', ...args: any[]): void {
+        if (!this.loggingEnabled) {
+            return;
+        }
+        console[level](...args);
     }
 
     public isBuilt(): boolean {
@@ -92,7 +104,7 @@ export class DependencyGraph {
     }
 
     public async updateFileDependencies(filePath: string): Promise<void> {
-        console.log(`[DependencyGraph] Updating dependencies for ${filePath}`);
+        this.log('log', `[DependencyGraph] Updating dependencies for ${filePath}`);
         
         const relPath = this.getNormalizedRelativePath(filePath);
         const stats = await fs.promises.stat(filePath).catch(() => undefined);
@@ -101,7 +113,7 @@ export class DependencyGraph {
         // Extract imports using AST parsing
         const imports = await this.importExtractor.extractImports(filePath);
         
-        console.log(`[DependencyGraph] Found ${imports.length} imports in ${filePath}`);
+        this.log('log', `[DependencyGraph] Found ${imports.length} imports in ${filePath}`);
         
         const outgoing: EdgeMetadata[] = [];
         const unresolved: UnresolvedMetadata[] = [];
@@ -282,11 +294,11 @@ export class DependencyGraph {
 
     public async rebuildUnresolved(): Promise<void> {
         if (!this.db) {
-            console.warn('[DependencyGraph] IndexDatabase not available; skipping unresolved rebuild');
+            this.log('warn', '[DependencyGraph] IndexDatabase not available; skipping unresolved rebuild');
             return;
         }
 
-        console.info('[DependencyGraph] Rebuilding unresolved dependencies...');
+        this.log('info', '[DependencyGraph] Rebuilding unresolved dependencies...');
         try {
             const unresolved = this.db.listUnresolved();
             const filePathSet = new Set<string>();
@@ -304,13 +316,13 @@ export class DependencyGraph {
                     await this.updateFileDependencies(absPath);
                     rebuiltCount++;
                 } catch (error) {
-                    console.warn(`[DependencyGraph] Failed to rebuild dependencies for ${relativePath}:`, error);
+                    this.log('warn', `[DependencyGraph] Failed to rebuild dependencies for ${relativePath}:`, error);
                 }
             }
 
-            console.info(`[DependencyGraph] Rebuilt dependencies for ${rebuiltCount} files with previously unresolved imports`);
+            this.log('info', `[DependencyGraph] Rebuilt dependencies for ${rebuiltCount} files with previously unresolved imports`);
         } catch (error) {
-            console.error('[DependencyGraph] Error rebuilding unresolved dependencies:', error);
+            this.log('error', '[DependencyGraph] Error rebuilding unresolved dependencies:', error);
         }
     }
 

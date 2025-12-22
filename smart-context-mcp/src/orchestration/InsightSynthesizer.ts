@@ -451,9 +451,9 @@ export class InsightSynthesizer {
     }, 0);
   }
 
-  private generateMermaid(data: any): string {
+  private generateMermaid(data: any): string | undefined {
     const edges = this.extractDependencyEdges(data.dependencies ?? data.calls);
-    if (edges.length === 0) return 'graph TD\\n  NoData[No analysis data available]';
+    if (edges.length === 0) return undefined;
 
     const pageRank = data.pageRank ?? this.computePageRankFromCalls(data.calls);
     const hotSpotFiles = new Set((data.hotSpots ?? []).map((hs: any) => hs?.filePath).filter(Boolean));

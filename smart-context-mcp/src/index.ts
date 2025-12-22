@@ -1158,13 +1158,58 @@ export class SmartContextServer {
                     return { success: result.success, output: result.message ?? "Redo complete.", result };
                 }
             case 'status':
-                await this.dependencyGraph.ensureBuilt();
-                return { success: true, output: "Index status", status: await this.dependencyGraph.getIndexStatus() };
+                {
+                    const suppressLogs = Boolean(args?.suppressLogs ?? args?.quiet);
+                    if (suppressLogs) {
+                        this.dependencyGraph.setLoggingEnabled(false);
+                    }
+                    try {
+                        await this.dependencyGraph.ensureBuilt();
+                        const status = await this.dependencyGraph.getIndexStatus();
+                        const detail = args?.detail ?? args?.verbosity ?? 'summary';
+                        const includePerFile = detail === 'full' || detail === 'verbose' || args?.includePerFile === true;
+                        if (includePerFile) {
+                            return { success: true, output: "Index status", status };
+                        }
+                        const limit = typeof args?.limit === 'number' ? args.limit : 20;
+                        const unresolvedSample = Object.entries(status.perFile ?? {})
+                            .filter(([, value]) => !(value as any)?.resolved)
+                            .slice(0, limit)
+                            .map(([filePath, value]) => ({
+                                filePath,
+                                unresolvedImports: (value as any)?.unresolvedImports ?? []
+                            }));
+                        return {
+                            success: true,
+                            output: "Index status",
+                            status: {
+                                global: status.global,
+                                unresolvedSample
+                            }
+                        };
+                    } finally {
+                        if (suppressLogs) {
+                            this.dependencyGraph.setLoggingEnabled(true);
+                        }
+                    }
+                }
             case 'reindex':
-                await this.skeletonCache.clearAll();
-                await this.searchEngine.rebuild();
-                await this.dependencyGraph.build();
-                return { success: true, output: "Reindex completed." };
+                {
+                    const suppressLogs = Boolean(args?.suppressLogs ?? args?.quiet);
+                    if (suppressLogs) {
+                        this.dependencyGraph.setLoggingEnabled(false);
+                    }
+                    try {
+                        await this.skeletonCache.clearAll();
+                        await this.searchEngine.rebuild();
+                        await this.dependencyGraph.build();
+                        return { success: true, output: "Reindex completed." };
+                    } finally {
+                        if (suppressLogs) {
+                            this.dependencyGraph.setLoggingEnabled(true);
+                        }
+                    }
+                }
             case 'history':
                 {
                     const history = await this.historyEngine.getHistory();
@@ -1427,9 +1472,14 @@ export class SmartContextServer {
 
     public async shutdown() {
         await this.server.close();
+        this.clusterSearchEngine.stopBackgroundTasks();
         if (this.incrementalIndexer) {
             await this.incrementalIndexer.stop();
         }
+        await this.searchEngine.dispose();
+        await this.symbolIndex.dispose();
+        await this.skeletonCache.close();
+        await this.astManager.dispose();
         await this.configurationManager.dispose();
         this.indexDatabase.close();
     }

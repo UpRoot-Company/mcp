@@ -1,5 +1,6 @@
 import * as path from 'path';
 import * as WebTreeSitterModule from 'web-tree-sitter';
+import { createRequire } from 'module';
 import { AstBackend, AstDocument } from './AstBackend.js';
 import { LRUCache } from '../utils/LRUCache.js';
 import { BUILTIN_LANGUAGE_MAPPINGS } from '../config/LanguageConfig.js';
@@ -50,6 +51,7 @@ export class WebTreeSitterBackend implements AstBackend {
     private initFn: () => Promise<void>;
     private languageLoader: any;
     private cleanupInterval?: NodeJS.Timeout;
+    private readonly localRequire = createRequire(import.meta.url);
 
     constructor() {
         this.parserCtor = resolveParserConstructor(WebTreeSitterModule);
@@ -154,12 +156,14 @@ export class WebTreeSitterBackend implements AstBackend {
     }
 
     private getWasmPath(langName: string): string {
-        // Try to locate tree-sitter-wasms package
+        const overrideDir = (process.env.SMART_CONTEXT_WASM_DIR || '').trim();
+        if (overrideDir) {
+            return path.resolve(overrideDir, `tree-sitter-${langName}.wasm`);
+        }
+
         try {
-            const wasmPath = require.resolve(`tree-sitter-wasms/out/tree-sitter-${langName}.wasm`);
-            return wasmPath;
+            return this.localRequire.resolve(`tree-sitter-wasms/out/tree-sitter-${langName}.wasm`);
         } catch (e) {
-            // Fallback for local development or different layout
             return path.resolve(process.cwd(), `node_modules/tree-sitter-wasms/out/tree-sitter-${langName}.wasm`);
         }
     }

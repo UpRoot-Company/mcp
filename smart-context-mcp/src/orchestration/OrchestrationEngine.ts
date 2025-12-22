@@ -98,7 +98,7 @@ export class OrchestrationEngine {
     });
 
     const pageRankCoverage = insights.pageRankSummary?.coverage ?? 0;
-    const guidance = this.guidanceGenerator.generate({
+    const generatedGuidance = this.guidanceGenerator.generate({
       lastPillar: category,
       lastResult: result,
       insights: insights.insights,
@@ -108,6 +108,15 @@ export class OrchestrationEngine {
         pageRankCoverage
       }
     });
+    const guidance = result?.guidance
+      ? {
+          ...generatedGuidance,
+          ...result.guidance,
+          suggestedActions: result.guidance?.suggestedActions?.length
+            ? result.guidance.suggestedActions
+            : generatedGuidance.suggestedActions
+        }
+      : generatedGuidance;
 
     const response: any = {
       ...result,
@@ -118,8 +127,8 @@ export class OrchestrationEngine {
     };
     if (intent.category === 'understand') {
       const edges = result?.relationships?.dependencies?.edges ?? [];
-      const includePageRank = intent.constraints.include?.pageRank !== false;
-      const includeDependencies = intent.constraints.include?.dependencies !== false || includePageRank;
+      const includePageRank = intent.constraints.include?.pageRank === true;
+      const includeDependencies = intent.constraints.include?.dependencies === true || includePageRank;
       if (includePageRank) {
         const pageRankScores = this.computePageRankFromEdges(edges);
         response.pageRankScores = pageRankScores;
