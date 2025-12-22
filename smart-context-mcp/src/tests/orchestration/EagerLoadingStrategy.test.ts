@@ -9,7 +9,7 @@ const makeContextWithSearch = () => {
     id: "search",
     tool: "search_project",
     args: { query: "demo" },
-    output: { results: [{ path: "src/demo.ts" }] },
+    output: { results: [{ path: "src/demo.ts", symbol: { name: "demo" } }] },
     status: "success",
     duration: 1
   });

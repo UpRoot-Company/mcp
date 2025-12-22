@@ -42,7 +42,7 @@ export class EagerLoadingStrategy {
     if (already) return;
     if (intent.constraints.include?.callGraph === false) return;
 
-    const target = this.extractTarget(context);
+    const target = this.extractSymbolTarget(context);
     if (!target) return;
 
     const maxDepth = intent.constraints.depth === "deep" ? 3 : 1;
@@ -79,7 +79,7 @@ export class EagerLoadingStrategy {
     const already = context.getFullHistory().some(step => step.tool === "analyze_relationship");
     if (already) return;
 
-    const target = this.extractTarget(context);
+    const target = this.extractFileTarget(context);
     if (!target) return;
 
     const started = Date.now();
@@ -147,7 +147,7 @@ export class EagerLoadingStrategy {
     const already = context.getFullHistory().some(step => step.tool === "file_profiler");
     if (already) return;
 
-    const target = this.extractTarget(context);
+    const target = this.extractFileTarget(context);
     if (!target) return;
 
     const started = Date.now();
@@ -171,15 +171,38 @@ export class EagerLoadingStrategy {
     }
   }
 
-  private extractTarget(context: OrchestrationContext): string | null {
+  private extractFileTarget(context: OrchestrationContext): string | null {
     const history = context.getFullHistory();
     for (let i = history.length - 1; i >= 0; i--) {
       const output = history[i]?.output;
       if (!output) continue;
+      const symbolName = output?.results?.[0]?.symbol?.name;
+      if (symbolName && this.isSymbolLike(symbolName)) {
+        // Prefer file targets for dependency analysis
+      }
       if (typeof output.filePath === "string") return output.filePath;
       if (typeof output.path === "string") return output.path;
       if (output?.results?.[0]?.path) return output.results[0].path;
     }
     return null;
+  }
+
+  private extractSymbolTarget(context: OrchestrationContext): string | null {
+    const history = context.getFullHistory();
+    for (let i = history.length - 1; i >= 0; i--) {
+      const output = history[i]?.output;
+      if (!output) continue;
+      const symbolName = output?.results?.[0]?.symbol?.name;
+      if (symbolName && this.isSymbolLike(symbolName)) return symbolName;
+      if (typeof output.symbolName === "string" && this.isSymbolLike(output.symbolName)) return output.symbolName;
+    }
+    return null;
+  }
+
+  private isSymbolLike(value: string): boolean {
+    if (!value) return false;
+    if (/[\\/]/.test(value)) return false;
+    if (/\.[a-z0-9]+$/i.test(value)) return false;
+    return true;
   }
 }

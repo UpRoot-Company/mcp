@@ -60,7 +60,12 @@ export class OrchestrationEngine {
       : this.mapArgsToIntent(category, args);
 
     if (typeof args === 'string') {
-      const plan = this.planner.plan(intent);
+      const workflowKey = this.cacheStrategy.getCacheKey('workflow', intent);
+      const cachedPlan = this.cacheStrategy.getCachedWorkflow<any>(workflowKey);
+      const plan = cachedPlan ?? this.planner.plan(intent);
+      if (!cachedPlan) {
+        this.cacheStrategy.cacheWorkflow(workflowKey, plan);
+      }
       if (plan.steps.length > 0) {
         await this.executePlan(plan, context);
         if (context.getErrors().length > 0) {
@@ -117,7 +122,7 @@ export class OrchestrationEngine {
       const includeDependencies = intent.constraints.include?.dependencies !== false || includePageRank;
       if (includePageRank) {
         const pageRankScores = this.computePageRankFromEdges(edges);
-        response.pageRankScores = Object.fromEntries(pageRankScores.entries());
+        response.pageRankScores = pageRankScores;
         if (result?.report?.complexity) {
           response.report = {
             ...result.report,
@@ -245,15 +250,21 @@ export class OrchestrationEngine {
 
 
   private mapArgsToIntent(category: string, args: any): ParsedIntent {
+    let targets = args.target
+      ? [args.target]
+      : (args.targetFiles || (args.targetPath ? [args.targetPath] : []));
+    if ((!targets || targets.length === 0) && typeof args?.goal === 'string') {
+      targets = [args.goal];
+    }
+
     return {
       category: category as any,
       action: args.action || args.command || 'execute',
-      targets: args.target
-        ? [args.target]
-        : (args.targetFiles || (args.targetPath ? [args.targetPath] : [])),
+      targets,
       originalIntent: JSON.stringify(args),
       constraints: {
         ...(args.options || {}),
+        goal: args.goal,
         depth: args.depth,
         scope: args.scope,
         limit: args.limit,

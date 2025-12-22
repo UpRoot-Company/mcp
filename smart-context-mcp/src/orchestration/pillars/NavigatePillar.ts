@@ -35,7 +35,10 @@ export class NavigatePillar {
       const relevance = item.score ?? 0;
       const isTest = this.isTestPath(filePath);
       const isDoc = this.isDocPath(filePath);
-      const type = isTest ? 'test' : (isDoc ? 'doc' : (item.type === 'symbol' ? 'exact' : (relevance >= 0.9 ? 'exact' : 'related')));
+      const inferredType = item.type === 'usage'
+        ? 'usage'
+        : (item.type === 'symbol' ? 'exact' : (relevance >= 0.9 ? 'exact' : 'related'));
+      const type = isTest ? 'test' : (isDoc ? 'doc' : inferredType);
       return {
         filePath,
         line,
@@ -172,6 +175,34 @@ export class NavigatePillar {
     limit: number
   ): Promise<any[]> {
     if (contextMode === 'all' || contextMode === 'definitions') return results;
+
+    if (contextMode === 'usages') {
+      const symbolMatch = await this.runTool(context, 'search_project', {
+        query: target,
+        type: 'symbol',
+        maxResults: 1
+      });
+      const symbolResult = symbolMatch?.results?.[0];
+      const symbolName = symbolResult?.symbol?.name ?? target;
+      const definitionPath = symbolResult?.path;
+      if (definitionPath) {
+        const references = await this.runTool(context, 'reference_finder', {
+          symbolName,
+          definitionPath
+        });
+        const refs = references?.references ?? [];
+        if (Array.isArray(refs) && refs.length > 0) {
+          return refs.slice(0, limit).map((ref: any) => ({
+            type: 'usage',
+            path: ref.filePath ?? '',
+            score: 1,
+            context: ref.snippet ?? ref.text,
+            line: ref.line
+          }));
+        }
+      }
+      return results;
+    }
 
     if (contextMode === 'tests') {
       const filtered = results.filter((item: any) => this.isTestPath(item?.path ?? ''));

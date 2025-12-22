@@ -36,6 +36,178 @@ The Six Pillars are the primary interface. Legacy tools are hidden by default an
 | `write` | Create files | `write({ intent: "Add test file", targetPath: "tests/auth.test.ts" })` |
 | `manage` | Manage state | `manage({ command: "undo" })` |
 
+Below are the **current inputs and behaviors** as implemented in `smart-context-mcp/src/index.ts` and the pillar handlers.
+
+### understand
+
+Deep analysis of structure and relationships.
+
+**Parameters**
+
+| Field | Type | Required | Default | Notes |
+|---|---|---|---|---|
+| goal | string | ✓ | — | Analysis target (symbol, file path, or free text) |
+| depth | "shallow" \| "standard" \| "deep" | ✗ | "standard" | Controls call graph depth (deep = maxDepth 3) |
+| scope | "symbol" \| "file" \| "module" \| "project" | ✗ | "symbol" | Affects search mode for initial lookup |
+| include.callGraph | boolean | ✗ | true | Only runs if a symbol match is found |
+| include.dependencies | boolean | ✗ | true | Disabled only when set to false |
+| include.pageRank | boolean | ✗ | true | When true, pageRankScores and impactRadius are computed |
+| include.hotSpots | boolean | ✗ | true | When false, hotSpots is empty |
+
+**Behavior**
+
+- If `goal` looks like a path, it is used directly. Otherwise it searches via `search_project`.
+- Reads skeleton via `read_code`.
+- Call graph uses `analyze_relationship` (mode: `calls`) **only when a symbol match is found**.
+- Dependencies use `analyze_relationship` (mode: `dependencies`).
+- Hotspots from `hotspot_detector`, metadata from `file_profiler`.
+
+**Output (key fields)**
+
+- `success`, `status`, `summary`, `primaryFile`, `structure`/`skeleton`, `symbols`
+- `callGraph`, `dependencies`, `relationships: { calls, dependencies }`
+- `hotSpots`, `report` (summary + complexity + architecturalRole)
+- `pageRankScores` (Map serialized in JSON), `impactRadius`
+- `insights`, `visualization`, `guidance`, `internalToolsUsed`
+
+---
+
+### navigate
+
+Find symbols/files with context-aware filtering.
+
+**Parameters**
+
+| Field | Type | Required | Default | Notes |
+|---|---|---|---|---|
+| target | string | ✓ | — | Query string |
+| context | "definitions" \| "usages" \| "tests" \| "docs" \| "all" | ✗ | "all" | Applies filters and fallbacks |
+| limit | number | ✗ | 10 | Max results |
+
+**Behavior**
+
+- Uses `search_project` (symbol search when `context=definitions`).
+- For `context=usages`, attempts symbol resolution and returns reference locations.
+- For `tests`/`docs`, filters by path or falls back to glob search.
+- Enriches results with hotspots and simple PageRank (when single result).
+- If exactly one result, attaches `smartProfile` and skeleton preview.
+
+**Output (key fields)**
+
+- `locations[]`: `{ filePath, line, snippet, relevance, type, pageRank, isHotSpot }`
+- `relatedSymbols[]`, `codePreview`, `smartProfile` (single-result only)
+- `insights`, `visualization`, `guidance`, `internalToolsUsed`
+
+---
+
+### read
+
+Read content with optional profile/hash and symbol-to-file resolution.
+
+**Parameters**
+
+| Field | Type | Required | Default | Notes |
+|---|---|---|---|---|
+| target | string | ✓ | — | File path or symbol |
+| view | "full" \| "skeleton" \| "fragment" | ✗ | "skeleton" | If `depth=deep`, defaults to `full` |
+| lineRange | string \| [number, number] | ✗ | — | "10-20" or `[10, 20]` |
+| includeProfile | boolean | ✗ | true | Attaches `profile` |
+| includeHash | boolean | ✗ | true | Computes `metadata.hash` |
+
+**Behavior**
+
+- If `target` looks like a symbol, it resolves via `search_project`.
+- Reads via `read_code` (view + lineRange), plus `file_profiler`.
+
+**Output (key fields)**
+
+- `content`, `metadata` (filePath, hash, lineCount, language)
+- `profile` (optional), `skeleton` (if view is skeleton)
+- `guidance`, `insights`, `visualization`, `internalToolsUsed`
+
+---
+
+### change
+
+Safe edits with impact analysis and auto-correction.
+
+**Parameters**
+
+| Field | Type | Required | Default | Notes |
+|---|---|---|---|---|
+| intent | string | ✓ | — | Natural-language change description |
+| target | string | ✗ | — | Optional file hint |
+| targetFiles | string[] | ✗ | — | Optional file list |
+| edits | array | ✗ | — | Structured edits (passed to edit_coordinator) |
+| options.dryRun | boolean | ✗ | true | When true, returns a plan |
+| options.includeImpact | boolean | ✗ | true | Runs impact/deps/hotspots |
+| options.autoRollback | boolean | ✗ | — | Reserved (no-op) |
+| options.batchMode | boolean | ✗ | — | Reserved (no-op) |
+
+**Behavior**
+
+- If no target is provided, it tries to find one via `search_project`.
+- Runs `impact_analyzer`, `analyze_relationship`, `hotspot_detector`.
+- Executes `edit_coordinator` (dry-run by default), with auto-correction attempts.
+
+**Output (key fields)**
+
+- `success`, `operation` ("plan" or "apply"), `targetFile`, `diff`, `plan`
+- `impactReport` (preview, hotSpots, pageRankDelta, suggestedTests, testPriority)
+- `editResult` (only when applied), `transactionId`, `rollbackAvailable`, `autoCorrected`
+- `guidance`, `insights`, `visualization`, `internalToolsUsed`
+
+---
+
+### write
+
+Create or overwrite files from intent/template.
+
+**Parameters**
+
+| Field | Type | Required | Default | Notes |
+|---|---|---|---|---|
+| intent | string | ✓ | — | Description of what to create |
+| targetPath | string | ✗ | — | File path to create/write |
+| template | string | ✗ | — | Template name or file path |
+| content | string | ✗ | "" | Explicit content takes precedence |
+
+**Behavior**
+
+- Creates the file if missing (via `write_file` or `edit_code`).
+- If `content` is empty and `template` is provided, generates content.
+- Writes via `edit_coordinator`.
+
+**Output (key fields)**
+
+- `success`, `createdFiles[]`, `transactionId`
+- `guidance`, `insights`, `visualization`, `internalToolsUsed`
+
+---
+
+### manage
+
+Manage index and edit history.
+
+**Parameters**
+
+| Field | Type | Required | Default | Notes |
+|---|---|---|---|---|
+| command | "status" \| "undo" \| "redo" \| "reindex" \| "rebuild" \| "history" \| "test" | ✓ | — | `rebuild` maps to `reindex` |
+| scope | "file" \| "transaction" \| "project" | ✗ | — | Used mainly by `test` |
+| target | string | ✗ | — | Used mainly by `test` |
+
+**Behavior**
+
+- `status` builds dependency graph and returns index status.
+- `history` returns undo/redo plus pending transactions.
+- `test` suggests tests (project scope returns empty list).
+
+**Output (key fields)**
+
+- `success`, `result`, `projectState` (indexStatus + pendingTransactions)
+- `guidance`, `insights`, `visualization`, `internalToolsUsed`
+
 ## Quick Tool Selector
 
 Use this decision tree to choose the **Six Pillars** first:

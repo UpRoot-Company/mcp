@@ -97,6 +97,7 @@ export class ChangePillar {
       diff: finalResult.diff,
       plan,
       impactReport,
+      editResult: dryRun ? undefined : finalResult,
       transactionId: finalResult.operation?.id ?? '',
       rollbackAvailable: !dryRun && Boolean(finalResult.success),
       autoCorrected,
@@ -114,7 +115,7 @@ export class ChangePillar {
   private toImpactReport(impact: any, deps: any, targetPath: string, hotSpots: any) {
     if (!impact) return undefined;
     const suggestedTests = Array.isArray(impact.suggestedTests) ? impact.suggestedTests : [];
-    const testPriority = Object.fromEntries(suggestedTests.map((t: string) => [t, 'important' as const]));
+    const testPriority = new Map(suggestedTests.map((t: string) => [t, 'important' as const]));
     const impacted = Array.isArray(impact?.summary?.impactedFiles) ? impact.summary.impactedFiles : [];
     const pageRankDelta = this.computePageRankDelta(deps, [targetPath, ...impacted]);
     const impactedSet = new Set([targetPath, ...impacted].filter(Boolean));
@@ -131,18 +132,18 @@ export class ChangePillar {
     };
   }
 
-  private computePageRankDelta(deps: any, impactedFiles: string[]): Record<string, number> {
+  private computePageRankDelta(deps: any, impactedFiles: string[]): Map<string, number> {
     const edges = Array.isArray(deps?.edges) ? deps.edges : [];
-    if (edges.length === 0 || impactedFiles.length === 0) return {};
+    if (edges.length === 0 || impactedFiles.length === 0) return new Map();
     const baseline = this.computePageRankFromEdges(edges);
     const impactedSet = new Set(impactedFiles.filter(Boolean));
     const filtered = edges.filter((edge: any) => impactedSet.has(edge.source ?? edge.from) && impactedSet.has(edge.target ?? edge.to));
     const scoped = this.computePageRankFromEdges(filtered);
-    const delta: Record<string, number> = {};
+    const delta = new Map<string, number>();
     for (const file of impactedSet) {
       const base = baseline.get(file) ?? 0;
       const next = scoped.get(file) ?? 0;
-      delta[file] = Number((next - base).toFixed(6));
+      delta.set(file, Number((next - base).toFixed(6)));
     }
     return delta;
   }

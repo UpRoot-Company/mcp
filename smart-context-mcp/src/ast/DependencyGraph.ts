@@ -108,24 +108,33 @@ export class DependencyGraph {
 
         // Convert imports to dependency edges
         for (const imp of imports) {
-            if (imp.resolvedPath) {
-                const targetRelative = this.getNormalizedRelativePath(imp.resolvedPath);
+            const resolution = this.resolver.resolveDetailed(filePath, imp.specifier);
+            const isCore = resolution.metadata?.core === 'true';
+            const isExternal = resolution.metadata?.external === 'true';
+            if (isCore || isExternal) {
+                continue;
+            }
+
+            if (resolution.resolvedPath) {
+                const targetRelative = this.getNormalizedRelativePath(resolution.resolvedPath);
                 outgoing.push({
                     targetPath: targetRelative,
                     type: imp.importType,
                     metadata: {
                         what: imp.what.join(', '),
                         line: imp.line,
-                        specifier: imp.specifier
+                        specifier: imp.specifier,
+                        ...resolution.metadata
                     }
                 });
             } else {
                 unresolved.push({
                     specifier: imp.specifier,
-                    error: 'Module resolution failed',
+                    error: resolution.error ?? 'Module resolution failed',
                     metadata: {
                         what: imp.what.join(', '),
-                        line: imp.line
+                        line: imp.line,
+                        ...resolution.metadata
                     }
                 });
             }
@@ -370,6 +379,12 @@ export class DependencyGraph {
         outgoing: EdgeMetadata[],
         unresolved: UnresolvedMetadata[]
     ): void {
+        const isCore = resolution.metadata?.core === 'true';
+        const isExternal = resolution.metadata?.external === 'true';
+        if (isCore || isExternal) {
+            return;
+        }
+
         const resolved = resolution.resolvedPath;
         if (resolved && resolved.startsWith(this.rootPath)) {
             const targetRelative = path.relative(this.rootPath, resolved);

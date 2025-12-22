@@ -9,33 +9,45 @@ export class UnderstandPillar {
 
   public async execute(intent: ParsedIntent, context: OrchestrationContext): Promise<any> {
     const { targets, constraints, originalIntent } = intent;
-    const subject = targets[0] || originalIntent;
+    const subject = constraints.goal || targets[0] || originalIntent;
     const depth = constraints.depth || 'standard';
     const include = constraints.include ?? {};
     const includeDependencies = include.dependencies !== false || include.pageRank === true;
     const includeCalls = include.callGraph !== false;
+    const explicitPath = this.extractPath(subject);
 
     // 1. 초기 검색 수행
-    const searchResult = await this.runTool(context, 'search_project', { 
-      query: subject, 
-      type: constraints.scope === 'project' ? 'file' : 'symbol',
-      maxResults: 5
-    });
-
-
-        if (!searchResult.results || searchResult.results.length === 0) {
-      return { summary: 'No relevant code found.', results: [] };
+    let searchResult = { results: [] as any[] };
+    if (!explicitPath) {
+      searchResult = await this.runTool(context, 'search_project', { 
+        query: subject, 
+        type: constraints.scope === 'project' ? 'file' : 'symbol',
+        maxResults: 5
+      });
+      if (!searchResult.results || searchResult.results.length === 0) {
+        searchResult = await this.runTool(context, 'search_project', { 
+          query: subject, 
+          type: 'file',
+          maxResults: 5
+        });
+      }
     }
 
-    const primaryResult = searchResult.results[0];
+    if ((!searchResult.results || searchResult.results.length === 0) && !explicitPath) {
+      return { success: false, status: 'no_results', summary: 'No relevant code found.', results: [] };
+    }
+
+    const primaryResult = explicitPath ? { path: explicitPath } : searchResult.results[0];
     const filePath = primaryResult.path;
+    const symbolName = primaryResult?.symbol?.name;
 
         // 2. Parallel Deep Data Collection (Eager Loading)
     const [skeleton, calls, deps, hotSpots, profile] = await Promise.all([
       this.runTool(context, 'read_code', { filePath, view: 'skeleton' }),
-      includeCalls ?
+      includeCalls && symbolName ?
         this.runTool(context, 'analyze_relationship', { 
-          target: filePath, 
+          target: symbolName,
+          contextPath: filePath,
           mode: 'calls', 
           direction: 'both', 
           maxDepth: depth === 'deep' ? 3 : 1 
@@ -54,7 +66,10 @@ export class UnderstandPillar {
 
 
         // 3. Synthesize Response (Advanced synthesis in Phase 3)
+    const status = includeCalls && !symbolName ? 'partial_success' : 'ok';
     return {
+      success: true,
+      status,
       summary: `Analysis results for "${subject}".`,
       primaryFile: filePath,
       structure: skeleton,
@@ -82,13 +97,25 @@ export class UnderstandPillar {
       },
 
       guidance: {
-        message: 'Code structure analyzed. Use the "change" pillar if you need to modify it.',
+        message: includeCalls && !symbolName
+          ? 'Code structure analyzed. Call graph skipped (no symbol match).'
+          : 'Code structure analyzed. Use the "change" pillar if you need to modify it.',
         suggestedActions: [
           { pillar: 'read', action: 'view_full', target: filePath }
         ]
       }
     };
 
+  }
+
+  private extractPath(text: string): string | null {
+    if (!text) return null;
+    const match = text.match(/([\\w./-]+\\.(ts|tsx|js|jsx|json|md))/i);
+    if (match) return match[1];
+    if (/[\\/]/.test(text) && /\.[a-z0-9]+$/i.test(text.trim())) {
+      return text.trim();
+    }
+    return null;
   }
 
   private async runTool(context: OrchestrationContext, tool: string, args: any) {

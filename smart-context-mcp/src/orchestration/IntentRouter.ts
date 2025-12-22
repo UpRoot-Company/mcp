@@ -2,6 +2,7 @@
 export type IntentCategory = 'understand' | 'change' | 'navigate' | 'read' | 'write' | 'manage';
 
 export interface IntentConstraints {
+  goal?: string;
   depth?: 'shallow' | 'standard' | 'deep';
   scope?: 'symbol' | 'file' | 'module' | 'project';
   includeImpact?: boolean;

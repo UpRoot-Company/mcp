@@ -14,22 +14,92 @@ export interface WorkflowStep {
 export interface WorkflowPlan {
   steps: WorkflowStep[];
   parallelizableGroups: string[][]; // 병렬 실행 가능한 단계 ID 그룹
+  parallelizable?: string[][];
+  fallbacks?: FallbackStrategy[];
+  eagerExpansions?: EagerExpansion[];
+}
+
+export interface FallbackStrategy {
+  name: string;
+  condition: string;
+  steps: WorkflowStep[];
+}
+
+export interface EagerExpansion {
+  trigger: string;
+  steps: WorkflowStep[];
+}
+
+interface WorkflowTemplate {
+  steps: WorkflowStep[];
+  fallbacks?: FallbackStrategy[];
+  eagerExpansions?: EagerExpansion[];
+}
+
+class WorkflowTemplateRegistry {
+  constructor(private readonly stepBuilder: (intent: ParsedIntent) => WorkflowStep[]) {}
+
+  public get(_operation: IntentCategory, intent: ParsedIntent): WorkflowTemplate {
+    const steps = this.stepBuilder(intent);
+    return {
+      steps,
+      fallbacks: this.buildFallbacks(intent),
+      eagerExpansions: this.buildEagerExpansions(intent)
+    };
+  }
+
+  private buildFallbacks(intent: ParsedIntent): FallbackStrategy[] {
+    if (intent.category === 'navigate' || intent.category === 'understand') {
+      return [{
+        name: 'BROADEN_SEARCH',
+        condition: 'search.output.results.length === 0',
+        steps: [
+          { id: 'fallback_search', tool: 'search_project', params: { query: intent.originalIntent } }
+        ]
+      }];
+    }
+    return [];
+  }
+
+  private buildEagerExpansions(intent: ParsedIntent): EagerExpansion[] {
+    if (intent.category === 'navigate') {
+      return [{
+        trigger: 'search.output.results.length === 1',
+        steps: [
+          { id: 'eager_profile', tool: 'file_profiler', params: {}, inputFrom: 'search.output.results[0].path' }
+        ]
+      }];
+    }
+    if (intent.category === 'understand') {
+      return [{
+        trigger: 'include.hotSpots === true',
+        steps: [{ id: 'eager_hotspots', tool: 'hotspot_detector', params: {}, parallel: true }]
+      }];
+    }
+    return [];
+  }
 }
 
 /**
  * WorkflowPlanner: 의도에 맞춰 최적의 도구 실행 계획(Workflow)을 생성합니다.
  */
 export class WorkflowPlanner {
+  private readonly templates = new WorkflowTemplateRegistry((intent) => this.getTemplateSteps(intent));
   /**
    * 의도와 컨텍스트를 분석하여 실행 계획을 수립합니다.
    */
   public plan(intent: ParsedIntent): WorkflowPlan {
-    const steps = this.getTemplateSteps(intent);
+    const template = this.templates.get(intent.category, intent);
+    const steps = template.steps;
     
-    return {
+    const plan: WorkflowPlan = {
       steps,
-      parallelizableGroups: this.identifyParallelGroups(steps)
+      parallelizableGroups: this.identifyParallelGroups(steps),
+      parallelizable: this.identifyParallelGroups(steps),
+      fallbacks: template.fallbacks ?? [],
+      eagerExpansions: template.eagerExpansions ?? []
     };
+    return plan;
   }
 
   private getTemplateSteps(intent: ParsedIntent): WorkflowStep[] {
@@ -41,7 +111,6 @@ export class WorkflowPlanner {
         return [
           { id: 'search', tool: 'search_project', params: { query: subject, type: 'symbol' } },
           { id: 'read_skeleton', tool: 'read_code', params: { view: 'skeleton' }, inputFrom: 'search.output.results[0].path' },
-          { id: 'analyze_calls', tool: 'analyze_relationship', params: { mode: 'calls', direction: 'both', maxDepth: 2 }, inputFrom: 'search.output.results[0].path' },
           { id: 'hotspots', tool: 'hotspot_detector', params: {}, parallel: true }
         ];
 

@@ -41,6 +41,7 @@ import { GhostInterfaceBuilder } from "./resolution/GhostInterfaceBuilder.js";
 import { FallbackResolver } from "./resolution/FallbackResolver.js";
 import { CallSiteAnalyzer } from "./ast/analysis/CallSiteAnalyzer.js";
 import { HotSpotDetector } from "./engine/ClusterSearch/HotSpotDetector.js";
+import { ReferenceFinder } from "./ast/ReferenceFinder.js";
 
 // Orchestration Imports
 import { OrchestrationEngine } from "./orchestration/OrchestrationEngine.js";
@@ -70,6 +71,8 @@ export class SmartContextServer {
     private callGraphBuilder: CallGraphBuilder;
     private typeDependencyTracker: TypeDependencyTracker;
     private dataFlowTracer: DataFlowTracer;
+    private moduleResolver: ModuleResolver;
+    private referenceFinder: ReferenceFinder;
     private contextEngine: ContextEngine;
     private fileVersionManager: FileVersionManager;
     private pathNormalizer: PathNormalizer;
@@ -101,13 +104,20 @@ export class SmartContextServer {
         this.skeletonCache = new SkeletonCache(this.rootPath);
         this.indexDatabase = new IndexDatabase(this.rootPath);
         this.symbolIndex = new SymbolIndex(this.rootPath, this.skeletonGenerator, [], this.indexDatabase);
-        const moduleResolver = new ModuleResolver(this.rootPath);
-        this.dependencyGraph = new DependencyGraph(this.rootPath, this.symbolIndex, moduleResolver, this.indexDatabase);
-        this.callGraphBuilder = new CallGraphBuilder(this.rootPath, this.symbolIndex, moduleResolver);
+        this.moduleResolver = new ModuleResolver(this.rootPath);
+        this.dependencyGraph = new DependencyGraph(this.rootPath, this.symbolIndex, this.moduleResolver, this.indexDatabase);
+        this.callGraphBuilder = new CallGraphBuilder(this.rootPath, this.symbolIndex, this.moduleResolver);
         this.typeDependencyTracker = new TypeDependencyTracker(this.rootPath, this.symbolIndex);
         this.dataFlowTracer = new DataFlowTracer(this.rootPath, this.symbolIndex, this.fileSystem);
         this.impactAnalyzer = new ImpactAnalyzer(this.dependencyGraph, this.callGraphBuilder, this.symbolIndex);
         this.hotSpotDetector = new HotSpotDetector(this.symbolIndex, this.dependencyGraph);
+        this.referenceFinder = new ReferenceFinder(
+            this.rootPath,
+            this.dependencyGraph,
+            this.symbolIndex,
+            this.skeletonGenerator,
+            this.moduleResolver
+        );
         
         this.searchEngine = new SearchEngine(this.rootPath, this.fileSystem, [], {
             symbolIndex: this.symbolIndex,
@@ -171,6 +181,7 @@ export class SmartContextServer {
         this.internalRegistry.register('impact_analyzer', (args) => this.executeImpactAnalyzer(args));
         this.internalRegistry.register('edit_coordinator', (args) => this.executeEditCoordinator(args));
         this.internalRegistry.register('hotspot_detector', () => this.hotSpotDetector.detectHotSpots());
+        this.internalRegistry.register('reference_finder', (args) => this.findReferencesRaw(args));
     }
 
     private setupHandlers(): void {
@@ -559,7 +570,17 @@ export class SmartContextServer {
     }
 
     private jsonResponse(payload: any): any {
-        return { content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }] };
+        return { content: [{ type: 'text', text: JSON.stringify(payload, this.jsonReplacer, 2) }] };
+    }
+
+    private jsonReplacer(_key: string, value: any): any {
+        if (value instanceof Map) {
+            return { __type: "Map", entries: Array.from(value.entries()) };
+        }
+        if (value instanceof Set) {
+            return { __type: "Set", values: Array.from(value.values()) };
+        }
+        return value;
     }
 
     private textResponse(text: string): any {
@@ -579,6 +600,19 @@ export class SmartContextServer {
 
     private resolveAbsolutePath(inputPath: string): string {
         return this.pathNormalizer.toAbsolute(this.resolveRelativePath(inputPath));
+    }
+
+    private normalizeSuggestedTestPath(testPath: string): string {
+        if (!testPath) return testPath;
+        const normalized = path.normalize(testPath);
+        if (path.isAbsolute(normalized)) {
+            if (normalized.startsWith(this.rootPath)) {
+                const relative = path.relative(this.rootPath, normalized);
+                return this.resolveRelativePath(relative);
+            }
+            return normalized;
+        }
+        return this.resolveRelativePath(normalized);
     }
 
     private parseLineRanges(raw?: string): Array<{ start: number; end: number }> {
@@ -1161,15 +1195,51 @@ export class SmartContextServer {
                     }
                     const absPath = this.resolveAbsolutePath(target);
                     const report = await this.impactAnalyzer.analyzeImpact(absPath, []);
+                    const suggestedTests = Array.isArray(report?.suggestedTests)
+                        ? report.suggestedTests.map(testPath => this.normalizeSuggestedTestPath(testPath))
+                        : [];
                     return {
                         success: true,
                         output: "Suggested tests generated.",
-                        suggestedTests: report?.suggestedTests ?? []
+                        suggestedTests
                     };
                 }
             default:
                 return { success: false, output: `Unknown manage_project command: ${command}` };
         }
+    }
+
+    private async findReferencesRaw(args: any) {
+        const symbolName = args?.symbolName ?? args?.symbol ?? args?.target;
+        if (!symbolName) {
+            return { success: false, message: "symbolName is required." };
+        }
+
+        const definitionPath = args?.definitionPath ?? args?.filePath ?? args?.contextPath;
+        let resolvedDefinition: string | undefined;
+        if (definitionPath) {
+            resolvedDefinition = this.resolveAbsolutePath(definitionPath);
+        } else {
+            const matches = await this.symbolIndex.search(symbolName);
+            if (matches.length > 0) {
+                resolvedDefinition = path.isAbsolute(matches[0].filePath)
+                    ? matches[0].filePath
+                    : this.resolveAbsolutePath(matches[0].filePath);
+            }
+        }
+
+        if (!resolvedDefinition) {
+            return { success: false, message: `Symbol '${symbolName}' not found.` };
+        }
+
+        await this.dependencyGraph.ensureBuilt();
+        const references = await this.referenceFinder.findReferences(symbolName, resolvedDefinition);
+        return {
+            success: true,
+            symbolName,
+            definitionFile: this.resolveRelativePath(resolvedDefinition),
+            references
+        };
     }
 
     private async readFileRaw(args: any) {
