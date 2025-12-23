@@ -10,14 +10,10 @@
 
 Agent requests to modify 5 files:
 ```
-edit_code({
-  edits: [
-    { filePath: "src/a.ts", targetString: "...", ... },
-    { filePath: "src/b.ts", targetString: "...", ... },
-    { filePath: "src/c.ts", targetString: "...", ... },
-    { filePath: "src/d.ts", targetString: "...", ... },
-    { filePath: "src/e.ts", targetString: "...", ... }
-  ]
+change({
+  intent: "Apply the planned edits across these files",
+  options: { dryRun: false },
+  targetFiles: ["src/a.ts", "src/b.ts", "src/c.ts", "src/d.ts", "src/e.ts"]
 })
 ```
 
@@ -37,7 +33,7 @@ What if server crashes after modifying file 3?
 
 ```
 STATE 1: SNAPSHOT
-├─ Agent calls: edit_code([5 edits])
+├─ Agent calls: change(...)
 ├─ Server captures:
 │  - Original file content
 │  - Hash of each file (xxHash64)
