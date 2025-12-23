@@ -402,6 +402,7 @@ export class SymbolIndex {
                 });
             }
         }, 500);
+        this.updateDebounceTimer.unref?.();
     }
 
     public async flush(): Promise<void> {

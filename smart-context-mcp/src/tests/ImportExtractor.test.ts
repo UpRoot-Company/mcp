@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeEach } from '@jest/globals';
+import { describe, test, expect, beforeEach, jest } from '@jest/globals';
 import { ImportExtractor } from '../ast/ImportExtractor.js';
 import * as fs from 'fs/promises';
 import * as path from 'path';
@@ -147,5 +147,21 @@ export class QuantumParticle extends BaseParticle {\n  // ...\n}\n    `);
     expect(imports[1].what).toEqual(['IR', 'calculateIRs']);
     expect(imports[2].what).toEqual(['Sample']);
     expect(imports[3].what).toEqual(['BaseParticle']);
+  });
+
+  test('should ignore non JS/TS files without parsing errors', async () => {
+    const filePath = path.join(testDir, 'native_activity_apk.py');
+    await fs.writeFile(filePath, `#!/usr/bin/env python3\nprint("hello")\n`);
+
+    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const imports = await extractor.extractImports(filePath);
+      expect(imports).toEqual([]);
+      expect(errorSpy).not.toHaveBeenCalled();
+    } finally {
+      errorSpy.mockRestore();
+      warnSpy.mockRestore();
+    }
   });
 });

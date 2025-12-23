@@ -58,7 +58,7 @@ export class SkeletonCache {
             return diskCached.skeleton;
         }
 
-                this.misses++;
+        this.misses++;
         const skeleton = await generator(filePath, options);
         const cached: CachedSkeleton = { mtime, skeleton, optionsHash };
         this.memoryCache.set(cacheKey, cached);
@@ -71,7 +71,6 @@ export class SkeletonCache {
 
         this.pendingWrites.add(writePromise);
         return skeleton;
-
     }
 
     public async invalidate(filePath: string): Promise<void> {
@@ -86,14 +85,21 @@ export class SkeletonCache {
         await fs.rm(dirPath, { recursive: true, force: true });
     }
 
-        public async clearAll(): Promise<void> {
+    public async clearAll(): Promise<void> {
+        await this.flushPendingWrites();
         this.memoryCache.clear();
         await fs.rm(this.diskCacheDir, { recursive: true, force: true });
     }
 
     public async close(): Promise<void> {
-        await Promise.all(Array.from(this.pendingWrites));
+        await this.flushPendingWrites();
         this.memoryCache.clear();
+    }
+
+    private async flushPendingWrites(): Promise<void> {
+        const writes = Array.from(this.pendingWrites);
+        this.pendingWrites.clear();
+        await Promise.all(writes);
     }
 
 

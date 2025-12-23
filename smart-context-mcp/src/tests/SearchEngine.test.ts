@@ -44,8 +44,8 @@ describe("SearchEngine trigram index integration", () => {
         await searchEngine.warmup();
     });
 
-    afterAll(async () => {
-        searchEngine.dispose();
+    afterEach(async () => {
+        await searchEngine.dispose();
         AstManager.resetForTesting();
     });
 

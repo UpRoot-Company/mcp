@@ -457,6 +457,7 @@ export class TrigramIndex {
         }
         if (this.persistTimer) clearTimeout(this.persistTimer);
         this.persistTimer = setTimeout(() => void this.persistIndex(), 5000);
+        this.persistTimer.unref?.();
     }
 
     private async persistIndex(): Promise<void> {
