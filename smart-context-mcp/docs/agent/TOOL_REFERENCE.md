@@ -94,6 +94,7 @@ Find symbols/files with context-aware filtering.
 
 **Output (key fields)**
 
+- `success`, `status`
 - `locations[]`: `{ filePath, line, snippet, relevance, type, pageRank, isHotSpot }`
 - `relatedSymbols[]`, `codePreview`, `smartProfile` (single-result only)
 - `insights`, `visualization`, `guidance`, `internalToolsUsed`
@@ -122,6 +123,7 @@ Read content with optional profile/hash and symbol-to-file resolution.
 
 **Output (key fields)**
 
+- `success`, `status`
 - `content`, `metadata` (filePath, hash, lineCount, language)
 - `profile` (optional), `skeleton` (if view is skeleton)
 - `guidance`, `insights`, `visualization`, `internalToolsUsed`
@@ -182,7 +184,7 @@ Create or overwrite files from intent/template.
 
 **Output (key fields)**
 
-- `success`, `createdFiles[]`, `transactionId`
+- `success`, `status`, `createdFiles[]`, `transactionId`
 - `guidance`, `insights`, `visualization`, `internalToolsUsed`
 
 ---

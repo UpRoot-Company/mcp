@@ -17,6 +17,11 @@ export class UnderstandPillar {
     const explicitPath = this.extractPath(subject) ?? (typeof originalIntent === 'string' ? this.extractPath(originalIntent) : null);
     const symbolHint = this.extractSymbol(subject) ?? (typeof originalIntent === 'string' ? this.extractSymbol(originalIntent) : null);
     let resolvedPath = explicitPath;
+    const progressEnabled = this.shouldLogProgress(constraints);
+    const progress = { enabled: progressEnabled, label: 'Understand' };
+    const startedAt = Date.now();
+
+    this.progressLog(progressEnabled, `Start subject="${subject}" depth=${depth}.`);
 
     // 1. 초기 검색 수행
     let searchResult = { results: [] as any[] };
@@ -25,7 +30,7 @@ export class UnderstandPillar {
         query: explicitPath,
         type: 'filename',
         maxResults: 5
-      });
+      }, progress);
       if (fileMatches?.results?.length) {
         resolvedPath = fileMatches.results[0].path;
       }
@@ -36,13 +41,13 @@ export class UnderstandPillar {
         query: subject, 
         type: constraints.scope === 'project' ? 'file' : 'symbol',
         maxResults: 5
-      });
+      }, progress);
       if (!searchResult.results || searchResult.results.length === 0) {
         searchResult = await this.runTool(context, 'search_project', { 
           query: subject, 
           type: 'file',
           maxResults: 5
-        });
+        }, progress);
       }
     }
 
@@ -58,7 +63,7 @@ export class UnderstandPillar {
         query: symbolHint,
         type: 'symbol',
         maxResults: 10
-      });
+      }, progress);
       const match = symbolMatches?.results?.find((result: any) => result.path === filePath) ?? symbolMatches?.results?.[0];
       if (match?.symbol?.name) {
         symbolName = match.symbol.name;
@@ -68,9 +73,11 @@ export class UnderstandPillar {
       }
     }
 
-        // 2. Parallel Deep Data Collection (Eager Loading)
+    this.progressLog(progressEnabled, `Resolved filePath="${filePath}" symbol="${symbolName ?? ''}".`);
+
+    // 2. Parallel Deep Data Collection (Eager Loading)
     const [skeleton, calls, deps, hotSpots, profile] = await Promise.all([
-      this.runTool(context, 'read_code', { filePath, view: 'skeleton' }),
+      this.runTool(context, 'read_code', { filePath, view: 'skeleton' }, progress),
       includeCalls && symbolName ?
         this.runTool(context, 'analyze_relationship', { 
           target: symbolName,
@@ -78,22 +85,24 @@ export class UnderstandPillar {
           mode: 'calls', 
           direction: 'both', 
           maxDepth: depth === 'deep' ? 3 : 1 
-        }) : Promise.resolve(null),
+        }, progress) : Promise.resolve(null),
       includeDependencies ?
         this.runTool(context, 'analyze_relationship', { 
           target: filePath, 
           mode: 'dependencies', 
           direction: 'both' 
-        }) : Promise.resolve(null),
+        }, progress) : Promise.resolve(null),
       include.hotSpots === true
-        ? this.runTool(context, 'hotspot_detector', {})
+        ? this.runTool(context, 'hotspot_detector', {}, progress)
         : Promise.resolve([]),
-      this.runTool(context, 'file_profiler', { filePath })
+      this.runTool(context, 'file_profiler', { filePath }, progress)
     ]);
 
 
         // 3. Synthesize Response (Advanced synthesis in Phase 3)
     const status = includeCalls && !symbolName ? 'partial_success' : 'ok';
+    const elapsedMs = Date.now() - startedAt;
+    this.progressLog(progressEnabled, `Completed in ${elapsedMs}ms.`);
     return {
       success: true,
       status,
@@ -184,17 +193,39 @@ export class UnderstandPillar {
     return null;
   }
 
-  private async runTool(context: OrchestrationContext, tool: string, args: any) {
+  private async runTool(
+    context: OrchestrationContext,
+    tool: string,
+    args: any,
+    progress?: { enabled: boolean; label: string }
+  ) {
     const started = Date.now();
+    if (progress?.enabled) {
+      console.info(`[${progress.label}] ${tool} start.`);
+    }
     const output = await this.registry.execute(tool, args);
+    const duration = Date.now() - started;
+    if (progress?.enabled) {
+      console.info(`[${progress.label}] ${tool} done in ${duration}ms.`);
+    }
     context.addStep({
       id: `${tool}_${context.getFullHistory().length + 1}`,
       tool,
       args,
       output,
       status: output?.success === false || output?.isError ? 'failure' : 'success',
-      duration: Date.now() - started
+      duration
     });
     return output;
+  }
+
+  private shouldLogProgress(constraints: any): boolean {
+    const flag = process.env.SMART_CONTEXT_PROGRESS_LOGS;
+    return constraints?.progress === true || flag === 'true' || flag === '1';
+  }
+
+  private progressLog(enabled: boolean, message: string): void {
+    if (!enabled) return;
+    console.info(`[Understand] ${message}`);
   }
 }

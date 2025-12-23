@@ -1,4 +1,5 @@
 const ENABLE_DEBUG_LOGS = process.env.SMART_CONTEXT_DEBUG === "true";
+const ENV_LOG_LEVEL = (process.env.SMART_CONTEXT_LOG_LEVEL ?? "").toLowerCase();
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
 
@@ -10,8 +11,17 @@ export interface Logger {
 }
 
 export function createLogger(component: string): Logger {
+    const levelPriority: Record<LogLevel, number> = {
+        debug: 10,
+        info: 20,
+        warn: 30,
+        error: 40
+    };
+    const configuredLevel = (ENV_LOG_LEVEL && Object.prototype.hasOwnProperty.call(levelPriority, ENV_LOG_LEVEL))
+        ? (ENV_LOG_LEVEL as LogLevel)
+        : (ENABLE_DEBUG_LOGS ? "debug" : "info");
     const log = (level: LogLevel, message: string, fields?: Record<string, unknown>) => {
-        if (level === "debug" && !ENABLE_DEBUG_LOGS) {
+        if (levelPriority[level] < levelPriority[configuredLevel]) {
             return;
         }
         const payload = {
@@ -35,4 +45,3 @@ export function createLogger(component: string): Logger {
         error: (message, fields) => log("error", message, fields)
     };
 }
-

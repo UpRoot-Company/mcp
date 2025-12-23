@@ -94,13 +94,28 @@ export class DependencyGraph {
         this.lastRebuiltAt = Date.now();
     }
 
-    public async build(): Promise<void> {
+    public async build(options: { logEvery?: number } = {}): Promise<void> {
         const symbolMap = await this.symbolIndex.getAllSymbols();
+        const total = symbolMap.size;
+        const logEvery = options.logEvery ?? 200;
+        let processed = 0;
+        let lastLogged = 0;
+        const startedAt = Date.now();
+
+        this.log('info', `[DependencyGraph] Rebuild started (${total} files).`);
         for (const [pathOrRel, _] of symbolMap) {
             const absPath = path.isAbsolute(pathOrRel) ? pathOrRel : path.join(this.rootPath, pathOrRel);
             await this.updateFileDependencies(absPath);
+            processed += 1;
+            if (processed - lastLogged >= logEvery) {
+                lastLogged = processed;
+                const percent = total > 0 ? Math.round((processed / total) * 100) : 100;
+                this.log('info', `[DependencyGraph] Rebuild progress ${processed}/${total} (${percent}%).`);
+            }
         }
         this.lastRebuiltAt = Date.now();
+        const elapsedMs = Date.now() - startedAt;
+        this.log('info', `[DependencyGraph] Rebuild completed ${processed}/${total} in ${elapsedMs}ms.`);
     }
 
     public async updateFileDependencies(filePath: string): Promise<void> {

@@ -8,6 +8,7 @@ import * as path from "path";
 import ignore from "ignore";
 import * as url from "url";
 import * as crypto from "crypto";
+import util from "util";
 
 // Engine Imports
 import { SearchEngine } from "./engine/Search.js";
@@ -82,6 +83,18 @@ export class SmartContextServer {
     private clusterSearchEngine: ClusterSearchEngine;
     private impactAnalyzer: ImpactAnalyzer;
     private indexDatabase: IndexDatabase;
+    private logStream?: fs.WriteStream;
+    private logStreams?: {
+        console: fs.WriteStream;
+        warn: fs.WriteStream;
+        error: fs.WriteStream;
+        stdout: fs.WriteStream;
+        stderr: fs.WriteStream;
+    };
+    private diagnosticsInitialized = false;
+    private reindexInProgress = false;
+    private reindexLastResult?: { success: boolean; output: string; startedAt: string; finishedAt?: string };
+    private heartbeatTimer?: NodeJS.Timeout;
 
     constructor(rootPath: string) {
         this.server = new Server({
@@ -94,16 +107,20 @@ export class SmartContextServer {
         this.rootPath = path.resolve(rootPath);
         PathManager.setRoot(this.rootPath);
         this.fileSystem = new NodeFileSystem(this.rootPath);
+        this.initFileLogger();
+        this.initProcessDiagnostics();
         this.astManager = AstManager.getInstance();
         this.pathNormalizer = new PathNormalizer(this.rootPath);
-        const ignoreFilter = (ignore as unknown as () => any)();
+        this.configurationManager = new ConfigurationManager(this.rootPath);
+        const initialIgnorePatterns = this.configurationManager.getIgnoreGlobs();
+        const ignoreFilter = this.createIgnoreFilter(initialIgnorePatterns);
         this.contextEngine = new ContextEngine(ignoreFilter, this.fileSystem);
         
         // Initialize Core Engines
         this.skeletonGenerator = new SkeletonGenerator();
         this.skeletonCache = new SkeletonCache(this.rootPath);
         this.indexDatabase = new IndexDatabase(this.rootPath);
-        this.symbolIndex = new SymbolIndex(this.rootPath, this.skeletonGenerator, [], this.indexDatabase);
+        this.symbolIndex = new SymbolIndex(this.rootPath, this.skeletonGenerator, initialIgnorePatterns, this.indexDatabase);
         this.moduleResolver = new ModuleResolver(this.rootPath);
         this.dependencyGraph = new DependencyGraph(this.rootPath, this.symbolIndex, this.moduleResolver, this.indexDatabase);
         this.callGraphBuilder = new CallGraphBuilder(this.rootPath, this.symbolIndex, this.moduleResolver);
@@ -146,7 +163,10 @@ export class SmartContextServer {
         });
 
         this.fileVersionManager = new FileVersionManager(this.fileSystem);
-        this.configurationManager = new ConfigurationManager(this.rootPath);
+        this.applyIgnorePatterns(initialIgnorePatterns);
+        this.configurationManager.on("ignoreChanged", (payload) => {
+            this.applyIgnorePatterns(payload?.patterns ?? []);
+        });
         this.ghostInterfaceBuilder = new GhostInterfaceBuilder(
             this.searchEngine,
             new CallSiteAnalyzer(),
@@ -168,6 +188,7 @@ export class SmartContextServer {
 
         this.registerInternalTools();
         this.setupHandlers();
+        this.startHeartbeat();
     }
 
     private registerInternalTools(): void {
@@ -192,6 +213,167 @@ export class SmartContextServer {
         this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
             return this.handleCallTool(request.params.name, request.params.arguments);
         });
+    }
+
+    private initFileLogger(): void {
+        if (this.logStream) return;
+        const enabled = process.env.SMART_CONTEXT_LOG_TO_FILE === "true" || !!process.env.SMART_CONTEXT_LOG_FILE;
+        if (!enabled) return;
+        const singleFilePath = process.env.SMART_CONTEXT_LOG_FILE;
+        const logDir = process.env.SMART_CONTEXT_LOG_DIR
+            || path.join(this.rootPath, ".smart-context", "logs");
+        try {
+            if (singleFilePath) {
+                fs.mkdirSync(path.dirname(singleFilePath), { recursive: true });
+                this.logStream = fs.createWriteStream(singleFilePath, { flags: "a" });
+            } else {
+                fs.mkdirSync(logDir, { recursive: true });
+                this.logStreams = {
+                    console: fs.createWriteStream(path.join(logDir, "console.log"), { flags: "a" }),
+                    warn: fs.createWriteStream(path.join(logDir, "console.warn.log"), { flags: "a" }),
+                    error: fs.createWriteStream(path.join(logDir, "console.error.log"), { flags: "a" }),
+                    stdout: fs.createWriteStream(path.join(logDir, "stdout.log"), { flags: "a" }),
+                    stderr: fs.createWriteStream(path.join(logDir, "stderr.log"), { flags: "a" })
+                };
+            }
+        } catch (error) {
+            console.warn("[SmartContextServer] Failed to initialize file logger:", error);
+            return;
+        }
+
+        const writeLine = (level: string, args: unknown[], stream?: fs.WriteStream) => {
+            const target = stream ?? this.logStream;
+            if (!target) return;
+            const timestamp = new Date().toISOString();
+            const message = util.format(...args);
+            target.write(`[${timestamp}] [${level}] ${message}\n`);
+        };
+
+        const wrap = (level: string, original: (...args: unknown[]) => void, stream?: fs.WriteStream) => {
+            return (...args: unknown[]) => {
+                original(...args);
+                writeLine(level, args, stream);
+            };
+        };
+
+        console.log = wrap("log", console.log.bind(console), this.logStreams?.console);
+        console.info = wrap("info", console.info.bind(console), this.logStreams?.console);
+        console.debug = wrap("debug", console.debug.bind(console), this.logStreams?.console);
+        console.warn = wrap("warn", console.warn.bind(console), this.logStreams?.warn);
+        console.error = wrap("error", console.error.bind(console), this.logStreams?.error);
+
+        const stdoutWrite = process.stdout.write.bind(process.stdout);
+        const stderrWrite = process.stderr.write.bind(process.stderr);
+        const teeStream = (level: string, original: typeof stdoutWrite, stream?: fs.WriteStream) => {
+            return (chunk: any, encoding?: any, cb?: any) => {
+                try {
+                    const target = stream ?? this.logStream;
+                    if (target) {
+                        const timestamp = new Date().toISOString();
+                        const text = typeof chunk === "string" ? chunk : chunk?.toString?.(encoding) ?? "";
+                        if (text.length > 0) {
+                            const lines = text.replace(/\r?\n$/, "").split(/\r?\n/);
+                            for (const line of lines) {
+                                if (line.length === 0) continue;
+                                target.write(`[${timestamp}] [${level}] ${line}\n`);
+                            }
+                        }
+                    }
+                } catch {
+                    // ignore
+                }
+                return original(chunk, encoding as any, cb as any);
+            };
+        };
+
+        process.stdout.write = teeStream("stdout", stdoutWrite, this.logStreams?.stdout) as typeof process.stdout.write;
+        process.stderr.write = teeStream("stderr", stderrWrite, this.logStreams?.stderr) as typeof process.stderr.write;
+
+        process.on("exit", () => {
+            try {
+                this.logStream?.end();
+                if (this.logStreams) {
+                    this.logStreams.console.end();
+                    this.logStreams.warn.end();
+                    this.logStreams.error.end();
+                    this.logStreams.stdout.end();
+                    this.logStreams.stderr.end();
+                }
+            } catch {
+                // ignore
+            }
+        });
+    }
+
+    private initProcessDiagnostics(): void {
+        if (this.diagnosticsInitialized) return;
+        this.diagnosticsInitialized = true;
+
+        const logMemory = (label: string) => {
+            try {
+                const mem = process.memoryUsage();
+                const mb = (value: number) => Math.round((value / (1024 * 1024)) * 100) / 100;
+                console.warn(`[Process] ${label} rss=${mb(mem.rss)}MB heapUsed=${mb(mem.heapUsed)}MB heapTotal=${mb(mem.heapTotal)}MB ext=${mb(mem.external)}MB`);
+            } catch {
+                // ignore
+            }
+        };
+
+        process.on("uncaughtException", (err) => {
+            console.error("[Process] uncaughtException", err);
+            logMemory("uncaughtException");
+        });
+        process.on("unhandledRejection", (reason) => {
+            console.error("[Process] unhandledRejection", reason);
+            logMemory("unhandledRejection");
+        });
+        process.on("warning", (warning) => {
+            console.warn("[Process] warning", warning);
+        });
+        process.on("exit", (code) => {
+            console.warn(`[Process] exit code=${code}`);
+            logMemory("exit");
+        });
+        process.on("SIGTERM", () => {
+            console.warn("[Process] SIGTERM received");
+            logMemory("SIGTERM");
+        });
+        process.on("SIGINT", () => {
+            console.warn("[Process] SIGINT received");
+            logMemory("SIGINT");
+        });
+        process.on("SIGHUP", () => {
+            console.warn("[Process] SIGHUP received");
+            logMemory("SIGHUP");
+        });
+    }
+
+    private startHeartbeat(): void {
+        if (this.heartbeatTimer) return;
+        const enabled = process.env.SMART_CONTEXT_HEARTBEAT !== "false";
+        if (!enabled) return;
+        this.heartbeatTimer = setInterval(() => {
+            try {
+                console.warn("[Heartbeat] alive");
+            } catch {
+                // ignore
+            }
+        }, 5000);
+    }
+
+    private createIgnoreFilter(patterns: string[]): any {
+        const ig = (ignore as unknown as () => any)();
+        if (Array.isArray(patterns) && patterns.length > 0) {
+            ig.add(patterns);
+        }
+        return ig;
+    }
+
+    private applyIgnorePatterns(patterns: string[]): void {
+        const normalized = Array.isArray(patterns) ? patterns : [];
+        this.symbolIndex.updateIgnorePatterns(normalized);
+        this.contextEngine.updateIgnoreFilter(this.createIgnoreFilter(normalized));
+        void this.searchEngine.updateExcludeGlobs(normalized);
     }
 
     private listIntentTools(): any[] {
@@ -244,7 +426,7 @@ export class SmartContextServer {
                 inputSchema: {
                     type: 'object',
                     properties: {
-                        edits: { type: 'array' },
+                        edits: { type: 'array', items: { type: 'object' } },
                         dryRun: { type: 'boolean' },
                         diffMode: { type: 'string', enum: ['myers', 'semantic'] }
                     },
@@ -256,7 +438,7 @@ export class SmartContextServer {
                 description: 'Suggests batch edit groupings and companion changes.',
                 inputSchema: {
                     type: 'object',
-                    properties: { filePaths: { type: 'array' }, pattern: { type: 'string' } },
+                    properties: { filePaths: { type: 'array', items: { type: 'string' } }, pattern: { type: 'string' } },
                     required: ['filePaths']
                 }
             },
@@ -315,7 +497,7 @@ export class SmartContextServer {
                         intent: { type: 'string' },
                         target: { type: 'string' },
                         targetFiles: { type: 'array', items: { type: 'string' } },
-                        edits: { type: 'array' },
+                        edits: { type: 'array', items: { type: 'object' } },
                         options: {
                             type: 'object',
                             properties: {
@@ -648,14 +830,19 @@ export class SmartContextServer {
         }
 
         const skeletonOptions = args?.skeletonOptions ?? {};
-        return this.skeletonCache.getSkeleton(
-            absPath,
-            skeletonOptions,
-            async (targetPath, options) => {
-                const content = await this.fileSystem.readFile(filePath);
-                return this.skeletonGenerator.generateSkeleton(targetPath, content, options);
-            }
-        );
+        try {
+            return await this.skeletonCache.getSkeleton(
+                absPath,
+                skeletonOptions,
+                async (targetPath, options) => {
+                    const content = await this.fileSystem.readFile(filePath);
+                    return this.skeletonGenerator.generateSkeleton(targetPath, content, options);
+                }
+            );
+        } catch (error: any) {
+            const content = await this.fileSystem.readFile(filePath);
+            return this.buildSkeletonFallback(content, error?.message);
+        }
     }
 
     private async searchProjectRaw(args: any) {
@@ -1185,10 +1372,14 @@ export class SmartContextServer {
                             status: {
                                 global: status.global,
                                 unresolvedSample
+                            },
+                            activity: {
+                                reindexInProgress: this.reindexInProgress,
+                                lastReindex: this.reindexLastResult
                             }
                         };
                     } finally {
-                        if (suppressLogs) {
+                        if (suppressLogs && !this.reindexInProgress) {
                             this.dependencyGraph.setLoggingEnabled(true);
                         }
                     }
@@ -1200,10 +1391,59 @@ export class SmartContextServer {
                         this.dependencyGraph.setLoggingEnabled(false);
                     }
                     try {
-                        await this.skeletonCache.clearAll();
-                        await this.searchEngine.rebuild();
-                        await this.dependencyGraph.build();
-                        return { success: true, output: "Reindex completed." };
+                        if (this.reindexInProgress) {
+                            return { success: false, output: "Reindex already in progress." };
+                        }
+                        const startedAt = new Date();
+                        this.reindexInProgress = true;
+                        this.reindexLastResult = {
+                            success: false,
+                            output: "Reindex in progress.",
+                            startedAt: startedAt.toISOString()
+                        };
+                        if (!suppressLogs) {
+                            console.info(`[SmartContextServer] CWD: ${process.cwd()}`);
+                            console.info('[SmartContextServer] Reindex started.');
+                            const excludes = this.searchEngine.getExcludeGlobs();
+                            console.info(`[SmartContextServer] Excluding ${excludes.length} patterns.`);
+                            for (const pattern of excludes) {
+                                console.info(`[SmartContextServer] exclude: ${pattern}`);
+                            }
+                        }
+                        void (async () => {
+                            try {
+                                await this.skeletonCache.clearAll();
+                                const progressLogger = suppressLogs ? undefined : (message: string) => console.info(message);
+                                await this.searchEngine.rebuild({ logEvery: 500, logger: progressLogger, logTotals: true });
+                                await this.dependencyGraph.build({ logEvery: 200 });
+                                const finishedAt = new Date();
+                                this.reindexLastResult = {
+                                    success: true,
+                                    output: "Reindex completed.",
+                                    startedAt: startedAt.toISOString(),
+                                    finishedAt: finishedAt.toISOString()
+                                };
+                                if (!suppressLogs) {
+                                    const elapsedMs = finishedAt.getTime() - startedAt.getTime();
+                                    console.info(`[SmartContextServer] Reindex completed in ${elapsedMs}ms.`);
+                                }
+                            } catch (error: any) {
+                                const finishedAt = new Date();
+                                this.reindexLastResult = {
+                                    success: false,
+                                    output: error?.message ?? "Reindex failed.",
+                                    startedAt: startedAt.toISOString(),
+                                    finishedAt: finishedAt.toISOString()
+                                };
+                                console.error("[SmartContextServer] Reindex failed.", error);
+                            } finally {
+                                this.reindexInProgress = false;
+                                if (suppressLogs) {
+                                    this.dependencyGraph.setLoggingEnabled(true);
+                                }
+                            }
+                        })();
+                        return { success: true, output: "Reindex started.", activity: { reindexInProgress: true } };
                     } finally {
                         if (suppressLogs) {
                             this.dependencyGraph.setLoggingEnabled(true);
@@ -1493,7 +1733,7 @@ export class SmartContextServer {
 
         const transport = new StdioServerTransport();
         await this.server.connect(transport);
-        console.error("Smart Context MCP Server running on stdio");
+        console.error(`Smart Context MCP Server running on stdio (cwd=${process.cwd()})`);
     }
 }
 
@@ -1510,6 +1750,8 @@ const isDirectRun = (() => {
 })();
 
 if (isDirectRun) {
-    const server = new SmartContextServer(process.cwd());
+    const envRoot = process.env.SMART_CONTEXT_ROOT_PATH || process.env.SMART_CONTEXT_ROOT;
+    const resolvedRoot = envRoot && envRoot.trim().length > 0 ? envRoot : process.cwd();
+    const server = new SmartContextServer(resolvedRoot);
     server.run().catch(console.error);
 }

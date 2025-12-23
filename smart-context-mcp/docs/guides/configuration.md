@@ -17,7 +17,7 @@ Control Smart Context behavior via environment variables.
 | `SMART_CONTEXT_ROOT` | string | `process.cwd()` | Project root directory for analysis |
 | `SMART_CONTEXT_DEBUG` | boolean | `false` | Enable debug logging to console |
 | `SMART_CONTEXT_ENGINE_PROFILE` | enum | `production` | `production` \| `ci` \| `test` (see below) |
-| `SMART_CONTEXT_LOG_LEVEL` | enum | `info` | `debug` \| `info` \| `warn` \| `error` |
+| `SMART_CONTEXT_LOG_LEVEL` | enum | `info` | `debug` \| `info` \| `warn` \| `error` (minimum level for structured logs; overrides `SMART_CONTEXT_DEBUG` when set) |
 | `SMART_CONTEXT_ALLOW_STDOUT_LOGS` | boolean | `false` | Write logs to stdout (disables MCP-safe log redirection). Use only outside MCP hosts. |
 
 > **Stdout guard:** By default Smart Context routes `console.log`/`console.info`/`console.debug` output to `stderr` so MCP transports can use stdout exclusively for protocol frames. Set `SMART_CONTEXT_ALLOW_STDOUT_LOGS=true` only when you need legacy stdout logging (for example when running the CLI outside an MCP host).
@@ -47,6 +47,7 @@ Control Smart Context behavior via environment variables.
 | `SMART_CONTEXT_PARSER_BACKEND` | enum | `auto` | `auto` \| `wasm` \| `js` \| `snapshot` (fallback chain) |
 | `SMART_CONTEXT_LANGUAGE_CONFIG` | string | `(built-in)` | Path to custom language configuration JSON |
 | `SMART_CONTEXT_DISABLE_WASM` | boolean | `false` | Force JavaScript parser instead of WASM |
+| `SMART_CONTEXT_WASM_DIR` | string | `(auto-detect)` | Override directory used to resolve bundled `tree-sitter-wasms` files (useful when running the MCP server from a different project) |
 
 ---
 

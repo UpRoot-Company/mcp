@@ -31,7 +31,6 @@ export const BUILTIN_LANGUAGE_MAPPINGS: Record<string, LanguageMapping> = {
     ".json": { languageId: "json", parserBackend: "web-tree-sitter" },
     ".yaml": { languageId: "yaml", parserBackend: "web-tree-sitter" },
     ".yml": { languageId: "yaml", parserBackend: "web-tree-sitter" },
-    ".md": { languageId: "markdown", parserBackend: "web-tree-sitter" },
     ".css": { languageId: "css", parserBackend: "web-tree-sitter" },
     ".scss": { languageId: "scss", parserBackend: "web-tree-sitter" }
 };

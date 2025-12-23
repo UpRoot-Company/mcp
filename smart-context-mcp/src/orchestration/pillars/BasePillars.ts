@@ -45,6 +45,8 @@ export class ReadPillar {
     };
 
     return {
+      success: true,
+      status: 'success',
       content,
       metadata,
       profile: includeProfile ? (profile ?? undefined) : undefined,
@@ -127,6 +129,7 @@ export class WritePillar {
     if (!targetPath) {
       return {
         success: false,
+        status: 'failure',
         createdFiles: [],
         transactionId: null,
         guidance: {
@@ -168,6 +171,7 @@ export class WritePillar {
     if (content === '' && existingContent === null) {
       return {
         success: true,
+        status: 'success',
         createdFiles: [{ path: resolvedPath, description: `Created from intent: ${originalIntent}` }],
         transactionId: null,
         guidance: {
@@ -197,6 +201,7 @@ export class WritePillar {
 
     return {
       success: editResult.success ?? true,
+      status: editResult.success === false ? 'failure' : 'success',
       createdFiles: [{ path: resolvedPath, description: `Written from intent: ${originalIntent}` }],
       transactionId: editResult.operation?.id ?? '',
       guidance: {

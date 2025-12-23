@@ -12,6 +12,11 @@ export class NavigatePillar {
     const target = targets[0] || originalIntent;
     const limit = constraints.limit || 10;
     const contextMode = constraints.context ?? 'all';
+    const progressEnabled = this.shouldLogProgress(constraints);
+    const progress = { enabled: progressEnabled, label: 'Navigate' };
+    const startedAt = Date.now();
+
+    this.progressLog(progressEnabled, `Start target="${target}" limit=${limit} context=${contextMode}.`);
 
     const searchArgs: any = {
       query: target,
@@ -20,13 +25,15 @@ export class NavigatePillar {
     if (contextMode === 'definitions') {
       searchArgs.type = 'symbol';
     }
-    const results = await this.runTool(context, 'search_project', searchArgs);
+    const results = await this.runTool(context, 'search_project', searchArgs, progress);
 
     let rawResults = results?.results ?? [];
-    rawResults = await this.applyContextFilter(context, target, contextMode, rawResults, limit);
-    const hotSpotSet = await this.loadHotSpotSet(context, rawResults);
-    const pageRankScores = await this.loadPageRankScores(context, rawResults);
-    const relatedSymbols = await this.loadRelatedSymbols(context, target);
+    this.progressLog(progressEnabled, `Search results: ${rawResults.length}.`);
+    rawResults = await this.applyContextFilter(context, target, contextMode, rawResults, limit, progress);
+    this.progressLog(progressEnabled, `Filtered results: ${rawResults.length}.`);
+    const hotSpotSet = await this.loadHotSpotSet(context, rawResults, progress);
+    const pageRankScores = await this.loadPageRankScores(context, rawResults, progress);
+    const relatedSymbols = await this.loadRelatedSymbols(context, target, progress);
 
     const locations = rawResults.map((item: any) => {
       const filePath = item.path ?? '';
@@ -51,6 +58,8 @@ export class NavigatePillar {
     });
 
     const response: any = {
+      success: true,
+      status: rawResults.length === 0 ? 'no_results' : 'success',
       locations,
       relatedSymbols,
       codePreview: locations[0]?.snippet,
@@ -59,39 +68,57 @@ export class NavigatePillar {
     // Eager Loading: 단일 결과인 경우 Smart File Profile 추가
     if (rawResults.length === 1) {
       const primary = rawResults[0];
-      const profile = await this.runTool(context, 'file_profiler', { filePath: primary.path });
+      const profile = await this.runTool(context, 'file_profiler', { filePath: primary.path }, progress);
       response.smartProfile = profile;
       if (primary?.path) {
-        const skeleton = await this.runTool(context, 'read_code', { filePath: primary.path, view: 'skeleton' });
+        const skeleton = await this.runTool(context, 'read_code', { filePath: primary.path, view: 'skeleton' }, progress);
         if (typeof skeleton === 'string') {
           response.codePreview = skeleton;
         }
       }
     }
 
+    const elapsedMs = Date.now() - startedAt;
+    this.progressLog(progressEnabled, `Completed in ${elapsedMs}ms.`);
     return response;
   }
 
-  private async runTool(context: OrchestrationContext, tool: string, args: any) {
+  private async runTool(
+    context: OrchestrationContext,
+    tool: string,
+    args: any,
+    progress?: { enabled: boolean; label: string }
+  ) {
     const started = Date.now();
+    if (progress?.enabled) {
+      console.info(`[${progress.label}] ${tool} start.`);
+    }
     const output = await this.registry.execute(tool, args);
+    const duration = Date.now() - started;
+    if (progress?.enabled) {
+      console.info(`[${progress.label}] ${tool} done in ${duration}ms.`);
+    }
     context.addStep({
       id: `${tool}_${context.getFullHistory().length + 1}`,
       tool,
       args,
       output,
       status: output?.success === false || output?.isError ? 'failure' : 'success',
-      duration: Date.now() - started
+      duration
     });
     return output;
   }
 
-  private async loadHotSpotSet(context: OrchestrationContext, results: any[]): Promise<Set<string>> {
+  private async loadHotSpotSet(
+    context: OrchestrationContext,
+    results: any[],
+    progress?: { enabled: boolean; label: string }
+  ): Promise<Set<string>> {
     if (results.length === 0) return new Set();
     if (results.length > 10) return new Set();
     let hotSpots: any = [];
     try {
-      hotSpots = await this.runTool(context, 'hotspot_detector', {});
+      hotSpots = await this.runTool(context, 'hotspot_detector', {}, progress);
     } catch {
       return new Set();
     }
@@ -104,7 +131,11 @@ export class NavigatePillar {
     return set;
   }
 
-  private async loadPageRankScores(context: OrchestrationContext, results: any[]): Promise<Map<string, number>> {
+  private async loadPageRankScores(
+    context: OrchestrationContext,
+    results: any[],
+    progress?: { enabled: boolean; label: string }
+  ): Promise<Map<string, number>> {
     if (results.length !== 1) return new Map();
     const targetPath = results[0]?.path;
     if (!targetPath) return new Map();
@@ -113,7 +144,7 @@ export class NavigatePillar {
         target: targetPath,
         mode: 'dependencies',
         direction: 'both'
-      });
+      }, progress);
       const edges = Array.isArray(deps?.edges) ? deps.edges : [];
       return this.computePageRankFromEdges(edges);
     } catch {
@@ -165,14 +196,18 @@ export class NavigatePillar {
     return ranks;
   }
 
-  private async loadRelatedSymbols(context: OrchestrationContext, target: string): Promise<string[]> {
+  private async loadRelatedSymbols(
+    context: OrchestrationContext,
+    target: string,
+    progress?: { enabled: boolean; label: string }
+  ): Promise<string[]> {
     if (!target) return [];
     try {
       const matches = await this.runTool(context, 'search_project', {
         query: target,
         type: 'symbol',
         maxResults: 5
-      });
+      }, progress);
       const results = matches?.results ?? [];
       return results
         .filter((item: any) => this.isDefinitionSymbol(item))
@@ -188,7 +223,8 @@ export class NavigatePillar {
     target: string,
     contextMode: string,
     results: any[],
-    limit: number
+    limit: number,
+    progress?: { enabled: boolean; label: string }
   ): Promise<any[]> {
     if (contextMode === 'all') return results;
 
@@ -202,7 +238,7 @@ export class NavigatePillar {
         query: target,
         type: 'symbol',
         maxResults: 1
-      });
+      }, progress);
       const symbolResult = symbolMatch?.results?.find((item: any) => this.isDefinitionSymbol(item)) ?? symbolMatch?.results?.[0];
       const symbolName = symbolResult?.symbol?.name ?? target;
       const definitionPath = symbolResult?.path;
@@ -210,7 +246,7 @@ export class NavigatePillar {
         const references = await this.runTool(context, 'reference_finder', {
           symbolName,
           definitionPath
-        });
+        }, progress);
         const refs = references?.references ?? [];
         if (Array.isArray(refs) && refs.length > 0) {
           return refs.slice(0, limit).map((ref: any) => ({
@@ -248,6 +284,16 @@ export class NavigatePillar {
     }
 
     return results;
+  }
+
+  private shouldLogProgress(constraints: any): boolean {
+    const flag = process.env.SMART_CONTEXT_PROGRESS_LOGS;
+    return constraints?.progress === true || flag === 'true' || flag === '1';
+  }
+
+  private progressLog(enabled: boolean, message: string): void {
+    if (!enabled) return;
+    console.info(`[Navigate] ${message}`);
   }
 
   private isTestPath(filePath: string): boolean {
