@@ -300,9 +300,13 @@ export class ChangePillar {
 
   private extractTargetFromEdits(edits: any[]): string | undefined {
     for (const edit of edits) {
-      const candidate = edit?.filePath ?? edit?.target ?? edit?.path;
+      const candidate = edit?.filePath ?? edit?.path;
       if (typeof candidate === 'string' && candidate.trim().length > 0) {
         return candidate.trim();
+      }
+      const targetCandidate = edit?.target;
+      if (this.isLikelyFilePath(targetCandidate)) {
+        return targetCandidate.trim();
       }
     }
     return undefined;
@@ -317,9 +321,31 @@ export class ChangePillar {
 
     for (const edit of rawEdits) {
       const operation = this.normalizeOperation(edit?.operation ?? edit?.op);
-      const filePath = edit?.filePath ?? edit?.target ?? edit?.path ?? targetPath;
-      const targetString = edit?.targetString ?? edit?.targetContent ?? edit?.from ?? edit?.search ?? edit?.anchor ?? edit?.anchorString ?? '';
-      let replacementString = edit?.replacementString ?? edit?.template ?? edit?.to ?? edit?.with ?? edit?.content ?? edit?.text ?? '';
+      const filePath = typeof edit?.filePath === 'string' && edit.filePath.trim().length > 0
+        ? edit.filePath
+        : (typeof edit?.path === 'string' && edit.path.trim().length > 0
+          ? edit.path
+          : (this.isLikelyFilePath(edit?.target) ? edit.target : targetPath));
+      const targetFallback = typeof edit?.target === 'string' && !this.isLikelyFilePath(edit.target)
+        ? edit.target
+        : '';
+      const targetString = edit?.targetString
+        ?? edit?.targetContent
+        ?? edit?.from
+        ?? edit?.search
+        ?? edit?.anchor
+        ?? edit?.anchorString
+        ?? targetFallback
+        ?? '';
+      let replacementString = edit?.replacementString
+        ?? edit?.replacement
+        ?? edit?.replace
+        ?? edit?.template
+        ?? edit?.to
+        ?? edit?.with
+        ?? edit?.content
+        ?? edit?.text
+        ?? '';
       const insertOverrides = this.inferInsertConfig(operation, edit, targetString, replacementString);
       if (insertOverrides.replacementString !== undefined) {
         replacementString = insertOverrides.replacementString;
@@ -362,6 +388,16 @@ export class ChangePillar {
     }
 
     return { edits, invalidEdits };
+  }
+
+  private isLikelyFilePath(value: any): value is string {
+    if (typeof value !== 'string') return false;
+    const trimmed = value.trim();
+    if (!trimmed) return false;
+    if (trimmed.includes('\n')) return false;
+    if (/\s/.test(trimmed)) return false;
+    if (/[\\/]/.test(trimmed)) return true;
+    return /\.[a-z0-9]+$/i.test(trimmed);
   }
 
   private collectCandidates(

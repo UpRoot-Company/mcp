@@ -68,4 +68,40 @@ describe("Pillars", () => {
     expect(result.success).toBe(true);
     expect(result.impactReport).toBeTruthy();
   });
+
+  it("ChangePillar normalizes legacy target/replacement edits", async () => {
+    const registry = new InternalToolRegistry();
+    const editCalls: any[] = [];
+    registry.register("edit_coordinator", async (args: any) => {
+      editCalls.push(args);
+      return {
+        success: true,
+        diff: "diff",
+        impactPreview: { riskLevel: "low", summary: { impactedFiles: [] } }
+      } as any;
+    });
+    registry.register("impact_analyzer", async () => ({ riskLevel: "low" } as any));
+    registry.register("analyze_relationship", async () => ({ nodes: [], edges: [] } as any));
+    registry.register("hotspot_detector", async () => ([] as any));
+
+    const pillar = new ChangePillar(registry);
+    const intent = {
+      category: "change",
+      action: "modify",
+      targets: ["src/demo.ts"],
+      originalIntent: "update demo",
+      constraints: {
+        dryRun: true,
+        includeImpact: true,
+        edits: [{ target: "OLD_CODE", replacement: "NEW_CODE" }]
+      },
+      confidence: 1
+    };
+
+    const result = await pillar.execute(intent as any, new OrchestrationContext());
+    expect(result.success).toBe(true);
+    expect(editCalls[0].filePath).toBe("src/demo.ts");
+    expect(editCalls[0].edits[0].targetString).toBe("OLD_CODE");
+    expect(editCalls[0].edits[0].replacementString).toBe("NEW_CODE");
+  });
 });
