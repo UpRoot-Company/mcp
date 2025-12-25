@@ -164,6 +164,7 @@ export type DiffMode = "myers" | "semantic";
 
 export interface EditExecutionOptions {
     diffMode?: DiffMode;
+    skipImpactPreview?: boolean;
 }
 
 export type SemanticChangeType = "add" | "remove" | "modify" | "move" | "rename";

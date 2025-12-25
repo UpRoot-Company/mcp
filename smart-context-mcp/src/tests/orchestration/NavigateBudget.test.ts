@@ -28,7 +28,7 @@ describe("NavigatePillar budget behavior", () => {
       confidence: 1
     } as any, new OrchestrationContext());
 
-    expect(searchCalls[0]?.type).toBe("filename");
+    expect(searchCalls.some(call => call.type === "filename")).toBe(true);
     expect(result.degraded).toBe(false);
     expect(result.budget).toBeDefined();
   });

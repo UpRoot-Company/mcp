@@ -42,13 +42,30 @@ export class NavigatePillar {
       ? 'filename'
       : (contextMode === 'definitions' ? 'symbol' : (metrics.hasSymbolHint ? 'symbol' : 'filename'));
 
-    const initialResult = await this.runTool(context, 'search_project', {
-      query: target,
-      maxResults: limit,
-      type: initialType
-    }, progress);
+    const [filenameResult, symbolResult] = await Promise.all([
+      this.runTool(context, 'search_project', {
+        query: target,
+        maxResults: limit,
+        type: 'filename'
+      }, progress),
+      this.runTool(context, 'search_project', {
+        query: target,
+        maxResults: limit,
+        type: 'symbol'
+      }, progress)
+    ]);
 
-    let rawResults = initialResult?.results ?? [];
+    const combined = [...(symbolResult?.results ?? []), ...(filenameResult?.results ?? [])];
+    const seen = new Set<string>();
+    let rawResults = combined.filter((item: any) => {
+      const pathValue = item?.path;
+      if (!pathValue) return false;
+      if (seen.has(pathValue)) return false;
+      seen.add(pathValue);
+      return true;
+    }).slice(0, limit);
+
+    const initialResult = initialType === 'filename' ? filenameResult : symbolResult;
     this.progressLog(progressEnabled, `Search results: ${rawResults.length}.`);
     const highConfidence = rawResults.length > 0 && (rawResults[0]?.score ?? 0) >= 0.9;
     const allowContent = isStrongQuery(metrics) && contextMode === 'all';

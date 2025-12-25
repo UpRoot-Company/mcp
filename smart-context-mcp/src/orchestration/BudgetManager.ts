@@ -70,10 +70,20 @@ export class BudgetManager {
     const queryBoost = inputs.strongQuery || inputs.queryLength >= 12 || inputs.tokenCount >= 3 ? 1.15 : 0.85;
     const categoryBoost = inputs.category === 'understand' ? 0.9 : 1;
 
-    const maxCandidates = Math.floor(seed.maxCandidates * projectScale * queryBoost * categoryBoost);
-    const maxFilesRead = Math.floor(seed.maxFilesRead * projectScale * queryBoost);
-    const maxBytesRead = Math.floor(seed.maxBytesRead * projectScale * queryBoost);
-    const maxParseTimeMs = Math.floor(seed.maxParseTimeMs * projectScale * queryBoost);
+    const maxCandidatesBase = Math.floor(seed.maxCandidates * projectScale * queryBoost * categoryBoost);
+    const maxFilesReadBase = Math.floor(seed.maxFilesRead * projectScale * queryBoost);
+    const maxBytesReadBase = Math.floor(seed.maxBytesRead * projectScale * queryBoost);
+    const maxParseTimeMsBase = Math.floor(seed.maxParseTimeMs * projectScale * queryBoost);
+
+    const maxCandidatesEnv = envNumber('SMART_CONTEXT_MAX_CANDIDATES');
+    const maxFilesReadEnv = envNumber('SMART_CONTEXT_MAX_FILES_READ');
+    const maxBytesReadEnv = envNumber('SMART_CONTEXT_MAX_BYTES_READ');
+    const maxParseTimeMsEnv = envNumber('SMART_CONTEXT_MAX_PARSE_MS');
+
+    const maxCandidates = maxCandidatesEnv ?? maxCandidatesBase;
+    const maxFilesRead = maxFilesReadEnv ?? maxFilesReadBase;
+    const maxBytesRead = maxBytesReadEnv ?? maxBytesReadBase;
+    const maxParseTimeMs = maxParseTimeMsEnv ?? maxParseTimeMsBase;
 
     return {
       ...seed,

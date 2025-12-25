@@ -98,7 +98,7 @@ export class EditCoordinator {
             await this.historyEngine.pushOperation(result.operation as EditOperation);
         }
 
-        if (result.success && dryRun && this.impactAnalyzer) {
+        if (result.success && dryRun && this.impactAnalyzer && !options?.skipImpactPreview) {
             result.impactPreview = await this.impactAnalyzer.analyzeImpact(filePath, edits);
         }
 
