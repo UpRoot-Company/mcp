@@ -4,7 +4,7 @@ import { promisify } from 'util';
 import * as fs from 'fs/promises';
 import { QueryTokenizer } from "./QueryTokenizer.js";
 import { BM25FRanking, BM25FConfig } from "./Ranking.js";
-import { FileSearchResult, Document, SearchOptions, SearchProjectResultEntry, SymbolIndex } from "../types.js";
+import { FileSearchResult, Document, ResourceBudget, ResourceUsage, SearchOptions, SearchProjectResultEntry, SymbolIndex } from "../types.js";
 import { TrigramIndex, TrigramIndexOptions } from "./TrigramIndex.js";
 import { IFileSystem } from "../platform/FileSystem.js";
 import { CallGraphMetricsBuilder, CallGraphSignals } from "./CallGraphMetricsBuilder.js";
@@ -49,6 +49,8 @@ export interface ScoutArgs extends SearchOptions {
     matchesPerFile?: number;
     groupByFile?: boolean;
     deduplicateByContent?: boolean;
+    budget?: ResourceBudget;
+    usage?: ResourceUsage;
 }
 
 export interface SearchEngineOptions {
@@ -196,6 +198,9 @@ export class SearchEngine {
 
     public async scout(args: ScoutArgs): Promise<FileSearchResult[]> {
         const { query, includeGlobs, excludeGlobs, basePath, patterns } = args;
+        const budget = args.budget;
+        const usage = args.usage ?? (budget ? { filesRead: 0, bytesRead: 0, parseTimeMs: 0 } : undefined);
+        const startedAt = Date.now();
 
         if (!query && (!args.keywords || args.keywords.length === 0) && (!patterns || patterns.length === 0)) {
             throw new Error("A query string, keyword, or pattern is required.");
@@ -252,10 +257,30 @@ export class SearchEngine {
         const candidateEntries: Array<{ absPath: string, relativeToBase: string }> = [];
 
         // 1. Gather all document contents for collection-wide BM25 in parallel batches
-        const candidateList = Array.from(candidates);
+        if (usage) {
+            usage.candidates = candidates.size;
+        }
+        let candidateList = Array.from(candidates);
+        if (budget && candidates.size > budget.maxCandidates) {
+            if (usage) {
+                usage.degraded = true;
+                usage.reason = usage.reason ?? 'max_candidates';
+            }
+            candidateList = candidateList.slice(0, budget.maxCandidates);
+        }
         const CHUNK_SIZE = 50;
+        let stop = false;
         
         for (let i = 0; i < candidateList.length; i += CHUNK_SIZE) {
+            if (budget && usage) {
+                const elapsed = Date.now() - startedAt;
+                if (usage.filesRead >= budget.maxFilesRead || usage.bytesRead >= budget.maxBytesRead || elapsed >= budget.maxParseTimeMs) {
+                    usage.degraded = true;
+                    usage.reason = usage.reason ?? 'budget_exceeded';
+                    stop = true;
+                }
+            }
+            if (stop) break;
             const chunk = candidateList.slice(i, i + CHUNK_SIZE);
             const chunkResults = await Promise.all(chunk.map(async (candidatePath) => {
                 const absPath = path.isAbsolute(candidatePath)
@@ -269,6 +294,10 @@ export class SearchEngine {
 
                 try {
                     const content = await this.fileSystem.readFile(absPath);
+                    if (usage) {
+                        usage.filesRead += 1;
+                        usage.bytesRead += Buffer.byteLength(content, 'utf8');
+                    }
                     return { absPath, relativeToBase, content };
                 } catch {
                     return null;
@@ -291,6 +320,14 @@ export class SearchEngine {
 
         // 3. Combine BM25 with other signals using HybridScorer in parallel batches
         for (let i = 0; i < candidateEntries.length; i += CHUNK_SIZE) {
+            if (budget && usage) {
+                const elapsed = Date.now() - startedAt;
+                if (elapsed >= budget.maxParseTimeMs) {
+                    usage.degraded = true;
+                    usage.reason = usage.reason ?? 'budget_exceeded';
+                    break;
+                }
+            }
             const chunk = candidateEntries.slice(i, i + CHUNK_SIZE);
             const chunkScores = await Promise.all(chunk.map(async ({ absPath, relativeToBase }) => {
                 const content = contentMap.get(absPath) || "";
@@ -368,6 +405,9 @@ export class SearchEngine {
 
         fileSearchResults.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
         this.logger.debug(`[Search] Returning ${fileSearchResults.length} results`);
+        if (usage) {
+            usage.parseTimeMs = Date.now() - startedAt;
+        }
 
         return this.resultProcessor.postProcessResults(fileSearchResults, {
             fileTypes: args.fileTypes,

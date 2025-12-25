@@ -38,6 +38,7 @@ import { PathNormalizer } from "./utils/PathNormalizer.js";
 import { AstAwareDiff } from "./engine/AstAwareDiff.js";
 import { NodeFileSystem } from "./platform/FileSystem.js";
 import { ErrorEnhancer } from "./errors/ErrorEnhancer.js";
+import { ResourceUsage } from "./types.js";
 import { GhostInterfaceBuilder } from "./resolution/GhostInterfaceBuilder.js";
 import { FallbackResolver } from "./resolution/FallbackResolver.js";
 import { CallSiteAnalyzer } from "./ast/analysis/CallSiteAnalyzer.js";
@@ -207,6 +208,7 @@ export class SmartContextServer {
         this.internalRegistry.register('edit_coordinator', (args) => this.executeEditCoordinator(args));
         this.internalRegistry.register('hotspot_detector', () => this.hotSpotDetector.detectHotSpots());
         this.internalRegistry.register('reference_finder', (args) => this.findReferencesRaw(args));
+        this.internalRegistry.register('project_stats', () => this.projectStatsRaw());
     }
 
     private setupHandlers(): void {
@@ -529,7 +531,15 @@ export class SmartContextServer {
                     properties: {
                         target: { type: 'string' },
                         context: { type: 'string', enum: ['definitions', 'usages', 'tests', 'docs', 'all'] },
-                        limit: { type: 'number' }
+                        limit: { type: 'number' },
+                        include: {
+                            type: 'object',
+                            properties: {
+                                hotSpots: { type: 'boolean' },
+                                pageRank: { type: 'boolean' },
+                                relatedSymbols: { type: 'boolean' }
+                            }
+                        }
                     },
                     required: ['target']
                 }
@@ -860,6 +870,8 @@ export class SmartContextServer {
         if (!query) {
             throw new Error("Missing required parameter: query");
         }
+        const budget = args?.budget;
+        const usage = budget ? ({ filesRead: 0, bytesRead: 0, parseTimeMs: 0 } as ResourceUsage) : undefined;
         const maxResults = typeof args.maxResults === "number"
             ? args.maxResults
             : (typeof args.limit === "number" ? args.limit : 20);
@@ -905,7 +917,9 @@ export class SmartContextServer {
                 groupByFile: args.groupByFile,
                 deduplicateByContent: args.deduplicateByContent,
                 basePath: args.basePath,
-                maxResults
+                maxResults,
+                budget,
+                usage
             });
 
             results = scoutResults.slice(0, maxResults).map(result => ({
@@ -926,13 +940,17 @@ export class SmartContextServer {
                 inferredType,
                 message: `No results found for "${query}".`,
                 suggestions: enhanced.toolSuggestions,
-                nextActionHint: enhanced.nextActionHint
+                nextActionHint: enhanced.nextActionHint,
+                degraded: usage?.degraded ?? false,
+                budget: budget ? { ...budget, used: usage } : undefined
             };
         }
 
         return {
             results,
-            inferredType
+            inferredType,
+            degraded: usage?.degraded ?? false,
+            budget: budget ? { ...budget, used: usage } : undefined
         };
     }
 
@@ -1172,6 +1190,13 @@ export class SmartContextServer {
         }
         const absPath = this.resolveAbsolutePath(target);
         return this.impactAnalyzer.analyzeImpact(absPath, args?.edits ?? []);
+    }
+
+    private async projectStatsRaw() {
+        const files = this.indexDatabase.listFiles();
+        return {
+            fileCount: files.length
+        };
     }
 
     private async executeEditCoordinator(args: any) {

@@ -23,6 +23,26 @@ export interface SearchOptions {
     smartCase?: boolean;
 }
 
+export type BudgetProfile = "safe" | "balanced" | "deep";
+
+export interface ResourceBudget {
+    maxCandidates: number;
+    maxFilesRead: number;
+    maxBytesRead: number;
+    maxParseTimeMs: number;
+    maxGraphNodes?: number;
+    profile: BudgetProfile;
+}
+
+export interface ResourceUsage {
+    filesRead: number;
+    bytesRead: number;
+    parseTimeMs: number;
+    candidates?: number;
+    degraded?: boolean;
+    reason?: string;
+}
+
 export type SearchFieldType = "symbol-definition" | "signature" | "exported-member" | "comment" | "code-body";
 
 export interface ScoreDetails {
@@ -587,6 +607,7 @@ export interface SearchProjectArgs {
     matchesPerFile?: number;
     groupByFile?: boolean;
     deduplicateByContent?: boolean;
+    budget?: ResourceBudget;
 }
 
 export interface SearchProjectResultEntry {
@@ -605,6 +626,8 @@ export interface SearchProjectResult {
     message?: string;
     suggestions?: ToolSuggestion[];
     nextActionHint?: string;
+    degraded?: boolean;
+    budget?: { used?: ResourceUsage } & Partial<ResourceBudget>;
 }
 
 export type AnalyzeRelationshipMode = "impact" | "dependencies" | "calls" | "data_flow" | "types";

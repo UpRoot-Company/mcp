@@ -2,6 +2,8 @@
 import { InternalToolRegistry } from '../InternalToolRegistry.js';
 import { OrchestrationContext } from '../OrchestrationContext.js';
 import { ParsedIntent } from '../IntentRouter.js';
+import { BudgetManager } from '../BudgetManager.js';
+import { analyzeQuery, isStrongQuery } from '../../engine/search/QueryMetrics.js';
 
 
 export class NavigatePillar {
@@ -12,28 +14,73 @@ export class NavigatePillar {
     const target = targets[0] || originalIntent;
     const limit = constraints.limit || 10;
     const contextMode = constraints.context ?? 'all';
+    const include = (constraints.include ?? {}) as any;
     const progressEnabled = this.shouldLogProgress(constraints);
     const progress = { enabled: progressEnabled, label: 'Navigate' };
     const startedAt = Date.now();
 
     this.progressLog(progressEnabled, `Start target="${target}" limit=${limit} context=${contextMode}.`);
 
-    const searchArgs: any = {
-      query: target,
-      maxResults: limit
-    };
-    if (contextMode === 'definitions') {
-      searchArgs.type = 'symbol';
+    const metrics = analyzeQuery(target);
+    let projectStats: any = undefined;
+    try {
+      projectStats = await this.runTool(context, 'project_stats', {}, progress);
+    } catch {
+      projectStats = undefined;
     }
-    const results = await this.runTool(context, 'search_project', searchArgs, progress);
+    const budget = BudgetManager.create({
+      category: 'navigate',
+      queryLength: metrics.length,
+      tokenCount: metrics.tokenCount,
+      strongQuery: metrics.strong,
+      includeGraph: include.pageRank,
+      includeHotSpots: include.hotSpots,
+      projectStats: { fileCount: projectStats?.fileCount }
+    });
 
-    let rawResults = results?.results ?? [];
+    const initialType = metrics.hasPath
+      ? 'filename'
+      : (contextMode === 'definitions' ? 'symbol' : (metrics.hasSymbolHint ? 'symbol' : 'filename'));
+
+    const initialResult = await this.runTool(context, 'search_project', {
+      query: target,
+      maxResults: limit,
+      type: initialType
+    }, progress);
+
+    let rawResults = initialResult?.results ?? [];
     this.progressLog(progressEnabled, `Search results: ${rawResults.length}.`);
+    const highConfidence = rawResults.length > 0 && (rawResults[0]?.score ?? 0) >= 0.9;
+    const allowContent = isStrongQuery(metrics) && contextMode === 'all';
+    let refinementStage: string = initialType;
+    let refinementReason: string | undefined = undefined;
+    let finalBudget = initialResult?.budget;
+    let finalDegraded = Boolean(initialResult?.degraded);
+
+    if (!highConfidence && allowContent) {
+      const contentResult = await this.runTool(context, 'search_project', {
+        query: target,
+        maxResults: limit,
+        type: 'file',
+        budget
+      }, progress);
+      if (Array.isArray(contentResult?.results) && contentResult.results.length > 0) {
+        rawResults = contentResult.results;
+        refinementStage = 'content';
+        refinementReason = contentResult?.degraded ? 'budget_exceeded' : 'low_confidence';
+        finalBudget = contentResult?.budget ?? finalBudget;
+        finalDegraded = Boolean(contentResult?.degraded);
+      }
+    }
+
     rawResults = await this.applyContextFilter(context, target, contextMode, rawResults, limit, progress);
     this.progressLog(progressEnabled, `Filtered results: ${rawResults.length}.`);
-    const hotSpotSet = await this.loadHotSpotSet(context, rawResults, progress);
-    const pageRankScores = await this.loadPageRankScores(context, rawResults, progress);
-    const relatedSymbols = await this.loadRelatedSymbols(context, target, progress);
+    const allowHotSpots = include.hotSpots === true;
+    const allowPageRank = include.pageRank === true;
+    const allowRelatedSymbols = include.relatedSymbols === true;
+    const hotSpotSet = allowHotSpots ? await this.loadHotSpotSet(context, rawResults, progress) : new Set();
+    const pageRankScores = allowPageRank ? await this.loadPageRankScores(context, rawResults, progress) : new Map();
+    const relatedSymbols = allowRelatedSymbols ? await this.loadRelatedSymbols(context, target, progress) : [];
 
     const locations = rawResults.map((item: any) => {
       const filePath = item.path ?? '';
@@ -63,6 +110,12 @@ export class NavigatePillar {
       locations,
       relatedSymbols,
       codePreview: locations[0]?.snippet,
+      degraded: finalDegraded || (refinementReason === 'budget_exceeded') || false,
+      budget: finalBudget ?? budget,
+      refinement: {
+        stage: refinementStage,
+        reason: refinementReason
+      }
     };
 
     // Eager Loading: 단일 결과인 경우 Smart File Profile 추가
