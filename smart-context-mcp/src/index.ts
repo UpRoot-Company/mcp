@@ -139,7 +139,8 @@ export class SmartContextServer {
         this.embeddingProviderFactory = new EmbeddingProviderFactory(resolveEmbeddingConfigFromEnv());
         this.documentProfiler = new DocumentProfiler(this.rootPath);
         this.documentIndexer = new DocumentIndexer(this.rootPath, this.fileSystem, this.indexDatabase, {
-            embeddingRepository: this.embeddingRepository
+            embeddingRepository: this.embeddingRepository,
+            embeddingProviderFactory: this.embeddingProviderFactory
         });
         this.symbolIndex = new SymbolIndex(this.rootPath, this.skeletonGenerator, initialIgnorePatterns, this.indexDatabase);
         this.moduleResolver = new ModuleResolver(this.rootPath);

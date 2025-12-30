@@ -7,6 +7,7 @@ import { DocumentChunkRepository, StoredDocumentChunk } from "./DocumentChunkRep
 import { HeadingChunker } from "../documents/chunking/HeadingChunker.js";
 import { DocumentKind, DocumentOutlineOptions } from "../types.js";
 import { EmbeddingRepository } from "./EmbeddingRepository.js";
+import { EmbeddingProviderFactory } from "../embeddings/EmbeddingProviderFactory.js";
 
 const SUPPORTED_DOC_EXTENSIONS = new Set<string>([".md", ".mdx"]);
 
@@ -20,17 +21,23 @@ export class DocumentIndexer {
         private readonly rootPath: string,
         private readonly fileSystem: IFileSystem,
         private readonly indexDatabase: IndexDatabase,
-        options?: { outlineOptions?: DocumentOutlineOptions; embeddingRepository?: EmbeddingRepository }
+        options?: {
+            outlineOptions?: DocumentOutlineOptions;
+            embeddingRepository?: EmbeddingRepository;
+            embeddingProviderFactory?: EmbeddingProviderFactory;
+        }
     ) {
         this.chunkRepo = new DocumentChunkRepository(indexDatabase);
         this.chunker = new HeadingChunker();
         this.profiler = new DocumentProfiler(rootPath);
         this.outlineOptions = options?.outlineOptions ?? {};
         this.embeddingRepository = options?.embeddingRepository;
+        this.embeddingProviderFactory = options?.embeddingProviderFactory;
     }
 
     private outlineOptions: DocumentOutlineOptions;
     private readonly embeddingRepository?: EmbeddingRepository;
+    private readonly embeddingProviderFactory?: EmbeddingProviderFactory;
 
     public updateIgnorePatterns(patterns: string[]): void {
         this.ignoreFilter = (ignore as unknown as () => any)().add(patterns ?? []);
@@ -74,6 +81,9 @@ export class DocumentIndexer {
         })) as StoredDocumentChunk[];
 
         this.chunkRepo.upsertChunksForFile(relativePath, stored);
+        if (this.shouldEagerEmbed()) {
+            await this.embedChunks(stored);
+        }
     }
 
     public deleteFile(filePath: string): void {
@@ -106,6 +116,38 @@ export class DocumentIndexer {
         }
         return relative || ".";
     }
+
+    private shouldEagerEmbed(): boolean {
+        return process.env.SMART_CONTEXT_DOCS_EMBEDDINGS_EAGER === "true";
+    }
+
+    private async embedChunks(chunks: StoredDocumentChunk[]): Promise<void> {
+        if (!this.embeddingRepository || !this.embeddingProviderFactory) return;
+        if (chunks.length === 0) return;
+        const provider = await this.embeddingProviderFactory.getProvider();
+        if (provider.provider === "disabled") return;
+
+        const batchSize = this.embeddingProviderFactory.getConfig().batchSize ?? 16;
+        for (let i = 0; i < chunks.length; i += batchSize) {
+            const batch = chunks.slice(i, i + batchSize);
+            const vectors = await provider.embed(batch.map(chunk => chunk.text));
+            for (let idx = 0; idx < batch.length; idx += 1) {
+                const chunk = batch[idx];
+                const vector = vectors[idx];
+                if (!vector) continue;
+                if (provider.dims === 0) {
+                    provider.dims = vector.length;
+                }
+                this.embeddingRepository.upsertEmbedding(chunk.id, {
+                    provider: provider.provider,
+                    model: provider.model,
+                    dims: vector.length,
+                    vector,
+                    norm: l2Norm(vector)
+                });
+            }
+        }
+    }
 }
 
 function inferKind(filePath: string): DocumentKind {
@@ -113,4 +155,12 @@ function inferKind(filePath: string): DocumentKind {
     if (ext === ".mdx") return "mdx";
     if (ext === ".md") return "markdown";
     return "unknown";
+}
+
+function l2Norm(vector: Float32Array): number {
+    let sum = 0;
+    for (const v of vector) {
+        sum += v * v;
+    }
+    return Math.sqrt(sum);
 }
