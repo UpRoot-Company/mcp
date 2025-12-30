@@ -96,6 +96,8 @@ export class SmartContextServer {
     private reindexInProgress = false;
     private reindexLastResult?: { success: boolean; output: string; startedAt: string; finishedAt?: string };
     private heartbeatTimer?: NodeJS.Timeout;
+    private shutdownRequested = false;
+    private shutdownTimer?: NodeJS.Timeout;
 
     constructor(rootPath: string) {
         this.server = new Server({
@@ -189,6 +191,7 @@ export class SmartContextServer {
 
         this.registerInternalTools();
         this.setupHandlers();
+        this.setupShutdownHooks();
         this.startHeartbeat();
     }
 
@@ -371,6 +374,45 @@ export class SmartContextServer {
         if (!this.heartbeatTimer) return;
         clearInterval(this.heartbeatTimer);
         this.heartbeatTimer = undefined;
+    }
+
+    private setupShutdownHooks(): void {
+        if (this.isTestEnv()) return;
+        const handle = (reason: string, error?: unknown) => {
+            if (this.shutdownRequested) return;
+            this.shutdownRequested = true;
+            const timeoutMs = Number(process.env.SMART_CONTEXT_SHUTDOWN_TIMEOUT_MS ?? 5000);
+            if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
+                this.shutdownTimer = setTimeout(() => {
+                    console.warn(`[Process] shutdown timeout exceeded (${timeoutMs}ms); forcing exit`);
+                    process.exit(1);
+                }, timeoutMs);
+                this.shutdownTimer.unref?.();
+            }
+            if (error) {
+                console.warn(`[Process] shutdown requested (${reason})`, error);
+            } else {
+                console.warn(`[Process] shutdown requested (${reason})`);
+            }
+            void this.shutdown().finally(() => {
+                if (this.shutdownTimer) {
+                    clearTimeout(this.shutdownTimer);
+                    this.shutdownTimer = undefined;
+                }
+                if (!this.isTestEnv()) {
+                    process.exit(0);
+                }
+            });
+        };
+
+        process.on("SIGTERM", () => handle("SIGTERM"));
+        process.on("SIGINT", () => handle("SIGINT"));
+        process.on("SIGHUP", () => handle("SIGHUP"));
+
+        process.stdin.on("end", () => handle("stdin_end"));
+        process.stdin.on("close", () => handle("stdin_close"));
+        process.stdin.on("error", (err) => handle("stdin_error", err));
+        process.stdin.resume();
     }
 
     private createIgnoreFilter(patterns: string[]): any {
