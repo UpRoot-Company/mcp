@@ -61,7 +61,7 @@ export class TreeSitterMarkdownParser {
                 });
             });
             tree.delete();
-            return headings.length > 0 ? headings : null;
+            return headings;
         } catch {
             return null;
         }

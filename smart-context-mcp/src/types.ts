@@ -348,6 +348,11 @@ export interface DocumentProfile {
     kind: DocumentKind;
     title?: string;
     frontmatter?: Record<string, unknown>;
+    parser?: {
+        name: "tree-sitter" | "remark" | "regex";
+        degraded: boolean;
+        reason?: string;
+    };
     outline: DocumentSection[];
     links?: Array<{
         text?: string;

@@ -2,7 +2,7 @@ import * as crypto from "crypto";
 import * as path from "path";
 import { DocumentKind, DocumentOutlineOptions, DocumentProfile, DocumentSection } from "../types.js";
 import { DocumentLinkResolver } from "./DocumentLinkResolver.js";
-import { parseMarkdownWithRemark } from "./RemarkDocumentParser.js";
+import { parseMarkdownWithRemark, type RemarkParseResult } from "./RemarkDocumentParser.js";
 import { TreeSitterMarkdownParser } from "./TreeSitterMarkdownParser.js";
 
 export interface DocumentProfileInput {
@@ -53,6 +53,11 @@ export class DocumentProfiler {
             : null;
         const remarkParsed = parseMarkdownWithRemark(input.content, input.kind);
         const headings = applyMaxDepth(treeHeadings ?? remarkParsed?.headings ?? extractHeadings(lines), options.maxDepth);
+        const parserInfo = resolveParserInfo({
+            kind: input.kind,
+            treeHeadings,
+            remarkParsed
+        });
         const outline = buildOutline({
             filePath: input.filePath,
             kind: input.kind,
@@ -85,6 +90,7 @@ export class DocumentProfiler {
             kind: input.kind,
             title,
             frontmatter,
+            parser: parserInfo,
             outline,
             links,
             stats: {
@@ -357,6 +363,30 @@ function isFence(line: string): boolean {
 
 function normalizeReference(value: string): string {
     return String(value || "").trim().toLowerCase();
+}
+
+function resolveParserInfo(params: {
+    kind: DocumentKind;
+    treeHeadings: HeadingNode[] | null;
+    remarkParsed: RemarkParseResult | null;
+}): { name: "tree-sitter" | "remark" | "regex"; degraded: boolean; reason?: string } | undefined {
+    const { kind, treeHeadings, remarkParsed } = params;
+    if (kind === "markdown") {
+        if (treeHeadings !== null) {
+            return { name: "tree-sitter", degraded: false };
+        }
+        if (remarkParsed?.headings?.length) {
+            return { name: "remark", degraded: true, reason: "parser_fallback" };
+        }
+        return { name: "regex", degraded: true, reason: "parser_fallback" };
+    }
+    if (kind === "mdx") {
+        if (remarkParsed?.headings?.length) {
+            return { name: "remark", degraded: false };
+        }
+        return { name: "regex", degraded: true, reason: "parser_fallback" };
+    }
+    return { name: "regex", degraded: false };
 }
 
 export function applyMdxPlaceholders(content: string): string {

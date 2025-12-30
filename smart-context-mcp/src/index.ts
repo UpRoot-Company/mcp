@@ -976,10 +976,12 @@ export class SmartContextServer {
             kind: this.inferDocumentKind(filePath),
             options: args?.options
         });
+        const degradation = buildDegradation(profile.parser?.reason ? [profile.parser.reason] : []);
         return {
             filePath,
             kind: profile.kind,
-            outline: profile.outline
+            outline: profile.outline,
+            ...degradation
         };
     }
 
@@ -992,11 +994,13 @@ export class SmartContextServer {
             kind: this.inferDocumentKind(filePath),
             options: args?.options
         });
+        const degradation = buildDegradation(profile.parser?.reason ? [profile.parser.reason] : []);
         return {
             filePath,
             kind: profile.kind,
             skeleton: this.documentProfiler.buildSkeleton(profile),
-            outline: profile.outline
+            outline: profile.outline,
+            ...degradation
         };
     }
 
@@ -1009,10 +1013,12 @@ export class SmartContextServer {
             kind: this.inferDocumentKind(filePath),
             options: args?.options
         });
+        const degradation = buildDegradation(profile.parser?.reason ? [profile.parser.reason] : []);
         return {
             filePath,
             profile,
-            skeleton: this.documentProfiler.buildSkeleton(profile)
+            skeleton: this.documentProfiler.buildSkeleton(profile),
+            ...degradation
         };
     }
 
@@ -1029,6 +1035,10 @@ export class SmartContextServer {
         const sectionId = args?.sectionId as string | undefined;
         const headingPath = normalizeHeadingPath(args?.headingPath);
         const includeSubsections = args?.includeSubsections === true;
+        const reasons: string[] = [];
+        if (profile.parser?.reason) {
+            reasons.push(profile.parser.reason);
+        }
 
         let sectionIndex = -1;
         if (sectionId) {
@@ -1040,30 +1050,53 @@ export class SmartContextServer {
         }
 
         if (sectionIndex === -1) {
-            const suggestions = outline.slice(0, 5).map(section => section.path);
-            return {
-                success: false,
-                status: 'no_results',
-                message: 'Section not found.',
-                suggestions
-            };
+            let suggestions = outline.slice(0, 5).map(section => section.path);
+            if (headingPath && headingPath.length > 0) {
+                const ranked = rankSectionsByHeadingPath(outline, headingPath, 5);
+                suggestions = ranked.map(entry => outline[entry.index].path);
+                const best = ranked[0];
+                if (best && best.score >= 2) {
+                    sectionIndex = best.index;
+                    reasons.push("closest_match");
+                } else {
+                    return {
+                        success: false,
+                        status: 'no_results',
+                        message: 'Section not found.',
+                        suggestions,
+                        ...buildDegradation(reasons)
+                    };
+                }
+            } else {
+                return {
+                    success: false,
+                    status: 'no_results',
+                    message: 'Section not found.',
+                    suggestions,
+                    ...buildDegradation(reasons)
+                };
+            }
         }
 
         const section = outline[sectionIndex];
         const range = computeSectionRange(outline, sectionIndex, includeSubsections);
         const lines = content.split(/\r?\n/);
         const sectionContent = lines.slice(range.startLine - 1, range.endLine).join("\n");
+        const status = reasons.includes("closest_match") ? "closest_match" : "success";
 
         return {
             success: true,
-            status: 'success',
+            status,
             filePath,
             kind: profile.kind,
             section: {
                 ...section,
                 range: { ...section.range, startLine: range.startLine, endLine: range.endLine }
             },
-            content: sectionContent
+            content: sectionContent,
+            resolvedHeadingPath: section.path,
+            requestedHeadingPath: headingPath ?? undefined,
+            ...buildDegradation(reasons)
         };
     }
 
@@ -2101,6 +2134,18 @@ function normalizeHeadingPath(raw: any): string[] | null {
     return null;
 }
 
+function buildDegradation(reasons: string[]): { degraded: boolean; reason?: string; reasons?: string[] } {
+    const filtered = Array.from(new Set(reasons.filter(Boolean)));
+    if (filtered.length === 0) {
+        return { degraded: false };
+    }
+    return {
+        degraded: true,
+        reason: filtered[0],
+        reasons: filtered.length > 1 ? filtered : undefined
+    };
+}
+
 function matchesHeadingPath(candidate: string[], target: string[]): boolean {
     if (candidate.length !== target.length) return false;
     return candidate.every((value, idx) => normalizeHeading(value) === normalizeHeading(target[idx]));
@@ -2112,6 +2157,60 @@ function normalizeHeading(value: string): string {
         .replace(/\s+/g, " ")
         .replace(/[#:*_`~]+/g, "")
         .trim();
+}
+
+function rankSectionsByHeadingPath(
+    outline: Array<{ path: string[] }>,
+    target: string[],
+    limit = 5
+): Array<{ index: number; score: number }> {
+    const scored = outline.map((section, index) => ({
+        index,
+        score: scoreHeadingPath(section.path, target)
+    }));
+    scored.sort((a, b) => b.score - a.score);
+    return scored.slice(0, Math.max(1, limit));
+}
+
+function scoreHeadingPath(candidate: string[], target: string[]): number {
+    const normalizedCandidate = candidate.map(normalizeHeading).filter(Boolean);
+    const normalizedTarget = target.map(normalizeHeading).filter(Boolean);
+    if (normalizedCandidate.length === 0 || normalizedTarget.length === 0) return 0;
+
+    const minLen = Math.min(normalizedCandidate.length, normalizedTarget.length);
+    const maxLen = Math.max(normalizedCandidate.length, normalizedTarget.length);
+    let prefixMatches = 0;
+    let exactMatches = 0;
+    for (let idx = 0; idx < minLen; idx += 1) {
+        if (normalizedCandidate[idx] === normalizedTarget[idx]) {
+            prefixMatches += 1;
+            exactMatches += 1;
+        } else {
+            break;
+        }
+    }
+    for (let idx = prefixMatches; idx < minLen; idx += 1) {
+        if (normalizedCandidate[idx] === normalizedTarget[idx]) {
+            exactMatches += 1;
+        }
+    }
+
+    const candidateSet = new Set(normalizedCandidate);
+    const targetSet = new Set(normalizedTarget);
+    let intersection = 0;
+    for (const value of targetSet) {
+        if (candidateSet.has(value)) intersection += 1;
+    }
+    const union = candidateSet.size + targetSet.size - intersection;
+    const jaccard = union > 0 ? intersection / union : 0;
+
+    const prefixScore = (prefixMatches / maxLen) * 4;
+    const exactScore = exactMatches * 1.5;
+    const overlapScore = jaccard * 3;
+    const tailScore = normalizedCandidate[normalizedCandidate.length - 1] === normalizedTarget[normalizedTarget.length - 1] ? 2 : 0;
+    const lengthPenalty = Math.abs(normalizedCandidate.length - normalizedTarget.length) * 0.5;
+
+    return Math.max(0, prefixScore + exactScore + overlapScore + tailScore - lengthPenalty);
 }
 
 function computeSectionRange(
