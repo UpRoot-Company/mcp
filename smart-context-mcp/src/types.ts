@@ -392,10 +392,10 @@ export interface EmbeddingConfig {
     batchSize?: number;
     openai?: {
         apiKeyEnv?: string;
-        model: string;
+        model?: string;
     };
     local?: {
-        model: string;
+        model?: string;
         dims?: number;
     };
 }

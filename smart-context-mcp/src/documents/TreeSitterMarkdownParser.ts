@@ -19,10 +19,17 @@ export class TreeSitterMarkdownParser {
     private readonly wasmPath = resolveMarkdownWasmPath(this.localRequire);
 
     public isAvailable(): boolean {
+        if (isTestEnv()) return false;
         return Boolean(this.wasmPath);
     }
 
     public async initialize(): Promise<void> {
+        if (isTestEnv()) {
+            if (!this.initError) {
+                this.initError = new Error("markdown_wasm_disabled_in_tests");
+            }
+            return;
+        }
         if (!this.wasmPath) {
             if (!this.initError) {
                 this.initError = new Error("markdown_wasm_missing");
@@ -162,4 +169,8 @@ function resolveMarkdownWasmPath(localRequire: NodeRequire): string | null {
     }
 
     return null;
+}
+
+function isTestEnv(): boolean {
+    return process.env.NODE_ENV === "test" || process.env.JEST_WORKER_ID !== undefined;
 }

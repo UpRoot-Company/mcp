@@ -3,6 +3,7 @@ import { resolveEmbeddingProviderEnv } from "./EmbeddingConfig.js";
 import { DisabledEmbeddingProvider } from "./DisabledEmbeddingProvider.js";
 import { HashEmbeddingProvider } from "./HashEmbeddingProvider.js";
 import { OpenAIEmbeddingProvider } from "./OpenAIEmbeddingProvider.js";
+import { TransformersEmbeddingProvider } from "./TransformersEmbeddingProvider.js";
 
 export interface EmbeddingProviderClient {
     provider: EmbeddingProvider;
@@ -31,13 +32,21 @@ export class EmbeddingProviderFactory {
         }
 
         if (resolved.provider === "local") {
-            const dims = this.config.local?.dims ?? 384;
-            const model = this.config.local?.model ?? "hash-embedding-v1";
-            this.cached = new HashEmbeddingProvider({
-                model,
-                dims,
-                normalize: this.config.normalize !== false
-            });
+            const model = this.config.local?.model ?? "Xenova/all-MiniLM-L6-v2";
+            if (isHashModel(model)) {
+                const dims = this.config.local?.dims ?? 384;
+                this.cached = new HashEmbeddingProvider({
+                    model,
+                    dims,
+                    normalize: this.config.normalize !== false
+                });
+            } else {
+                this.cached = new TransformersEmbeddingProvider({
+                    model,
+                    dims: this.config.local?.dims,
+                    normalize: this.config.normalize !== false
+                });
+            }
             return this.cached;
         }
 
@@ -48,4 +57,9 @@ export class EmbeddingProviderFactory {
     public getConfig(): EmbeddingConfig {
         return this.config;
     }
+}
+
+function isHashModel(model: string): boolean {
+    const normalized = model.trim().toLowerCase();
+    return normalized.startsWith("hash-") || normalized === "hash";
 }

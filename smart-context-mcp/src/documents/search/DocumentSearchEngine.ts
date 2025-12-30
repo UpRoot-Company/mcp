@@ -135,7 +135,7 @@ export class DocumentSearchEngine {
         const bm25ScoreMap = new Map(bm25Ranked.map(doc => [doc.id, doc.score ?? 0]));
         const bm25RankMap = buildRankMap(bm25Ranked.map(doc => doc.id));
 
-        const provider = await this.embeddingFactory.getProvider();
+        const provider = await this.resolveEmbeddingProvider(options.embedding);
         let vectorEnabled = provider.provider !== "disabled";
         let vectorScores = new Map<string, number>();
         let vectorRankMap = new Map<string, number>();
@@ -335,6 +335,15 @@ export class DocumentSearchEngine {
 
         return { scores, degraded };
     }
+
+    private async resolveEmbeddingProvider(override?: EmbeddingConfig) {
+        if (!override) {
+            return this.embeddingFactory.getProvider();
+        }
+        const merged = mergeEmbeddingConfig(this.embeddingFactory.getConfig(), override);
+        const factory = new EmbeddingProviderFactory(merged);
+        return factory.getProvider();
+    }
 }
 
 function toSearchSection(chunk: StoredDocumentChunk, scores: { bm25: number; vector?: number; final: number }, snippetLength: number): DocumentSearchSection {
@@ -476,4 +485,19 @@ function limitEvidence(
         totalChars = next;
     }
     return results;
+}
+
+function mergeEmbeddingConfig(base: EmbeddingConfig, override: EmbeddingConfig): EmbeddingConfig {
+    return {
+        ...base,
+        ...override,
+        openai: {
+            ...base.openai,
+            ...override.openai
+        },
+        local: {
+            ...base.local,
+            ...override.local
+        }
+    };
 }

@@ -1,7 +1,7 @@
 import { EmbeddingConfig, EmbeddingProvider } from "../types.js";
 
 const DEFAULT_OPENAI_MODEL = "text-embedding-3-small";
-const DEFAULT_LOCAL_MODEL = "hash-embedding-v1";
+const DEFAULT_LOCAL_MODEL = "Xenova/all-MiniLM-L6-v2";
 const DEFAULT_LOCAL_DIMS = 384;
 
 export function resolveEmbeddingConfigFromEnv(): EmbeddingConfig {

@@ -509,7 +509,29 @@ export class SmartContextServer {
                         useMmr: { type: 'boolean' },
                         mmrLambda: { type: 'number' },
                         maxChunksEmbeddedPerRequest: { type: 'number' },
-                        maxEmbeddingTimeMs: { type: 'number' }
+                        maxEmbeddingTimeMs: { type: 'number' },
+                        embedding: {
+                            type: 'object',
+                            properties: {
+                                provider: { type: 'string', enum: ['auto', 'openai', 'local', 'disabled'] },
+                                normalize: { type: 'boolean' },
+                                batchSize: { type: 'number' },
+                                openai: {
+                                    type: 'object',
+                                    properties: {
+                                        apiKeyEnv: { type: 'string' },
+                                        model: { type: 'string' }
+                                    }
+                                },
+                                local: {
+                                    type: 'object',
+                                    properties: {
+                                        model: { type: 'string' },
+                                        dims: { type: 'number' }
+                                    }
+                                }
+                            }
+                        }
                     },
                     required: ['query']
                 }
@@ -1132,7 +1154,8 @@ export class SmartContextServer {
             useMmr: args?.useMmr,
             mmrLambda: args?.mmrLambda,
             maxChunksEmbeddedPerRequest: args?.maxChunksEmbeddedPerRequest,
-            maxEmbeddingTimeMs: args?.maxEmbeddingTimeMs
+            maxEmbeddingTimeMs: args?.maxEmbeddingTimeMs,
+            embedding: args?.embedding
         });
     }
 
