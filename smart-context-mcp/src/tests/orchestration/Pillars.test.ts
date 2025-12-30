@@ -104,4 +104,53 @@ describe("Pillars", () => {
     expect(editCalls[0].edits[0].targetString).toBe("OLD_CODE");
     expect(editCalls[0].edits[0].replacementString).toBe("NEW_CODE");
   });
+
+  it("ChangePillar attaches related docs using doc_section", async () => {
+    const registry = new InternalToolRegistry();
+    registry.register("edit_coordinator", async () => ({
+      success: true,
+      diff: "diff",
+      impactPreview: { riskLevel: "low", summary: { impactedFiles: [] } }
+    } as any));
+    registry.register("impact_analyzer", async () => ({ riskLevel: "low" } as any));
+    registry.register("analyze_relationship", async () => ({ nodes: [], edges: [] } as any));
+    registry.register("hotspot_detector", async () => ([] as any));
+    registry.register("doc_search", async () => ({
+      results: [
+        {
+          filePath: "docs/guide.md",
+          sectionPath: ["Setup"],
+          scores: { final: 0.9 },
+          preview: "Setup section"
+        }
+      ]
+    } as any));
+    registry.register("doc_section", async () => ({
+      success: true,
+      content: "Setup section content",
+      resolvedHeadingPath: ["Setup"]
+    } as any));
+
+    const pillar = new ChangePillar(registry);
+    const intent = {
+      category: "change",
+      action: "modify",
+      targets: ["src/demo.ts"],
+      originalIntent: "update demo",
+      constraints: {
+        dryRun: true,
+        includeImpact: false,
+        edits: [{ targetString: "a", replacementString: "b" }]
+      },
+      confidence: 1
+    };
+
+    const result = await pillar.execute(intent as any, new OrchestrationContext());
+    expect(result.success).toBe(true);
+    expect(Array.isArray(result.relatedDocs)).toBe(true);
+    expect(result.relatedDocs.length).toBeGreaterThan(0);
+    expect(result.relatedDocs[0].section?.content).toContain("Setup section content");
+    const actions = result.guidance?.suggestedActions ?? [];
+    expect(actions.some((action: any) => action?.pillar === "doc_section")).toBe(true);
+  });
 });

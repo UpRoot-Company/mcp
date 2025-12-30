@@ -100,6 +100,7 @@ export class UnderstandPillar {
     let docProfile: any = undefined;
     let docReferences: any = undefined;
     let relatedCode: any[] | undefined = undefined;
+    let mentionMatches: any[] | undefined = undefined;
     if (isDocument) {
       const docAnalysis = await this.runTool(context, 'doc_analyze', { filePath }, progress);
       skeleton = docAnalysis?.skeleton ?? '';
@@ -107,6 +108,10 @@ export class UnderstandPillar {
       if (docProfile?.links?.length) {
         docReferences = this.categorizeDocLinks(docProfile.links);
         relatedCode = await this.resolveCodeReferences(context, docReferences.code ?? [], progress);
+      }
+      if (Array.isArray(docProfile?.mentions) && docProfile.mentions.length > 0) {
+        mentionMatches = await this.resolveMentionReferences(context, docProfile.mentions, progress);
+        relatedCode = this.mergeRelatedCode(relatedCode, mentionMatches);
       }
     } else {
       skeleton = await this.runTool(context, 'read_code', { filePath, view: 'skeleton' }, progress);
@@ -173,6 +178,7 @@ export class UnderstandPillar {
             title: docProfile.title,
             outline: docProfile.outline ?? [],
             links: docProfile.links ?? [],
+            mentions: docProfile.mentions ?? [],
             references: docReferences,
             relatedCode
           }
@@ -307,6 +313,57 @@ export class UnderstandPillar {
       }
     }
     return results;
+  }
+
+  private async resolveMentionReferences(
+    context: OrchestrationContext,
+    mentions: Array<{ text: string; kind: "symbol" | "path"; line: number }>,
+    progress?: { enabled: boolean; label: string }
+  ): Promise<any[]> {
+    const results: any[] = [];
+    const seen = new Set<string>();
+    const limited = mentions.slice(0, 8);
+    for (const mention of limited) {
+      const key = `${mention.kind}:${mention.text}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      try {
+        const searchType = mention.kind === "path" ? "filename" : "symbol";
+        const match = await this.runTool(context, 'search_project', {
+          query: mention.text,
+          type: searchType,
+          maxResults: 3
+        }, progress);
+        const best = match?.results?.[0];
+        results.push({
+          mention: mention.text,
+          kind: mention.kind,
+          line: mention.line,
+          status: best ? 'verified' : 'unverified',
+          match: best
+        });
+      } catch {
+        results.push({
+          mention: mention.text,
+          kind: mention.kind,
+          line: mention.line,
+          status: 'unverified'
+        });
+      }
+    }
+    return results;
+  }
+
+  private mergeRelatedCode(primary?: any[], additional?: any[]): any[] | undefined {
+    const combined = [...(primary ?? []), ...(additional ?? [])];
+    if (combined.length === 0) return undefined;
+    const seen = new Set<string>();
+    return combined.filter((item: any) => {
+      const key = item?.path ?? item?.match?.path ?? item?.mention ?? JSON.stringify(item);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
   }
 
   private extractSymbol(text: string): string | null {

@@ -361,6 +361,11 @@ export interface DocumentProfile {
         hashFragment?: string;
         range?: { startLine: number; endLine: number; startByte: number; endByte: number };
     }>;
+    mentions?: Array<{
+        text: string;
+        kind: "symbol" | "path";
+        line: number;
+    }>;
     stats: { lineCount: number; charCount: number; headingCount: number };
 }
 
