@@ -44,6 +44,47 @@ export const MIGRATIONS: Migration[] = [
                 `INSERT OR REPLACE INTO metadata(key, value) VALUES ('schema_version', '2')`
             ).run();
         }
+    },
+    {
+        version: 3,
+        name: "document_chunks_and_embeddings",
+        up: (db) => {
+            db.exec(`
+                CREATE TABLE IF NOT EXISTS document_chunks (
+                    id TEXT PRIMARY KEY,
+                    file_id INTEGER NOT NULL,
+                    kind TEXT NOT NULL,
+                    section_path_json TEXT NOT NULL,
+                    heading TEXT,
+                    heading_level INTEGER,
+                    start_line INTEGER NOT NULL,
+                    end_line INTEGER NOT NULL,
+                    start_byte INTEGER NOT NULL,
+                    end_byte INTEGER NOT NULL,
+                    text TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    FOREIGN KEY(file_id) REFERENCES files(id) ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_document_chunks_file ON document_chunks(file_id);
+
+                CREATE TABLE IF NOT EXISTS chunk_embeddings (
+                    chunk_id TEXT PRIMARY KEY,
+                    provider TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    dims INTEGER NOT NULL,
+                    vector_blob BLOB NOT NULL,
+                    norm REAL,
+                    created_at INTEGER NOT NULL,
+                    FOREIGN KEY(chunk_id) REFERENCES document_chunks(id) ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_chunk_embeddings_model ON chunk_embeddings(provider, model);
+            `);
+            db.prepare(
+                `INSERT OR REPLACE INTO metadata(key, value) VALUES ('schema_version', '3')`
+            ).run();
+        }
     }
 ];
-

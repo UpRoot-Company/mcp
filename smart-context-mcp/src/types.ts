@@ -329,6 +329,48 @@ export interface Document {
     symbolId?: string;
 }
 
+export type DocumentKind = "markdown" | "mdx" | "text" | "unknown";
+
+export interface DocumentSection {
+    id: string;
+    filePath: string;
+    kind: DocumentKind;
+    title: string;
+    level: number;
+    path: string[];
+    range: { startLine: number; endLine: number; startByte: number; endByte: number };
+    contentHash?: string;
+    summary?: string;
+}
+
+export interface DocumentProfile {
+    filePath: string;
+    kind: DocumentKind;
+    title?: string;
+    frontmatter?: Record<string, unknown>;
+    outline: DocumentSection[];
+    links?: Array<{
+        text?: string;
+        href: string;
+        resolvedPath?: string;
+        hashFragment?: string;
+        range?: { startLine: number; endLine: number; startByte: number; endByte: number };
+    }>;
+    stats: { lineCount: number; charCount: number; headingCount: number };
+}
+
+export interface DocumentOutlineOptions {
+    maxDepth?: number;
+    includeFrontmatter?: boolean;
+    includeCodeBlocks?: boolean;
+    includeLists?: boolean;
+    includeTables?: boolean;
+    minSectionChars?: number;
+    chunkStrategy?: "heading" | "structural" | "fixed";
+    targetChunkChars?: number;
+    maxBlockChars?: number;
+}
+
 export interface FileMatch {
     path: string;
     matches: {
