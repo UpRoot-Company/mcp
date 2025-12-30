@@ -371,6 +371,30 @@ export interface DocumentOutlineOptions {
     maxBlockChars?: number;
 }
 
+export type EmbeddingProvider = "openai" | "local" | "disabled";
+
+export interface EmbeddingVector {
+    provider: EmbeddingProvider;
+    model: string;
+    dims: number;
+    values: Float32Array;
+    norm?: number;
+}
+
+export interface EmbeddingConfig {
+    provider?: "auto" | EmbeddingProvider;
+    normalize?: boolean;
+    batchSize?: number;
+    openai?: {
+        apiKeyEnv?: string;
+        model: string;
+    };
+    local?: {
+        model: string;
+        dims?: number;
+    };
+}
+
 export interface FileMatch {
     path: string;
     matches: {

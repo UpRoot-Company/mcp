@@ -37,7 +37,7 @@ export class DocumentProfiler {
             ? undefined
             : parseFrontmatter(input.content);
 
-        const headings = extractHeadings(lines);
+        const headings = applyMaxDepth(extractHeadings(lines), options.maxDepth);
         const outline = buildOutline({
             filePath: input.filePath,
             kind: input.kind,
@@ -147,6 +147,11 @@ function extractHeadings(lines: string[]): HeadingNode[] {
         headings.push({ title, level, line: index + 1 });
     }
     return headings;
+}
+
+function applyMaxDepth(headings: HeadingNode[], maxDepth?: number): HeadingNode[] {
+    if (!maxDepth || maxDepth <= 0) return headings;
+    return headings.filter(heading => heading.level <= maxDepth);
 }
 
 function extractLinks(lines: string[]): LinkNode[] {

@@ -22,6 +22,7 @@ export class NavigatePillar {
     this.progressLog(progressEnabled, `Start target="${target}" limit=${limit} context=${contextMode}.`);
 
     const metrics = analyzeQuery(target);
+    const docSearchEnabled = contextMode === 'docs' && !metrics.hasPath;
     let projectStats: any = undefined;
     try {
       projectStats = await this.runTool(context, 'project_stats', {}, progress);
@@ -37,6 +38,40 @@ export class NavigatePillar {
       includeHotSpots: include.hotSpots,
       projectStats: { fileCount: projectStats?.fileCount }
     });
+
+    if (docSearchEnabled) {
+      try {
+        const docResults = await this.runTool(context, 'doc_search', {
+          query: target,
+          maxResults: limit,
+          includeEvidence: false
+        }, progress);
+        const sections = Array.isArray(docResults?.results) ? docResults.results : [];
+        if (sections.length > 0) {
+          const locations = sections.map((section: any) => ({
+            filePath: section.filePath ?? '',
+            line: section.range?.startLine ?? 0,
+            snippet: section.preview ?? '',
+            relevance: section.scores?.final ?? 0,
+            type: 'doc'
+          }));
+          this.progressLog(progressEnabled, `Doc search results: ${locations.length}.`);
+          return {
+            success: true,
+            status: 'success',
+            locations,
+            codePreview: locations[0]?.snippet,
+            document: {
+              results: sections
+            },
+            degraded: docResults?.degraded ?? false,
+            budget
+          };
+        }
+      } catch {
+        // fall back to filename/content search
+      }
+    }
 
     const initialType = metrics.hasPath
       ? 'filename'

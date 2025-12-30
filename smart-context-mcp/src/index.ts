@@ -31,6 +31,8 @@ import { ClusterSearchEngine } from "./engine/ClusterSearch/index.js";
 import { IndexDatabase } from "./indexing/IndexDatabase.js";
 import { IncrementalIndexer } from "./indexing/IncrementalIndexer.js";
 import { DocumentIndexer } from "./indexing/DocumentIndexer.js";
+import { EmbeddingRepository } from "./indexing/EmbeddingRepository.js";
+import { DocumentChunkRepository } from "./indexing/DocumentChunkRepository.js";
 import { TransactionLog } from "./engine/TransactionLog.js";
 import { ConfigurationManager } from "./config/ConfigurationManager.js";
 import { PathManager } from "./utils/PathManager.js";
@@ -46,6 +48,9 @@ import { CallSiteAnalyzer } from "./ast/analysis/CallSiteAnalyzer.js";
 import { HotSpotDetector } from "./engine/ClusterSearch/HotSpotDetector.js";
 import { ReferenceFinder } from "./ast/ReferenceFinder.js";
 import { DocumentProfiler } from "./documents/DocumentProfiler.js";
+import { DocumentSearchEngine } from "./documents/search/DocumentSearchEngine.js";
+import { EmbeddingProviderFactory } from "./embeddings/EmbeddingProviderFactory.js";
+import { resolveEmbeddingConfigFromEnv } from "./embeddings/EmbeddingConfig.js";
 
 // Orchestration Imports
 import { OrchestrationEngine } from "./orchestration/OrchestrationEngine.js";
@@ -83,6 +88,9 @@ export class SmartContextServer {
     private hotSpotDetector: HotSpotDetector;
     private documentProfiler: DocumentProfiler;
     private documentIndexer?: DocumentIndexer;
+    private embeddingRepository: EmbeddingRepository;
+    private embeddingProviderFactory: EmbeddingProviderFactory;
+    private documentSearchEngine: DocumentSearchEngine;
     private ghostInterfaceBuilder: GhostInterfaceBuilder;
     private fallbackResolver: FallbackResolver;
     private clusterSearchEngine: ClusterSearchEngine;
@@ -127,8 +135,12 @@ export class SmartContextServer {
         this.skeletonGenerator = new SkeletonGenerator();
         this.skeletonCache = new SkeletonCache(this.rootPath);
         this.indexDatabase = new IndexDatabase(this.rootPath);
+        this.embeddingRepository = new EmbeddingRepository(this.indexDatabase);
+        this.embeddingProviderFactory = new EmbeddingProviderFactory(resolveEmbeddingConfigFromEnv());
         this.documentProfiler = new DocumentProfiler(this.rootPath);
-        this.documentIndexer = new DocumentIndexer(this.rootPath, this.fileSystem, this.indexDatabase);
+        this.documentIndexer = new DocumentIndexer(this.rootPath, this.fileSystem, this.indexDatabase, {
+            embeddingRepository: this.embeddingRepository
+        });
         this.symbolIndex = new SymbolIndex(this.rootPath, this.skeletonGenerator, initialIgnorePatterns, this.indexDatabase);
         this.moduleResolver = new ModuleResolver(this.rootPath);
         this.dependencyGraph = new DependencyGraph(this.rootPath, this.symbolIndex, this.moduleResolver, this.indexDatabase);
@@ -150,6 +162,13 @@ export class SmartContextServer {
             callGraphBuilder: this.callGraphBuilder,
             dependencyGraph: this.dependencyGraph
         });
+        this.documentSearchEngine = new DocumentSearchEngine(
+            this.searchEngine,
+            this.documentIndexer,
+            new DocumentChunkRepository(this.indexDatabase),
+            this.embeddingRepository,
+            this.embeddingProviderFactory
+        );
         this.clusterSearchEngine = new ClusterSearchEngine({
             rootPath: this.rootPath,
             symbolIndex: this.symbolIndex,
@@ -222,6 +241,7 @@ export class SmartContextServer {
         this.internalRegistry.register('doc_skeleton', (args) => this.docSkeletonRaw(args));
         this.internalRegistry.register('doc_section', (args) => this.docSectionRaw(args));
         this.internalRegistry.register('doc_analyze', (args) => this.docAnalyzeRaw(args));
+        this.internalRegistry.register('doc_search', (args) => this.docSearchRaw(args));
     }
 
     private setupHandlers(): void {
@@ -465,6 +485,31 @@ export class SmartContextServer {
                         query: { type: 'string' },
                         type: { type: 'string', enum: ['auto', 'file', 'symbol', 'directory', 'filename'] },
                         maxResults: { type: 'number' }
+                    },
+                    required: ['query']
+                }
+            },
+            {
+                name: 'doc_search',
+                description: 'Search markdown/MDX sections with hybrid ranking (BM25 + vector).',
+                inputSchema: {
+                    type: 'object',
+                    properties: {
+                        query: { type: 'string' },
+                        maxResults: { type: 'number' },
+                        maxCandidates: { type: 'number' },
+                        maxChunkCandidates: { type: 'number' },
+                        maxVectorCandidates: { type: 'number' },
+                        maxEvidenceSections: { type: 'number' },
+                        maxEvidenceChars: { type: 'number' },
+                        includeEvidence: { type: 'boolean' },
+                        snippetLength: { type: 'number' },
+                        rrfK: { type: 'number' },
+                        rrfDepth: { type: 'number' },
+                        useMmr: { type: 'boolean' },
+                        mmrLambda: { type: 'number' },
+                        maxChunksEmbeddedPerRequest: { type: 'number' },
+                        maxEmbeddingTimeMs: { type: 'number' }
                     },
                     required: ['query']
                 }
@@ -1020,6 +1065,42 @@ export class SmartContextServer {
             },
             content: sectionContent
         };
+    }
+
+    private async docSearchRaw(args: any) {
+        const query = args?.query ?? args?.text ?? args?.keywords?.join?.(" ") ?? "";
+        if (!query || !String(query).trim()) {
+            return {
+                query: String(query ?? ""),
+                results: [],
+                evidence: [],
+                degraded: false,
+                provider: null,
+                stats: {
+                    candidateFiles: 0,
+                    candidateChunks: 0,
+                    vectorEnabled: false,
+                    mmrApplied: false
+                }
+            };
+        }
+
+        return this.documentSearchEngine.search(String(query), {
+            maxResults: args?.maxResults ?? args?.limit,
+            maxCandidates: args?.maxCandidates,
+            maxChunkCandidates: args?.maxChunkCandidates,
+            maxVectorCandidates: args?.maxVectorCandidates,
+            maxEvidenceSections: args?.maxEvidenceSections,
+            maxEvidenceChars: args?.maxEvidenceChars,
+            includeEvidence: args?.includeEvidence,
+            snippetLength: args?.snippetLength,
+            rrfK: args?.rrfK,
+            rrfDepth: args?.rrfDepth,
+            useMmr: args?.useMmr,
+            mmrLambda: args?.mmrLambda,
+            maxChunksEmbeddedPerRequest: args?.maxChunksEmbeddedPerRequest,
+            maxEmbeddingTimeMs: args?.maxEmbeddingTimeMs
+        });
     }
 
     private inferDocumentKind(filePath: string): "markdown" | "mdx" | "text" | "unknown" {

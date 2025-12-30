@@ -15,6 +15,7 @@ export class EmbeddingRepository {
     private readonly upsertStmt: Database.Statement;
     private readonly selectStmt: Database.Statement;
     private readonly deleteStmt: Database.Statement;
+    private readonly deleteForFileStmt: Database.Statement;
 
     constructor(private readonly indexDb: IndexDatabase) {
         this.db = indexDb.getHandle();
@@ -35,6 +36,12 @@ export class EmbeddingRepository {
             WHERE chunk_id = ? AND provider = ? AND model = ?
         `);
         this.deleteStmt = this.db.prepare(`DELETE FROM chunk_embeddings WHERE chunk_id = ?`);
+        this.deleteForFileStmt = this.db.prepare(`
+            DELETE FROM chunk_embeddings
+            WHERE chunk_id IN (
+                SELECT id FROM document_chunks WHERE file_id = ?
+            )
+        `);
     }
 
     public upsertEmbedding(chunkId: string, embedding: Omit<StoredEmbedding, "chunkId">): void {
@@ -67,6 +74,16 @@ export class EmbeddingRepository {
 
     public deleteEmbedding(chunkId: string): void {
         this.deleteStmt.run(chunkId);
+    }
+
+    public deleteEmbeddingsForFileId(fileId: number): void {
+        this.deleteForFileStmt.run(fileId);
+    }
+
+    public deleteEmbeddingsForFile(filePath: string): void {
+        const file = this.indexDb.getFile(filePath);
+        if (!file) return;
+        this.deleteEmbeddingsForFileId(file.id);
     }
 }
 

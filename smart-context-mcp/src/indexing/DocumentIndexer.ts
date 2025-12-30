@@ -6,6 +6,7 @@ import { DocumentProfiler } from "../documents/DocumentProfiler.js";
 import { DocumentChunkRepository, StoredDocumentChunk } from "./DocumentChunkRepository.js";
 import { HeadingChunker } from "../documents/chunking/HeadingChunker.js";
 import { DocumentKind, DocumentOutlineOptions } from "../types.js";
+import { EmbeddingRepository } from "./EmbeddingRepository.js";
 
 const SUPPORTED_DOC_EXTENSIONS = new Set<string>([".md", ".mdx"]);
 
@@ -19,15 +20,17 @@ export class DocumentIndexer {
         private readonly rootPath: string,
         private readonly fileSystem: IFileSystem,
         private readonly indexDatabase: IndexDatabase,
-        options?: { outlineOptions?: DocumentOutlineOptions }
+        options?: { outlineOptions?: DocumentOutlineOptions; embeddingRepository?: EmbeddingRepository }
     ) {
         this.chunkRepo = new DocumentChunkRepository(indexDatabase);
         this.chunker = new HeadingChunker();
         this.profiler = new DocumentProfiler(rootPath);
         this.outlineOptions = options?.outlineOptions ?? {};
+        this.embeddingRepository = options?.embeddingRepository;
     }
 
     private outlineOptions: DocumentOutlineOptions;
+    private readonly embeddingRepository?: EmbeddingRepository;
 
     public updateIgnorePatterns(patterns: string[]): void {
         this.ignoreFilter = (ignore as unknown as () => any)().add(patterns ?? []);
@@ -54,7 +57,8 @@ export class DocumentIndexer {
         const content = await this.fileSystem.readFile(relativePath);
         const kind = inferKind(relativePath);
 
-        this.indexDatabase.getOrCreateFile(relativePath, stats.mtime, kind);
+        const fileRecord = this.indexDatabase.getOrCreateFile(relativePath, stats.mtime, kind);
+        this.embeddingRepository?.deleteEmbeddingsForFileId(fileRecord.id);
 
         const profile = this.profiler.profile({
             filePath: relativePath,

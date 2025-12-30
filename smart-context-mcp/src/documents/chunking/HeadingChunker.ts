@@ -1,4 +1,5 @@
 import * as crypto from "crypto";
+import * as path from "path";
 import { DocumentKind, DocumentOutlineOptions, DocumentSection } from "../../types.js";
 import { StoredDocumentChunk } from "../../indexing/DocumentChunkRepository.js";
 import { applyMdxPlaceholders } from "../DocumentProfiler.js";
@@ -16,31 +17,25 @@ export class HeadingChunker {
         const lineOffsets = computeLineOffsets(normalizedContent);
         const strategy = options.chunkStrategy ?? "structural";
         const chunks: StoredDocumentChunk[] = [];
-
-        if (outline.length === 0) {
-            chunks.push(this.buildChunk({
+        const effectiveOutline = outline.length === 0
+            ? [{
                 filePath,
                 kind,
-                sectionPath: [filePath],
-                heading: null,
-                headingLevel: null,
-                startLine: 1,
-                endLine: lines.length,
-                lines,
-                lineOffsets,
-                ordinal: 0
-            }));
-            return chunks;
-        }
+                title: path.basename(filePath),
+                level: 1,
+                path: [path.basename(filePath)],
+                range: { startLine: 1, endLine: lines.length, startByte: 0, endByte: normalizedContent.length }
+            }]
+            : outline;
 
-        for (let index = 0; index < outline.length; index += 1) {
-            const section = outline[index];
+        for (let index = 0; index < effectiveOutline.length; index += 1) {
+            const section = effectiveOutline[index];
             const range = {
                 startLine: section.range.startLine,
                 endLine: section.range.endLine
             };
 
-            if (strategy !== "structural") {
+            if (strategy === "heading") {
                 chunks.push(this.buildChunk({
                     filePath,
                     kind,
@@ -56,7 +51,13 @@ export class HeadingChunker {
                 continue;
             }
 
-            const segments = splitStructuralSegments(lines, range.startLine, range.endLine, options);
+            const segments = strategy === "fixed"
+                ? splitFixedSegments(lines, range.startLine, range.endLine, options)
+                : normalizeSegments(
+                    splitStructuralSegments(lines, range.startLine, range.endLine, options),
+                    options
+                );
+
             let ordinal = 0;
             for (const segment of segments) {
                 if (!segment.text.trim()) continue;
@@ -173,6 +174,202 @@ function splitStructuralSegments(
     }
 
     return segments.filter(segment => segment.startLine <= segment.endLine);
+}
+
+function splitFixedSegments(
+    lines: string[],
+    startLine: number,
+    endLine: number,
+    options: DocumentOutlineOptions
+): Array<{ startLine: number; endLine: number; text: string }> {
+    const target = options.targetChunkChars ?? 1200;
+    const maxBlock = options.maxBlockChars ?? target;
+    let segments = splitRangeByMaxChars(lines, startLine, endLine, maxBlock);
+    if (target && target > 0) {
+        segments = packSegments(segments, target, options.minSectionChars, maxBlock);
+    }
+    if (options.minSectionChars) {
+        segments = mergeSmallSegments(segments, options.minSectionChars, maxBlock);
+    }
+    return segments;
+}
+
+function normalizeSegments(
+    segments: Array<{ startLine: number; endLine: number; text: string }>,
+    options: DocumentOutlineOptions
+): Array<{ startLine: number; endLine: number; text: string }> {
+    const maxBlock = options.maxBlockChars ?? options.targetChunkChars;
+    let normalized = maxBlock ? splitSegmentsByMaxChars(segments, maxBlock) : segments;
+    if (options.targetChunkChars) {
+        normalized = packSegments(normalized, options.targetChunkChars, options.minSectionChars, maxBlock);
+    }
+    if (options.minSectionChars) {
+        normalized = mergeSmallSegments(normalized, options.minSectionChars, maxBlock);
+    }
+    return normalized;
+}
+
+function splitSegmentsByMaxChars(
+    segments: Array<{ startLine: number; endLine: number; text: string }>,
+    maxChars: number
+): Array<{ startLine: number; endLine: number; text: string }> {
+    if (!maxChars || maxChars <= 0) return segments;
+    const expanded: Array<{ startLine: number; endLine: number; text: string }> = [];
+    for (const segment of segments) {
+        if (segment.text.length <= maxChars) {
+            expanded.push(segment);
+            continue;
+        }
+        const lines = segment.text.split(/\r?\n/);
+        let currentStart = segment.startLine;
+        let buffer: string[] = [];
+        let bufferLength = 0;
+        for (let offset = 0; offset < lines.length; offset += 1) {
+            const line = lines[offset] ?? "";
+            const nextLength = bufferLength === 0 ? line.length : bufferLength + 1 + line.length;
+            if (bufferLength > 0 && nextLength > maxChars) {
+                const endLine = currentStart + buffer.length - 1;
+                expanded.push({
+                    startLine: currentStart,
+                    endLine,
+                    text: buffer.join("\n")
+                });
+                currentStart = endLine + 1;
+                buffer = [line];
+                bufferLength = line.length;
+                continue;
+            }
+            buffer.push(line);
+            bufferLength = nextLength;
+        }
+        if (buffer.length > 0) {
+            expanded.push({
+                startLine: currentStart,
+                endLine: currentStart + buffer.length - 1,
+                text: buffer.join("\n")
+            });
+        }
+    }
+    return expanded;
+}
+
+function splitRangeByMaxChars(
+    lines: string[],
+    startLine: number,
+    endLine: number,
+    maxChars: number
+): Array<{ startLine: number; endLine: number; text: string }> {
+    if (!maxChars || maxChars <= 0) {
+        return [makeSegment(lines, startLine, endLine)];
+    }
+    const segments: Array<{ startLine: number; endLine: number; text: string }> = [];
+    let buffer: string[] = [];
+    let bufferLength = 0;
+    let currentStart = startLine;
+
+    for (let lineIndex = startLine; lineIndex <= endLine; lineIndex += 1) {
+        const line = lines[lineIndex - 1] ?? "";
+        const nextLength = bufferLength === 0 ? line.length : bufferLength + 1 + line.length;
+        if (bufferLength > 0 && nextLength > maxChars) {
+            segments.push({
+                startLine: currentStart,
+                endLine: currentStart + buffer.length - 1,
+                text: buffer.join("\n")
+            });
+            currentStart = lineIndex;
+            buffer = [line];
+            bufferLength = line.length;
+            continue;
+        }
+        buffer.push(line);
+        bufferLength = nextLength;
+    }
+
+    if (buffer.length > 0) {
+        segments.push({
+            startLine: currentStart,
+            endLine: currentStart + buffer.length - 1,
+            text: buffer.join("\n")
+        });
+    }
+
+    return segments;
+}
+
+function packSegments(
+    segments: Array<{ startLine: number; endLine: number; text: string }>,
+    targetChars: number,
+    minSectionChars?: number,
+    maxChars?: number
+): Array<{ startLine: number; endLine: number; text: string }> {
+    if (!targetChars || segments.length <= 1) return segments;
+    const packed: Array<{ startLine: number; endLine: number; text: string }> = [];
+    let current = segments[0];
+
+    for (let i = 1; i < segments.length; i += 1) {
+        const next = segments[i];
+        const combinedText = `${current.text}\n${next.text}`;
+        const combinedLength = combinedText.length;
+        const forceMerge = minSectionChars ? current.text.length < minSectionChars : false;
+        const withinTarget = combinedLength <= targetChars;
+        const withinMax = !maxChars || combinedLength <= maxChars;
+        if ((withinTarget || forceMerge) && withinMax) {
+            current = {
+                startLine: current.startLine,
+                endLine: next.endLine,
+                text: combinedText
+            };
+        } else {
+            packed.push(current);
+            current = next;
+        }
+    }
+    packed.push(current);
+    return packed;
+}
+
+function mergeSmallSegments(
+    segments: Array<{ startLine: number; endLine: number; text: string }>,
+    minChars: number,
+    maxChars?: number
+): Array<{ startLine: number; endLine: number; text: string }> {
+    if (!minChars || segments.length <= 1) return segments;
+    const merged: Array<{ startLine: number; endLine: number; text: string }> = [];
+    let i = 0;
+    while (i < segments.length) {
+        const segment = segments[i];
+        if (segment.text.length >= minChars) {
+            merged.push(segment);
+            i += 1;
+            continue;
+        }
+        const next = segments[i + 1];
+        if (next) {
+            const combinedText = `${segment.text}\n${next.text}`;
+            if (!maxChars || combinedText.length <= maxChars) {
+                segments[i + 1] = {
+                    startLine: segment.startLine,
+                    endLine: next.endLine,
+                    text: combinedText
+                };
+                i += 1;
+                continue;
+            }
+        }
+        if (merged.length > 0) {
+            const prev = merged.pop()!;
+            const combinedText = `${prev.text}\n${segment.text}`;
+            merged.push({
+                startLine: prev.startLine,
+                endLine: segment.endLine,
+                text: combinedText
+            });
+        } else {
+            merged.push(segment);
+        }
+        i += 1;
+    }
+    return merged;
 }
 
 function consumeWhile(
