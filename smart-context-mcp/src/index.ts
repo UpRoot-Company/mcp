@@ -243,6 +243,7 @@ export class SmartContextServer {
         this.internalRegistry.register('doc_section', (args) => this.docSectionRaw(args));
         this.internalRegistry.register('doc_analyze', (args) => this.docAnalyzeRaw(args));
         this.internalRegistry.register('doc_search', (args) => this.docSearchRaw(args));
+        this.internalRegistry.register('doc_references', (args) => this.docReferencesRaw(args));
     }
 
     private setupHandlers(): void {
@@ -362,10 +363,16 @@ export class SmartContextServer {
         process.on("uncaughtException", (err) => {
             console.error("[Process] uncaughtException", err);
             logMemory("uncaughtException");
+            if (!this.isTestEnv()) {
+                process.exit(1);
+            }
         });
         process.on("unhandledRejection", (reason) => {
             console.error("[Process] unhandledRejection", reason);
             logMemory("unhandledRejection");
+            if (!this.isTestEnv()) {
+                process.exit(1);
+            }
         });
         process.on("warning", (warning) => {
             console.warn("[Process] warning", warning);
@@ -535,6 +542,17 @@ export class SmartContextServer {
                         }
                     },
                     required: ['query']
+                }
+            },
+            {
+                name: 'doc_references',
+                description: 'List resolved references (links) found in a markdown/MDX document.',
+                inputSchema: {
+                    type: 'object',
+                    properties: {
+                        filePath: { type: 'string' }
+                    },
+                    required: ['filePath']
                 }
             },
             {
@@ -1041,6 +1059,27 @@ export class SmartContextServer {
             filePath,
             profile,
             skeleton: this.documentProfiler.buildSkeleton(profile),
+            ...degradation
+        };
+    }
+
+    private async docReferencesRaw(args: any) {
+        const filePath = this.resolveRelativePath(args.filePath);
+        const content = await this.fileSystem.readFile(filePath);
+        const profile = this.documentProfiler.profile({
+            filePath,
+            content,
+            kind: this.inferDocumentKind(filePath),
+            options: args?.options
+        });
+        const links = profile.links ?? [];
+        const categorized = categorizeDocumentLinks(links);
+        const degradation = buildDegradation(profile.parser?.reason ? [profile.parser.reason] : []);
+        return {
+            filePath,
+            kind: profile.kind,
+            references: links,
+            categorized,
             ...degradation
         };
     }
@@ -2170,6 +2209,33 @@ function buildDegradation(reasons: string[]): { degraded: boolean; reason?: stri
     };
 }
 
+function categorizeDocumentLinks(
+    links: Array<{ resolvedPath?: string; href: string }>
+): { docs: typeof links; code: typeof links; assets: typeof links; external: typeof links } {
+    const docs: typeof links = [];
+    const code: typeof links = [];
+    const assets: typeof links = [];
+    const external: typeof links = [];
+
+    for (const link of links) {
+        if (!link?.resolvedPath) {
+            external.push(link);
+            continue;
+        }
+        if (isDocPath(link.resolvedPath)) {
+            docs.push(link);
+            continue;
+        }
+        if (isCodePath(link.resolvedPath)) {
+            code.push(link);
+            continue;
+        }
+        assets.push(link);
+    }
+
+    return { docs, code, assets, external };
+}
+
 function matchesHeadingPath(candidate: string[], target: string[]): boolean {
     if (candidate.length !== target.length) return false;
     return candidate.every((value, idx) => normalizeHeading(value) === normalizeHeading(target[idx]));
@@ -2181,6 +2247,14 @@ function normalizeHeading(value: string): string {
         .replace(/\s+/g, " ")
         .replace(/[#:*_`~]+/g, "")
         .trim();
+}
+
+function isDocPath(filePath: string): boolean {
+    return /\.(md|mdx)$/i.test(filePath);
+}
+
+function isCodePath(filePath: string): boolean {
+    return /\.(ts|tsx|js|jsx|mjs|cjs|py|go|rs|java|kt|swift|cpp|cc|c|h|hpp|json|yml|yaml)$/i.test(filePath);
 }
 
 function rankSectionsByHeadingPath(

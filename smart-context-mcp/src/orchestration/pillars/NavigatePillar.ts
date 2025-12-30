@@ -23,6 +23,7 @@ export class NavigatePillar {
 
     const metrics = analyzeQuery(target);
     const docSearchEnabled = contextMode === 'docs' && !metrics.hasPath;
+    const docDirectEnabled = contextMode === 'docs' && metrics.hasPath;
     let projectStats: any = undefined;
     try {
       projectStats = await this.runTool(context, 'project_stats', {}, progress);
@@ -38,6 +39,40 @@ export class NavigatePillar {
       includeHotSpots: include.hotSpots,
       projectStats: { fileCount: projectStats?.fileCount }
     });
+
+    if (docDirectEnabled) {
+      const resolvedDoc = await this.resolveDocPath(context, target, progress);
+      if (resolvedDoc) {
+        try {
+          const docSkeleton = await this.runTool(context, 'doc_skeleton', { filePath: resolvedDoc }, progress);
+          const docToc = await this.runTool(context, 'doc_toc', { filePath: resolvedDoc }, progress);
+          const docRefs = await this.runTool(context, 'doc_references', { filePath: resolvedDoc }, progress);
+          return {
+            success: true,
+            status: 'success',
+            locations: [
+              {
+                filePath: resolvedDoc,
+                line: 1,
+                snippet: docSkeleton?.skeleton ?? '',
+                relevance: 1,
+                type: 'doc'
+              }
+            ],
+            codePreview: docSkeleton?.skeleton ?? '',
+            document: {
+              outline: docToc?.outline ?? [],
+              references: docRefs?.references ?? [],
+              categorizedReferences: docRefs?.categorized ?? {}
+            },
+            degraded: Boolean(docSkeleton?.degraded || docToc?.degraded || docRefs?.degraded),
+            budget
+          };
+        } catch {
+          // fall back to search
+        }
+      }
+    }
 
     if (docSearchEnabled) {
       try {
@@ -397,6 +432,28 @@ export class NavigatePillar {
     }
 
     return results;
+  }
+
+  private async resolveDocPath(
+    context: OrchestrationContext,
+    target: string,
+    progress?: { enabled: boolean; label: string }
+  ): Promise<string | null> {
+    if (!target) return null;
+    const cleaned = target.replace(/^["'`]+|["'`]+$/g, '');
+    if (this.isDocPath(cleaned)) {
+      return cleaned;
+    }
+    if (!/[\\/]/.test(cleaned)) {
+      const match = await this.runTool(context, 'search_project', {
+        query: cleaned,
+        type: 'filename',
+        maxResults: 1,
+        includeGlobs: ['**/*.md', '**/*.mdx', '**/docs/**']
+      }, progress);
+      return match?.results?.[0]?.path ?? null;
+    }
+    return cleaned;
   }
 
   private shouldLogProgress(constraints: any): boolean {

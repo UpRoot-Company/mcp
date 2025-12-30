@@ -98,10 +98,16 @@ export class UnderstandPillar {
     // 2. Staged Data Collection (Budget-Aware)
     let skeleton: any = '';
     let docProfile: any = undefined;
+    let docReferences: any = undefined;
+    let relatedCode: any[] | undefined = undefined;
     if (isDocument) {
       const docAnalysis = await this.runTool(context, 'doc_analyze', { filePath }, progress);
       skeleton = docAnalysis?.skeleton ?? '';
       docProfile = docAnalysis?.profile;
+      if (docProfile?.links?.length) {
+        docReferences = this.categorizeDocLinks(docProfile.links);
+        relatedCode = await this.resolveCodeReferences(context, docReferences.code ?? [], progress);
+      }
     } else {
       skeleton = await this.runTool(context, 'read_code', { filePath, view: 'skeleton' }, progress);
     }
@@ -163,7 +169,13 @@ export class UnderstandPillar {
       skeleton,
       symbols: isDocument ? [] : (profile?.structure?.symbols ?? []),
       document: docProfile
-        ? { title: docProfile.title, outline: docProfile.outline ?? [], links: docProfile.links ?? [] }
+        ? {
+            title: docProfile.title,
+            outline: docProfile.outline ?? [],
+            links: docProfile.links ?? [],
+            references: docReferences,
+            relatedCode
+          }
         : undefined,
       callGraph: calls ?? undefined,
       dependencies: Array.isArray(deps?.edges) ? deps.edges : [],
@@ -237,6 +249,64 @@ export class UnderstandPillar {
 
   private isDocumentPath(filePath: string): boolean {
     return /\.(md|mdx)$/i.test(filePath);
+  }
+
+  private categorizeDocLinks(links: Array<{ resolvedPath?: string }>) {
+    const docs: typeof links = [];
+    const code: typeof links = [];
+    const assets: typeof links = [];
+    const external: typeof links = [];
+
+    for (const link of links ?? []) {
+      const resolved = link?.resolvedPath;
+      if (!resolved) {
+        external.push(link);
+        continue;
+      }
+      if (this.isDocumentPath(resolved)) {
+        docs.push(link);
+        continue;
+      }
+      if (this.isCodePath(resolved)) {
+        code.push(link);
+        continue;
+      }
+      assets.push(link);
+    }
+
+    return { docs, code, assets, external };
+  }
+
+  private isCodePath(filePath: string): boolean {
+    return /\.(ts|tsx|js|jsx|mjs|cjs|py|go|rs|java|kt|swift|cpp|cc|c|h|hpp|json|yml|yaml)$/i.test(filePath);
+  }
+
+  private async resolveCodeReferences(
+    context: OrchestrationContext,
+    refs: Array<{ resolvedPath?: string; href?: string }>,
+    progress?: { enabled: boolean; label: string }
+  ): Promise<any[]> {
+    const results: any[] = [];
+    const limited = refs.filter(ref => ref?.resolvedPath).slice(0, 5);
+    for (const ref of limited) {
+      const resolvedPath = ref.resolvedPath as string;
+      try {
+        const match = await this.runTool(context, 'search_project', {
+          query: resolvedPath,
+          type: 'filename',
+          maxResults: 1
+        }, progress);
+        const best = match?.results?.find((item: any) => item?.path === resolvedPath) ?? match?.results?.[0];
+        results.push({
+          path: resolvedPath,
+          status: best ? 'verified' : 'unverified',
+          match: best
+        });
+      } catch {
+        results.push({ path: resolvedPath, status: 'unverified' });
+      }
+    }
+    return results;
   }
 
   private extractSymbol(text: string): string | null {
