@@ -164,6 +164,7 @@ export class WebTreeSitterBackend implements AstBackend {
         }
 
         const candidates: string[] = [];
+        let moduleDir: string | null = null;
         try {
             const pkgPath = this.localRequire.resolve('tree-sitter-wasms/package.json');
             const pkgDir = path.dirname(pkgPath);
@@ -179,13 +180,15 @@ export class WebTreeSitterBackend implements AstBackend {
         }
 
         try {
-            const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+            moduleDir = path.dirname(fileURLToPath(import.meta.url));
+            candidates.push(path.resolve(moduleDir, '..', '..', 'wasm', `tree-sitter-${langName}.wasm`));
             candidates.push(path.resolve(moduleDir, '..', '..', 'node_modules', 'tree-sitter-wasms', 'out', `tree-sitter-${langName}.wasm`));
         } catch {
             // ignore
         }
 
         candidates.push(path.resolve(process.cwd(), 'node_modules', 'tree-sitter-wasms', 'out', `tree-sitter-${langName}.wasm`));
+        candidates.push(path.resolve(process.cwd(), 'wasm', `tree-sitter-${langName}.wasm`));
 
         for (const candidate of candidates) {
             if (candidate && fs.existsSync(candidate)) {

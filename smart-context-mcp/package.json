@@ -4,7 +4,8 @@
   "type": "module",
   "bin": {
     "smart-context-mcp": "dist/index.js",
-    "smart-context-gen-languages": "dist/cli/generate-languages-config.js"
+    "smart-context-gen-languages": "dist/cli/generate-languages-config.js",
+    "smart-context-build-markdown-wasm": "dist/cli/build-markdown-wasm.js"
   },
   "files": [
     "dist",
@@ -20,7 +21,9 @@
     "test": "NODE_OPTIONS=--experimental-vm-modules jest dist --runInBand",
     "test:coverage": "NODE_OPTIONS=--experimental-vm-modules jest dist --coverage",
     "test:coverage:orchestration": "NODE_OPTIONS=--experimental-vm-modules jest dist --runInBand --coverage --collectCoverageFrom=\"dist/orchestration/**/*.js\" --coveragePathIgnorePatterns=\"/dist/tests/\"",
+    "test:markdown-wasm-cli": "node scripts/test-markdown-wasm-cli.mjs",
     "build": "tsc",
+    "build:markdown-wasm": "node dist/cli/build-markdown-wasm.js",
     "start": "tsx src/index.ts"
   },
   "keywords": [

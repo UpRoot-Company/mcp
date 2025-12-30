@@ -3,6 +3,7 @@ import * as path from "path";
 import { DocumentKind, DocumentOutlineOptions, DocumentProfile, DocumentSection } from "../types.js";
 import { DocumentLinkResolver } from "./DocumentLinkResolver.js";
 import { parseMarkdownWithRemark } from "./RemarkDocumentParser.js";
+import { TreeSitterMarkdownParser } from "./TreeSitterMarkdownParser.js";
 
 export interface DocumentProfileInput {
     filePath: string;
@@ -29,17 +30,29 @@ export class DocumentProfiler {
         private readonly linkResolver: DocumentLinkResolver = new DocumentLinkResolver(rootPath)
     ) {}
 
+    private static markdownParser = new TreeSitterMarkdownParser();
+    private static markdownInitStarted = false;
+
     public profile(input: DocumentProfileInput): DocumentProfile {
         const options = input.options ?? {};
         const lines = splitLines(input.content);
         const lineOffsets = computeLineOffsets(input.content);
 
+        const shouldUseTreeSitter = input.kind === "markdown" && DocumentProfiler.markdownParser.isAvailable();
+        if (shouldUseTreeSitter && !DocumentProfiler.markdownInitStarted) {
+            DocumentProfiler.markdownInitStarted = true;
+            void DocumentProfiler.markdownParser.initialize();
+        }
+
         const frontmatter = options.includeFrontmatter === false
             ? undefined
             : parseFrontmatter(input.content);
 
+        const treeHeadings = shouldUseTreeSitter
+            ? DocumentProfiler.markdownParser.tryParseHeadings(input.content)
+            : null;
         const remarkParsed = parseMarkdownWithRemark(input.content, input.kind);
-        const headings = applyMaxDepth(remarkParsed?.headings ?? extractHeadings(lines), options.maxDepth);
+        const headings = applyMaxDepth(treeHeadings ?? remarkParsed?.headings ?? extractHeadings(lines), options.maxDepth);
         const outline = buildOutline({
             filePath: input.filePath,
             kind: input.kind,
