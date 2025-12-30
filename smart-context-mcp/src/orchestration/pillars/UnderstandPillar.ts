@@ -78,6 +78,7 @@ export class UnderstandPillar {
     this.progressLog(progressEnabled, `Resolved filePath="${filePath}" symbol="${symbolName ?? ''}".`);
 
     const metrics = analyzeQuery(subject);
+    const isDocument = this.isDocumentPath(filePath);
     let projectStats: any = undefined;
     try {
       projectStats = await this.runTool(context, 'project_stats', {}, progress);
@@ -95,7 +96,15 @@ export class UnderstandPillar {
     });
 
     // 2. Staged Data Collection (Budget-Aware)
-    const skeleton = await this.runTool(context, 'read_code', { filePath, view: 'skeleton' }, progress);
+    let skeleton: any = '';
+    let docProfile: any = undefined;
+    if (isDocument) {
+      const docAnalysis = await this.runTool(context, 'doc_analyze', { filePath }, progress);
+      skeleton = docAnalysis?.skeleton ?? '';
+      docProfile = docAnalysis?.profile;
+    } else {
+      skeleton = await this.runTool(context, 'read_code', { filePath, view: 'skeleton' }, progress);
+    }
     const profile = await this.runTool(context, 'file_profiler', { filePath }, progress);
 
     let calls: any = null;
@@ -104,7 +113,11 @@ export class UnderstandPillar {
     let degraded = false;
     let refinementReason: string | undefined = undefined;
 
-    const allowGraphs = isStrongQuery(metrics) && (budget.profile !== 'safe' || includeCalls || includeDependencies || include.hotSpots === true);
+    const allowGraphs = !isDocument && isStrongQuery(metrics) && (budget.profile !== 'safe' || includeCalls || includeDependencies || include.hotSpots === true);
+    if (isDocument && (includeCalls || includeDependencies || include.hotSpots === true)) {
+      degraded = true;
+      refinementReason = refinementReason ?? 'document_file';
+    }
     if (includeCalls && symbolName && allowGraphs) {
       calls = await this.runTool(context, 'analyze_relationship', {
         target: symbolName,
@@ -148,7 +161,10 @@ export class UnderstandPillar {
       primaryFile: filePath,
       structure: skeleton,
       skeleton,
-      symbols: profile?.structure?.symbols ?? [],
+      symbols: isDocument ? [] : (profile?.structure?.symbols ?? []),
+      document: docProfile
+        ? { title: docProfile.title, outline: docProfile.outline ?? [], links: docProfile.links ?? [] }
+        : undefined,
       callGraph: calls ?? undefined,
       dependencies: Array.isArray(deps?.edges) ? deps.edges : [],
       relationships: {
@@ -173,7 +189,11 @@ export class UnderstandPillar {
       guidance: {
         message: includeCalls && !symbolName
           ? 'Code structure analyzed. Call graph skipped (no symbol match).'
-          : (degraded ? 'Partial analysis due to budget limits. Provide a stronger query or reduce scope for deep analysis.' : 'Code structure analyzed. Enable include.{callGraph,dependencies,hotSpots,pageRank} for deeper analysis.'),
+          : (degraded
+              ? (refinementReason === 'document_file'
+                  ? 'Document structure analyzed. Graph analysis is not available for documents.'
+                  : 'Partial analysis due to budget limits. Provide a stronger query or reduce scope for deep analysis.')
+              : 'Code structure analyzed. Enable include.{callGraph,dependencies,hotSpots,pageRank} for deeper analysis.'),
         suggestedActions: [
           { pillar: 'read', action: 'view_full', target: filePath },
           { pillar: 'understand', action: 'expand', goal: filePath, include: { callGraph: true, dependencies: true, hotSpots: true, pageRank: true } }
@@ -191,7 +211,7 @@ export class UnderstandPillar {
 
   private extractPath(text: string): string | null {
     if (!text) return null;
-    const pathPattern = /([A-Za-z0-9_./-]+\.(ts|tsx|js|jsx|json|md))/i;
+    const pathPattern = /([A-Za-z0-9_./-]+\.(ts|tsx|js|jsx|json|md|mdx))/i;
     const match = text.match(pathPattern);
     if (match) return match[1];
     if (/\s/.test(text)) {
@@ -213,6 +233,10 @@ export class UnderstandPillar {
       return text.trim();
     }
     return null;
+  }
+
+  private isDocumentPath(filePath: string): boolean {
+    return /\.(md|mdx)$/i.test(filePath);
   }
 
   private extractSymbol(text: string): string | null {

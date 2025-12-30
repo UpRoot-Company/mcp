@@ -30,6 +30,7 @@ import { DataFlowTracer } from "./ast/DataFlowTracer.js";
 import { ClusterSearchEngine } from "./engine/ClusterSearch/index.js";
 import { IndexDatabase } from "./indexing/IndexDatabase.js";
 import { IncrementalIndexer } from "./indexing/IncrementalIndexer.js";
+import { DocumentIndexer } from "./indexing/DocumentIndexer.js";
 import { TransactionLog } from "./engine/TransactionLog.js";
 import { ConfigurationManager } from "./config/ConfigurationManager.js";
 import { PathManager } from "./utils/PathManager.js";
@@ -44,6 +45,7 @@ import { FallbackResolver } from "./resolution/FallbackResolver.js";
 import { CallSiteAnalyzer } from "./ast/analysis/CallSiteAnalyzer.js";
 import { HotSpotDetector } from "./engine/ClusterSearch/HotSpotDetector.js";
 import { ReferenceFinder } from "./ast/ReferenceFinder.js";
+import { DocumentProfiler } from "./documents/DocumentProfiler.js";
 
 // Orchestration Imports
 import { OrchestrationEngine } from "./orchestration/OrchestrationEngine.js";
@@ -79,6 +81,8 @@ export class SmartContextServer {
     private fileVersionManager: FileVersionManager;
     private pathNormalizer: PathNormalizer;
     private hotSpotDetector: HotSpotDetector;
+    private documentProfiler: DocumentProfiler;
+    private documentIndexer?: DocumentIndexer;
     private ghostInterfaceBuilder: GhostInterfaceBuilder;
     private fallbackResolver: FallbackResolver;
     private clusterSearchEngine: ClusterSearchEngine;
@@ -123,6 +127,8 @@ export class SmartContextServer {
         this.skeletonGenerator = new SkeletonGenerator();
         this.skeletonCache = new SkeletonCache(this.rootPath);
         this.indexDatabase = new IndexDatabase(this.rootPath);
+        this.documentProfiler = new DocumentProfiler(this.rootPath);
+        this.documentIndexer = new DocumentIndexer(this.rootPath, this.fileSystem, this.indexDatabase);
         this.symbolIndex = new SymbolIndex(this.rootPath, this.skeletonGenerator, initialIgnorePatterns, this.indexDatabase);
         this.moduleResolver = new ModuleResolver(this.rootPath);
         this.dependencyGraph = new DependencyGraph(this.rootPath, this.symbolIndex, this.moduleResolver, this.indexDatabase);
@@ -212,6 +218,10 @@ export class SmartContextServer {
         this.internalRegistry.register('hotspot_detector', () => this.hotSpotDetector.detectHotSpots());
         this.internalRegistry.register('reference_finder', (args) => this.findReferencesRaw(args));
         this.internalRegistry.register('project_stats', () => this.projectStatsRaw());
+        this.internalRegistry.register('doc_toc', (args) => this.docTocRaw(args));
+        this.internalRegistry.register('doc_skeleton', (args) => this.docSkeletonRaw(args));
+        this.internalRegistry.register('doc_section', (args) => this.docSectionRaw(args));
+        this.internalRegistry.register('doc_analyze', (args) => this.docAnalyzeRaw(args));
     }
 
     private setupHandlers(): void {
@@ -428,6 +438,7 @@ export class SmartContextServer {
         this.symbolIndex.updateIgnorePatterns(normalized);
         this.contextEngine.updateIgnoreFilter(this.createIgnoreFilter(normalized));
         void this.searchEngine.updateExcludeGlobs(normalized);
+        this.documentIndexer?.updateIgnorePatterns(normalized);
     }
 
     private listIntentTools(): any[] {
@@ -605,6 +616,10 @@ export class SmartContextServer {
                                 }
                             ]
                         },
+                        sectionId: { type: 'string' },
+                        headingPath: { type: 'array', items: { type: 'string' } },
+                        includeSubsections: { type: 'boolean' },
+                        outlineOptions: { type: 'object' },
                         includeProfile: { type: 'boolean' },
                         includeHash: { type: 'boolean' }
                     },
@@ -905,6 +920,113 @@ export class SmartContextServer {
             const content = await this.fileSystem.readFile(filePath);
             return this.buildSkeletonFallback(content, error?.message);
         }
+    }
+
+    private async docTocRaw(args: any) {
+        const filePath = this.resolveRelativePath(args.filePath);
+        const content = await this.fileSystem.readFile(filePath);
+        const profile = this.documentProfiler.profile({
+            filePath,
+            content,
+            kind: this.inferDocumentKind(filePath),
+            options: args?.options
+        });
+        return {
+            filePath,
+            kind: profile.kind,
+            outline: profile.outline
+        };
+    }
+
+    private async docSkeletonRaw(args: any) {
+        const filePath = this.resolveRelativePath(args.filePath);
+        const content = await this.fileSystem.readFile(filePath);
+        const profile = this.documentProfiler.profile({
+            filePath,
+            content,
+            kind: this.inferDocumentKind(filePath),
+            options: args?.options
+        });
+        return {
+            filePath,
+            kind: profile.kind,
+            skeleton: this.documentProfiler.buildSkeleton(profile),
+            outline: profile.outline
+        };
+    }
+
+    private async docAnalyzeRaw(args: any) {
+        const filePath = this.resolveRelativePath(args.filePath);
+        const content = await this.fileSystem.readFile(filePath);
+        const profile = this.documentProfiler.profile({
+            filePath,
+            content,
+            kind: this.inferDocumentKind(filePath),
+            options: args?.options
+        });
+        return {
+            filePath,
+            profile,
+            skeleton: this.documentProfiler.buildSkeleton(profile)
+        };
+    }
+
+    private async docSectionRaw(args: any) {
+        const filePath = this.resolveRelativePath(args.filePath);
+        const content = await this.fileSystem.readFile(filePath);
+        const profile = this.documentProfiler.profile({
+            filePath,
+            content,
+            kind: this.inferDocumentKind(filePath),
+            options: args?.options
+        });
+        const outline = profile.outline;
+        const sectionId = args?.sectionId as string | undefined;
+        const headingPath = normalizeHeadingPath(args?.headingPath);
+        const includeSubsections = args?.includeSubsections === true;
+
+        let sectionIndex = -1;
+        if (sectionId) {
+            sectionIndex = outline.findIndex(section => section.id === sectionId);
+        } else if (headingPath && headingPath.length > 0) {
+            sectionIndex = outline.findIndex(section =>
+                matchesHeadingPath(section.path, headingPath)
+            );
+        }
+
+        if (sectionIndex === -1) {
+            const suggestions = outline.slice(0, 5).map(section => section.path);
+            return {
+                success: false,
+                status: 'no_results',
+                message: 'Section not found.',
+                suggestions
+            };
+        }
+
+        const section = outline[sectionIndex];
+        const range = computeSectionRange(outline, sectionIndex, includeSubsections);
+        const lines = content.split(/\r?\n/);
+        const sectionContent = lines.slice(range.startLine - 1, range.endLine).join("\n");
+
+        return {
+            success: true,
+            status: 'success',
+            filePath,
+            kind: profile.kind,
+            section: {
+                ...section,
+                range: { ...section.range, startLine: range.startLine, endLine: range.endLine }
+            },
+            content: sectionContent
+        };
+    }
+
+    private inferDocumentKind(filePath: string): "markdown" | "mdx" | "text" | "unknown" {
+        const ext = path.extname(filePath).toLowerCase();
+        if (ext === ".mdx") return "mdx";
+        if (ext === ".md") return "markdown";
+        return "unknown";
     }
 
     private async searchProjectRaw(args: any) {
@@ -1534,6 +1656,9 @@ export class SmartContextServer {
                                 const progressLogger = suppressLogs ? undefined : (message: string) => console.info(message);
                                 await this.searchEngine.rebuild({ logEvery: 500, logger: progressLogger, logTotals: true });
                                 await this.dependencyGraph.build({ logEvery: 200 });
+                                if (this.documentIndexer) {
+                                    await this.documentIndexer.rebuildAll();
+                                }
                                 const finishedAt = new Date();
                                 this.reindexLastResult = {
                                     success: true,
@@ -1716,18 +1841,40 @@ export class SmartContextServer {
         const content = await this.fileSystem.readFile(filePath);
         const stats = await this.fileSystem.stat(filePath);
         const metadata = FileProfiler.analyzeMetadata(content, absPath);
-        await this.dependencyGraph.ensureBuilt();
-        const outgoing = await this.dependencyGraph.getDependencies(filePath, 'downstream');
-        const incoming = await this.dependencyGraph.getDependencies(filePath, 'upstream');
+        const docKind = this.inferDocumentKind(filePath);
+        const isDocument = docKind !== "unknown";
+        let outgoing: any[] = [];
+        let incoming: any[] = [];
         let skeleton = '';
         let symbols: any[] = [];
-        try {
-            skeleton = await this.skeletonGenerator.generateSkeleton(absPath, content);
-            symbols = await this.symbolIndex.getSymbolsForFile(absPath);
-        } catch (error: any) {
-            const fallback = this.buildSkeletonFallback(content, error?.message);
-            skeleton = fallback;
-            symbols = [];
+        let document: any = undefined;
+
+        if (isDocument) {
+            try {
+                const profile = this.documentProfiler.profile({
+                    filePath,
+                    content,
+                    kind: docKind,
+                    options: args?.outlineOptions
+                });
+                skeleton = this.documentProfiler.buildSkeleton(profile);
+                document = profile;
+            } catch (error: any) {
+                skeleton = this.buildSkeletonFallback(content, error?.message);
+                document = undefined;
+            }
+        } else {
+            await this.dependencyGraph.ensureBuilt();
+            outgoing = await this.dependencyGraph.getDependencies(filePath, 'downstream');
+            incoming = await this.dependencyGraph.getDependencies(filePath, 'upstream');
+            try {
+                skeleton = await this.skeletonGenerator.generateSkeleton(absPath, content);
+                symbols = await this.symbolIndex.getSymbolsForFile(absPath);
+            } catch (error: any) {
+                const fallback = this.buildSkeletonFallback(content, error?.message);
+                skeleton = fallback;
+                symbols = [];
+            }
         }
 
         return {
@@ -1749,7 +1896,13 @@ export class SmartContextServer {
             },
             structure: {
                 skeleton,
-                symbols
+                symbols,
+                document: document ? {
+                    kind: document.kind,
+                    title: document.title,
+                    outline: document.outline,
+                    links: document.links
+                } : undefined
             },
             usage: {
                 incomingCount: incoming.length,
@@ -1854,6 +2007,51 @@ export class SmartContextServer {
         await this.server.connect(transport);
         console.error(`Smart Context MCP Server running on stdio (cwd=${process.cwd()})`);
     }
+}
+
+function normalizeHeadingPath(raw: any): string[] | null {
+    if (!raw) return null;
+    if (Array.isArray(raw)) {
+        return raw.map(value => String(value));
+    }
+    if (typeof raw === "string") {
+        return raw.split(">").map(part => part.trim()).filter(Boolean);
+    }
+    return null;
+}
+
+function matchesHeadingPath(candidate: string[], target: string[]): boolean {
+    if (candidate.length !== target.length) return false;
+    return candidate.every((value, idx) => normalizeHeading(value) === normalizeHeading(target[idx]));
+}
+
+function normalizeHeading(value: string): string {
+    return value
+        .toLowerCase()
+        .replace(/\s+/g, " ")
+        .replace(/[#:*_`~]+/g, "")
+        .trim();
+}
+
+function computeSectionRange(
+    outline: Array<{ level: number; range: { startLine: number; endLine: number } }>,
+    index: number,
+    includeSubsections: boolean
+): { startLine: number; endLine: number } {
+    const startLine = outline[index].range.startLine;
+    if (!includeSubsections) {
+        return outline[index].range;
+    }
+    const level = outline[index].level;
+    let endLine = outline[index].range.endLine;
+    for (let idx = index + 1; idx < outline.length; idx += 1) {
+        if (outline[idx].level <= level) {
+            endLine = outline[idx].range.startLine - 1;
+            break;
+        }
+        endLine = outline[idx].range.endLine;
+    }
+    return { startLine, endLine };
 }
 
 const isDirectRun = (() => {

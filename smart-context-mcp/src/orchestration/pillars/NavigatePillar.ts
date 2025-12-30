@@ -141,9 +141,17 @@ export class NavigatePillar {
       const profile = await this.runTool(context, 'file_profiler', { filePath: primary.path }, progress);
       response.smartProfile = profile;
       if (primary?.path) {
-        const skeleton = await this.runTool(context, 'read_code', { filePath: primary.path, view: 'skeleton' }, progress);
-        if (typeof skeleton === 'string') {
-          response.codePreview = skeleton;
+        if (this.isDocPath(primary.path)) {
+          const docSkeleton = await this.runTool(context, 'doc_skeleton', { filePath: primary.path }, progress);
+          if (typeof docSkeleton?.skeleton === 'string') {
+            response.codePreview = docSkeleton.skeleton;
+            response.document = { outline: docSkeleton.outline ?? [] };
+          }
+        } else {
+          const skeleton = await this.runTool(context, 'read_code', { filePath: primary.path, view: 'skeleton' }, progress);
+          if (typeof skeleton === 'string') {
+            response.codePreview = skeleton;
+          }
         }
       }
     }
@@ -348,7 +356,7 @@ export class NavigatePillar {
       const fallback = await this.runTool(context, 'search_project', {
         query: target,
         maxResults: limit,
-        includeGlobs: ['**/*.md', '**/docs/**']
+        includeGlobs: ['**/*.md', '**/*.mdx', '**/docs/**']
       });
       return fallback?.results ?? [];
     }
@@ -371,7 +379,7 @@ export class NavigatePillar {
   }
 
   private isDocPath(filePath: string): boolean {
-    return /\.md$/i.test(filePath) || /\/docs\//i.test(filePath);
+    return /\.(md|mdx)$/i.test(filePath) || /\/docs\//i.test(filePath);
   }
 
   private isDefinitionSymbol(item: any): boolean {

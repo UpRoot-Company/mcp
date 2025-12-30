@@ -13,6 +13,7 @@ import { ProjectIndexManager } from './ProjectIndexManager.js';
 import type { ProjectIndex, FileIndexEntry } from './ProjectIndex.js';
 import { ImportExtractor } from '../ast/ImportExtractor.js';
 import { ExportExtractor } from '../ast/ExportExtractor.js';
+import { DocumentIndexer } from './DocumentIndexer.js';
 
 export interface IncrementalIndexerOptions {
     watch?: boolean;
@@ -65,6 +66,7 @@ export class IncrementalIndexer {
     private currentIndex: ProjectIndex | null = null;
     private importExtractor: ImportExtractor;
     private exportExtractor: ExportExtractor;
+    private documentIndexer?: DocumentIndexer;
 
     constructor(
         private readonly rootPath: string,
@@ -73,11 +75,13 @@ export class IncrementalIndexer {
         private readonly indexDatabase?: IndexDatabase,
         private readonly moduleResolver?: ModuleResolver,
         private readonly configurationManager?: ConfigurationManager,
-        private readonly options: IncrementalIndexerOptions = {}
+        private readonly options: IncrementalIndexerOptions = {},
+        documentIndexer?: DocumentIndexer
     ) {
         this.indexManager = new ProjectIndexManager(rootPath);
         this.importExtractor = new ImportExtractor(rootPath);
         this.exportExtractor = new ExportExtractor(rootPath);
+        this.documentIndexer = documentIndexer;
     }
 
     public async start(): Promise<void> {
@@ -216,7 +220,14 @@ export class IncrementalIndexer {
 
     private enqueuePath(filePath: string, priority: PriorityLevel = 'medium') {
         if (!this.isWithinRoot(filePath)) return;
-        if (!this.symbolIndex.isSupported(filePath)) return;
+        const isCode = this.symbolIndex.isSupported(filePath);
+        const isDoc = this.isDocumentFile(filePath);
+        if (!isCode && !isDoc) return;
+
+        if (isDoc && !isCode) {
+            void this.documentIndexer?.indexFile(filePath);
+            return;
+        }
 
         const normalized = path.resolve(filePath);
         const realpathSync = (fs as any).realpathSync?.native ?? fs.realpathSync;
@@ -345,7 +356,7 @@ export class IncrementalIndexer {
 
                 if (entry.isDirectory()) {
                     stack.push(fullPath);
-                } else if (this.symbolIndex.isSupported(fullPath)) {
+                } else if (this.symbolIndex.isSupported(fullPath) || this.isDocumentFile(fullPath)) {
                     supportedFiles.push(fullPath);
                 }
             }
@@ -438,7 +449,7 @@ export class IncrementalIndexer {
 
                 if (entry.isDirectory()) {
                     stack.push(fullPath);
-                } else if (this.symbolIndex.isSupported(fullPath)) {
+                } else if (this.symbolIndex.isSupported(fullPath) || this.isDocumentFile(fullPath)) {
                     // Check if already in index
                     const relPath = path.relative(this.rootPath, fullPath);
                     const existing = this.indexDatabase?.getFile(relPath);
@@ -517,6 +528,10 @@ export class IncrementalIndexer {
             const absolutePath = path.resolve(filePath);
             this.removeFromQueues(absolutePath);
 
+            if (this.isDocumentFile(filePath)) {
+                this.documentIndexer?.deleteFile(filePath);
+            }
+
             // Tier 3: Ghost Archeology - Register symbols from deleted file as ghosts
             if (this.indexDatabase) {
                 const relativePath = path.relative(this.rootPath, absolutePath).replace(/\\\\/g, '/');
@@ -556,6 +571,10 @@ export class IncrementalIndexer {
         } catch (error) {
             console.warn(`[IncrementalIndexer] failed to remove directory ${dirPath}:`, error);
         }
+    }
+
+    private isDocumentFile(filePath: string): boolean {
+        return this.documentIndexer?.isSupported(filePath) ?? false;
     }
 
     private shouldIgnore(absolutePath: string): boolean {
