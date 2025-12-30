@@ -59,11 +59,16 @@
     "fast-levenshtein": "^2.0.6",
     "ignore": "^5.2.0",
     "lru-cache": "^10.2.0",
+    "mdast-util-to-string": "^3.2.0",
     "resolve": "^1.22.11",
+    "remark-mdx": "^3.0.1",
+    "remark-parse": "^11.0.0",
     "tree-sitter-wasms": "^0.1.13",
     "tsconfig-paths": "^4.2.0",
     "tsx": "^4.7.0",
     "typescript": "^5.3.3",
+    "unified": "^11.0.5",
+    "unist-util-visit": "^5.0.0",
     "web-tree-sitter": "^0.25.10",
     "xxhashjs": "^0.2.2"
   }

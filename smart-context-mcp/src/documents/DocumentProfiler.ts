@@ -2,6 +2,7 @@ import * as crypto from "crypto";
 import * as path from "path";
 import { DocumentKind, DocumentOutlineOptions, DocumentProfile, DocumentSection } from "../types.js";
 import { DocumentLinkResolver } from "./DocumentLinkResolver.js";
+import { parseMarkdownWithRemark } from "./RemarkDocumentParser.js";
 
 export interface DocumentProfileInput {
     filePath: string;
@@ -37,7 +38,8 @@ export class DocumentProfiler {
             ? undefined
             : parseFrontmatter(input.content);
 
-        const headings = applyMaxDepth(extractHeadings(lines), options.maxDepth);
+        const remarkParsed = parseMarkdownWithRemark(input.content, input.kind);
+        const headings = applyMaxDepth(remarkParsed?.headings ?? extractHeadings(lines), options.maxDepth);
         const outline = buildOutline({
             filePath: input.filePath,
             kind: input.kind,
@@ -46,8 +48,23 @@ export class DocumentProfiler {
             lineOffsets
         });
 
-        const links = extractLinks(lines)
-            .map(link => this.linkResolver.resolveLink(input.filePath, link.href, link.text));
+        const rawLinks = remarkParsed?.links ?? extractLinks(lines);
+        const links = rawLinks.map(link => {
+            const resolved = this.linkResolver.resolveLink(input.filePath, link.href, link.text);
+            const lineIndex = Math.max(0, Math.min(lines.length - 1, (link.line ?? 1) - 1));
+            const lineText = lines[lineIndex] ?? "";
+            const startByte = lineOffsets[lineIndex] ?? 0;
+            const endByte = startByte + lineText.length;
+            return {
+                ...resolved,
+                range: {
+                    startLine: lineIndex + 1,
+                    endLine: lineIndex + 1,
+                    startByte,
+                    endByte
+                }
+            };
+        });
 
         const title = resolveTitle(frontmatter, outline, input.filePath);
         return {
@@ -157,6 +174,25 @@ function applyMaxDepth(headings: HeadingNode[], maxDepth?: number): HeadingNode[
 function extractLinks(lines: string[]): LinkNode[] {
     const links: LinkNode[] = [];
     let inCodeBlock = false;
+    const definitions = new Map<string, string>();
+
+    for (let index = 0; index < lines.length; index += 1) {
+        const line = lines[index];
+        if (isFence(line)) {
+            inCodeBlock = !inCodeBlock;
+            continue;
+        }
+        if (inCodeBlock) continue;
+        const defMatch = line.match(/^\s*\[([^\]]+)\]:\s*(\S+)(?:\s+\"[^\"]+\")?\s*$/);
+        if (defMatch) {
+            const key = normalizeReference(defMatch[1]);
+            const href = defMatch[2].replace(/^<|>$/g, "");
+            if (key && href) {
+                definitions.set(key, href);
+            }
+        }
+    }
+
     for (let index = 0; index < lines.length; index += 1) {
         const line = lines[index];
         if (isFence(line)) {
@@ -169,6 +205,15 @@ function extractLinks(lines: string[]): LinkNode[] {
         while ((match = regex.exec(line)) !== null) {
             const text = match[1];
             const href = match[2];
+            links.push({ text, href, line: index + 1 });
+        }
+
+        const refRegex = /(?<!!)\[([^\]]+)\]\[([^\]]*)\]/g;
+        while ((match = refRegex.exec(line)) !== null) {
+            const text = match[1];
+            const rawId = match[2] || match[1];
+            const href = definitions.get(normalizeReference(rawId));
+            if (!href) continue;
             links.push({ text, href, line: index + 1 });
         }
     }
@@ -295,6 +340,10 @@ function stripInlineJsx(value: string): string {
 
 function isFence(line: string): boolean {
     return /^```|^~~~/.test(line.trim());
+}
+
+function normalizeReference(value: string): string {
+    return String(value || "").trim().toLowerCase();
 }
 
 export function applyMdxPlaceholders(content: string): string {
