@@ -226,12 +226,14 @@ function selectParser(filePath: string): "tree-sitter-md" | "remark-md" | "remar
 
 권장 절차(프로젝트 스크립트화):
 
-1. `tree-sitter-markdown` grammar 소스 준비(서브모듈/벤더링/다운로드 중 택1)
+1. `tree-sitter-markdown` grammar **로컬** 소스 준비(서브모듈/벤더링 중 택1)
 2. 빌드 환경 준비(emscripten 또는 tree-sitter CLI의 wasm 빌드 지원)
-3. 출력 파일명을 `tree-sitter-markdown.wasm`으로 고정
+3. `node dist/cli/build-markdown-wasm.js --source <localPath> [--out <dir>]` 실행  
+   (또는 `npm run build:markdown-wasm -- --source <localPath>`)
 4. 배포 경로에 복사:
+   - 기본 출력: `smart-context-mcp/wasm/tree-sitter-markdown.wasm`
    - 런타임에서 `SMART_CONTEXT_WASM_DIR`를 우선 사용(권장)
-   - 또는 `node_modules/tree-sitter-wasms/out/`에 포함(현재 배포 전략과 호환)
+   - 또는 `node_modules/tree-sitter-wasms/out/`에 포함(기존 배포 전략과 호환)
 
 실패 시 동작:
 - WASM 로딩 실패 → `remark` 폴백으로 자동 전환(기능 축소 + 안내 메시지)
@@ -695,7 +697,7 @@ async function indexFile(absPath: string) {
   - 출력: heading tree
 - `doc_references`
   - 입력: `{ filePath }`
-  - 출력: outbound 링크 목록(+ resolvedPath)
+  - 출력: outbound 링크 목록(+ resolvedPath) + 분류(categorized)
 - `doc_search` (Phase 3)
   - 입력: `{ query, maxResults?, includeGlobs?, embedding?: { provider?: "auto"|"openai"|"local"|"disabled" } }`
   - 출력: section TopK (filePath, sectionId, scores, preview)
@@ -704,7 +706,13 @@ async function indexFile(absPath: string) {
 
 ```ts
 export interface DocTocArgs { filePath: string; maxDepth?: number }
-export interface DocTocResult { filePath: string; kind: "markdown" | "mdx"; outline: DocumentSection[] }
+export interface DocTocResult {
+  filePath: string;
+  kind: "markdown" | "mdx";
+  outline: DocumentSection[];
+  degraded?: boolean;
+  reason?: string;
+}
 
 export interface DocSectionArgs {
   filePath: string;
@@ -717,19 +725,44 @@ export interface DocSectionResult {
   kind: "markdown" | "mdx";
   section: DocumentSection;
   content: string;
+  status?: "success" | "closest_match" | "no_results";
+  resolvedHeadingPath?: string[];
+  requestedHeadingPath?: string[];
+  degraded?: boolean;
+  reason?: string;
+  reasons?: string[];
 }
 
 export interface DocSkeletonArgs { filePath: string; options?: DocumentOutlineOptions }
-export interface DocSkeletonResult { filePath: string; kind: "markdown" | "mdx"; skeleton: string; outline: DocumentSection[] }
+export interface DocSkeletonResult {
+  filePath: string;
+  kind: "markdown" | "mdx";
+  skeleton: string;
+  outline: DocumentSection[];
+  degraded?: boolean;
+  reason?: string;
+}
 
 export interface DocAnalyzeArgs { filePath: string; options?: DocumentOutlineOptions }
-export interface DocAnalyzeResult { filePath: string; profile: DocumentProfile; skeleton: string }
+export interface DocAnalyzeResult {
+  filePath: string;
+  profile: DocumentProfile;
+  skeleton: string;
+  degraded?: boolean;
+  reason?: string;
+}
 
 export interface DocSearchArgs {
   query: string;
   maxResults?: number;
   includeGlobs?: string[];          // default: ["**/*.md","**/*.mdx"]
-  embedding?: { provider?: "auto" | "openai" | "local" | "disabled" };
+  embedding?: {
+    provider?: "auto" | "openai" | "local" | "disabled";
+    normalize?: boolean;
+    batchSize?: number;
+    openai?: { apiKeyEnv?: string; model?: string };
+    local?: { model?: string; dims?: number };
+  };
 }
 
 export interface DocSearchResultEntry {
@@ -743,6 +776,29 @@ export interface DocSearchResultEntry {
 export interface DocSearchResult {
   query: string;
   results: DocSearchResultEntry[];
+  evidence?: DocSearchResultEntry[];
+  degraded?: boolean;
+  reason?: string;
+  provider?: { name: string; model: string; dims: number } | null;
+  stats?: {
+    candidateFiles: number;
+    candidateChunks: number;
+    vectorEnabled: boolean;
+    mmrApplied: boolean;
+  };
+}
+
+export interface DocReferencesArgs { filePath: string }
+export interface DocReferencesResult {
+  filePath: string;
+  kind: "markdown" | "mdx";
+  references: Array<{ text?: string; href: string; resolvedPath?: string; hashFragment?: string }>;
+  categorized: {
+    docs: Array<{ resolvedPath?: string; href: string }>;
+    code: Array<{ resolvedPath?: string; href: string }>;
+    assets: Array<{ resolvedPath?: string; href: string }>;
+    external: Array<{ resolvedPath?: string; href: string }>;
+  };
   degraded?: boolean;
   reason?: string;
 }
@@ -756,9 +812,10 @@ export interface DocSearchResult {
 - `navigate` (`context="docs"`)
   - 파일 후보는 기존 `search_project(type="file")`를 활용하되
   - 문서 내부 탐색은 `doc_toc`, 문서 간 참조는 `doc_references`로 확장
+  - 문서 경로가 명확할 경우 `doc_skeleton`/`doc_toc`/`doc_references`를 바로 반환
 - `understand`
   - goal/target이 문서이거나 `.md/.mdx`가 명시되면 `doc_analyze` 중심의 응답 구성
-  - 코드 ↔ 문서 연결(Phase 4): 문서 섹션에서 언급된 심볼/파일을 `navigate`로 교차 확인
+  - 코드 ↔ 문서 연결(Phase 4): 문서 링크를 분류하고 code 링크는 `search_project`로 교차 확인하여 `relatedCode`로 제공
 
 #### 10.2.1 `read` 확장 시그니처(제안)
 
@@ -896,6 +953,7 @@ export interface DocSearchResult {
 ### 12.2 Runtime Config (예시)
 
 - `SMART_CONTEXT_WASM_DIR`: 커스텀 wasm 로드 경로(우선순위 1)
+- 기본 wasm 검색 경로: `smart-context-mcp/wasm/` (배포용 기본 위치)
 - `SMART_CONTEXT_EMBEDDING_PROVIDER=auto|openai|local|disabled`
 - `OPENAI_API_KEY`(또는 `EmbeddingConfig.openai.apiKeyEnv`)
 - `SMART_CONTEXT_EMBEDDING_MODEL_OPENAI`, `SMART_CONTEXT_EMBEDDING_MODEL_LOCAL`(선택)
