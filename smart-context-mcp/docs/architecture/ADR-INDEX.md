@@ -8,6 +8,8 @@ All ADRs live in `smart-context-mcp/docs/adr/`. This index is intentionally **cu
   Maps to: `01-system-overview.md`, `03-tools-and-workflows.md`, `../agent/TOOL_REFERENCE.md`
 - **ADR-040 — Five Pillars (Explore-first) consolidation**: `../adr/ADR-040-five-pillars-explore-consolidation.md`  
   Maps to: `03-tools-and-workflows.md`
+- **ADR-041 — Integrity Audit Modes (Cross-source consistency)**: `../adr/ADR-041-integrity-audit-modes.md`  
+  Maps to: `03-tools-and-workflows.md`, `06-reliability-engineering.md`
 - **ADR-022 — Scalable Architecture (SQLite / WAL)**: `../adr/ADR-022-scalable-architecture.md`  
   Maps to: `02-core-engine.md`, `06-reliability-engineering.md`
 - **ADR-014 — Smart File Profile (Skeleton-first)**: `../adr/ADR-014-smart-file-profile.md`  
