@@ -2,6 +2,17 @@
 
 Smart Context MCP is a Model Context Protocol (MCP) server for AI-assisted code understanding and safe code changes.
 
+## Quickstart (repo)
+
+```bash
+cd smart-context-mcp
+npm ci
+npm run build
+node dist/index.js
+```
+
+If you see `better-sqlite3 ... NODE_MODULE_VERSION ...`, run `npm rebuild better-sqlite3` (Node native module rebuild).
+
 ## Five Pillars (agent-facing API)
 
 Per `smart-context-mcp/docs/adr/ADR-040-five-pillars-explore-consolidation.md`, the primary interface is:
@@ -12,14 +23,14 @@ Per `smart-context-mcp/docs/adr/ADR-040-five-pillars-explore-consolidation.md`, 
 - `write` — create/scaffold files
 - `manage` — status/undo/redo/reindex/history
 
-Legacy tool names (e.g. `search_project`, `read_code`, `edit_code`) are opt-in; see `smart-context-mcp/docs/legacy/README.md`.
+Legacy tool names (e.g. `search_project`, `read_code`, `edit_code`) are opt-in; see `smart-context-mcp/docs/compat/README.md`.
 
 ## Docs
 
 - `smart-context-mcp/docs/README.md` — entry point
 - `smart-context-mcp/docs/agent/AGENT_PLAYBOOK.md` — usage patterns
 - `smart-context-mcp/docs/agent/TOOL_REFERENCE.md` — pillar reference
-- `smart-context-mcp/docs/guides/getting-started.md` — setup + first flows
+- `smart-context-mcp/docs/guides/getting-started.md` — setup + first flows (Node v22)
 
 ## Markdown WASM (tree-sitter)
 

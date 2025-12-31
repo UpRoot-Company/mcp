@@ -4,21 +4,20 @@ Smart Context MCP exposes a small, intent-based tool surface (**Five Pillars**, 
 
 ## Start here
 
-### For AI agents / integrations
-- `smart-context-mcp/docs/agent/AGENT_PLAYBOOK.md` — usage patterns
-- `smart-context-mcp/docs/agent/TOOL_REFERENCE.md` — pillar API reference
-- `smart-context-mcp/docs/adr/ADR-040-five-pillars-explore-consolidation.md` — tool surface spec (explore-first)
+### For agents / integrations
+- `smart-context-mcp/docs/agent/TOOL_REFERENCE.md` — current tool schemas (what you can call)
+- `smart-context-mcp/docs/agent/AGENT_PLAYBOOK.md` — recommended usage flows
+- `smart-context-mcp/docs/compat/README.md` — legacy/compat tool names (opt-in)
 
-### For humans
-- `smart-context-mcp/docs/guides/getting-started.md` — installation + first flows
-- `smart-context-mcp/docs/architecture/01-system-overview.md` — big picture
-- `smart-context-mcp/docs/architecture/03-tools-and-workflows.md` — pillar workflows
+### For running locally
+- `smart-context-mcp/docs/guides/getting-started.md` — run the server + connect it to an MCP host
+- `smart-context-mcp/docs/guides/configuration.md` — common env knobs (minimal + accurate)
+- `smart-context-mcp/docs/guides/troubleshooting.md` — common “it doesn’t work” fixes
 
 ## Directory map
 
 - `agent/` — agent-facing docs (pillars + patterns)
-- `guides/` — setup/integration/how-to
-- `architecture/` — internal design docs
+- `guides/` — setup/config/troubleshooting
+- `ADR-INDEX.md` — curated ADR pointers (no duplication)
 - `adr/` — decision records (source of truth for architecture evolution)
-- `legacy/` — opt-in legacy/compat interface docs
-
+- `compat/` — opt-in legacy/compat interface docs

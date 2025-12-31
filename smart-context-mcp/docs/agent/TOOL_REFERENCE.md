@@ -8,7 +8,7 @@ The agent-facing interface is the **Five Pillars** (ADR-040):
 - `write` — create/scaffold files
 - `manage` — status/undo/redo/reindex/history
 
-Legacy tools (e.g. `search_project`, `read_code`, `edit_code`) are **hidden by default**; see `smart-context-mcp/docs/legacy/README.md`.
+Legacy tools (e.g. `search_project`, `read_code`, `edit_code`) are **hidden by default**; see `smart-context-mcp/docs/compat/README.md`.
 
 ---
 
