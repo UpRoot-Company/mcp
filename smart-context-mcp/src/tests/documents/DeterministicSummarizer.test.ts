@@ -1,5 +1,5 @@
 import { describe, it, expect } from "@jest/globals";
-import { buildDeterministicPreview } from "../../documents/summary/DeterministicSummarizer.js";
+import { buildDeterministicPreview, buildDeterministicSummary } from "../../documents/summary/DeterministicSummarizer.js";
 
 describe("DeterministicSummarizer", () => {
     it("prefers lines matching query tokens and keeps output under maxChars", () => {
@@ -42,5 +42,24 @@ describe("DeterministicSummarizer", () => {
 
         expect(preview).toContain("@returns");
     });
-});
 
+    it("builds a shorter summary variant", () => {
+        const text = [
+            "# Guide",
+            "- Install: run npm install",
+            "- Usage: run npm start",
+            "- Notes: clear cache if it fails",
+            ""
+        ].join("\n");
+
+        const { summary } = buildDeterministicSummary({
+            text,
+            query: "install",
+            kind: "markdown",
+            maxChars: 60
+        });
+
+        expect(summary.length).toBeLessThanOrEqual(60);
+        expect(summary.toLowerCase()).toContain("install");
+    });
+});

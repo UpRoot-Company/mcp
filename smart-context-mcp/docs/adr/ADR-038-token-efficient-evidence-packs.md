@@ -291,6 +291,7 @@ CREATE TABLE IF NOT EXISTS chunk_summaries (
 | `SMART_CONTEXT_ATTACH_DOC_SECTIONS_MAX` | `0` | 자동 첨부 시 최대 섹션 수(0이면 비활성) |
 | `SMART_CONTEXT_DOC_SNIPPET_MAX_CHARS` | `1200` | NAVIGATE 등에서 문서 스니펫 hard cap |
 | `SMART_CONTEXT_DOC_SKELETON_MAX_CHARS` | `2000` | READ에서 문서 skeleton hard cap |
+| `SMART_CONTEXT_DOC_SECTION_MAX_CHARS` | `4000` | `doc_section` content hard cap (preview/summary/raw 모두 적용) |
 
 ---
 

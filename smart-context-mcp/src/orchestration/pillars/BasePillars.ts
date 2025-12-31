@@ -25,11 +25,17 @@ export class ReadPillar {
     let documentOutline: any = undefined;
 
     if (isDocument && (sectionId || headingPath)) {
+      const mode = (constraints.mode ?? (view === 'full' ? 'raw' : 'preview')) as 'summary' | 'preview' | 'raw';
+      const maxChars = typeof constraints.maxChars === 'number'
+        ? constraints.maxChars
+        : Number.parseInt(process.env.SMART_CONTEXT_DOC_SECTION_MAX_CHARS ?? (mode === 'raw' ? '12000' : '4000'), 10);
       const docSection = await this.runTool(context, 'doc_section', {
         filePath: resolvedPath,
         sectionId,
         headingPath,
-        includeSubsections: constraints.includeSubsections === true
+        includeSubsections: constraints.includeSubsections === true,
+        mode,
+        maxChars
       });
       content = docSection?.content ?? '';
       documentOutline = docSection?.section ? [docSection.section] : undefined;

@@ -16,6 +16,8 @@ export interface IntentConstraints {
   sectionId?: string;
   headingPath?: string[];
   includeSubsections?: boolean;
+  mode?: 'summary' | 'preview' | 'raw';
+  maxChars?: number;
   outlineOptions?: DocumentOutlineOptions;
   includeProfile?: boolean;
   includeHash?: boolean;

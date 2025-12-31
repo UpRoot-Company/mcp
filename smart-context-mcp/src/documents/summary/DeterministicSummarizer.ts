@@ -29,28 +29,41 @@ export function buildDeterministicPreview(params: {
         return { preview, truncated: base.length > maxChars };
     }
 
-    scored.sort((a, b) => b.score - a.score);
-
-    const selected: string[] = [];
-    let used = 0;
-    for (const { line } of scored) {
-        if (selected.includes(line)) continue;
-        const nextLen = used + (selected.length > 0 ? 1 : 0) + line.length;
-        if (nextLen > maxChars) continue;
-        selected.push(line);
-        used = nextLen;
-        if (selected.length >= 8) break;
-    }
-
-    if (selected.length === 0) {
-        const base = collapseWhitespace(text).trim();
-        const preview = base.length > maxChars ? `${base.slice(0, maxChars - 1)}…` : base;
-        return { preview, truncated: base.length > maxChars };
-    }
-
-    const preview = selected.join("\n");
+    const preview = selectLines(scored, maxChars, 8);
     const truncated = collapseWhitespace(text).length > preview.length;
     return { preview, truncated };
+}
+
+export function buildDeterministicSummary(params: {
+    text: string;
+    query?: string;
+    kind?: DocumentKind;
+    maxChars: number;
+}): { summary: string; truncated: boolean } {
+    const maxChars = Math.max(32, Math.min(2000, params.maxChars));
+    const text = String(params.text ?? "");
+    const kind = params.kind ?? "unknown";
+    const queryTokens = tokenizeQuery(params.query ?? "");
+
+    const lines = text.split(/\r?\n/);
+    const scored: Array<{ line: string; score: number }> = [];
+    for (const raw of lines) {
+        const line = normalizeLine(raw);
+        if (!line) continue;
+        const score = scoreLine(line, queryTokens, kind);
+        if (score <= 0) continue;
+        scored.push({ line, score });
+    }
+
+    if (scored.length === 0) {
+        const base = collapseWhitespace(text).trim();
+        const summary = base.length > maxChars ? `${base.slice(0, maxChars - 1)}…` : base;
+        return { summary, truncated: base.length > maxChars };
+    }
+
+    const summary = selectLines(scored, maxChars, 3);
+    const truncated = collapseWhitespace(text).length > summary.length;
+    return { summary, truncated };
 }
 
 function tokenizeQuery(query: string): string[] {
@@ -100,3 +113,25 @@ function scoreLine(line: string, queryTokens: string[], kind: DocumentKind): num
     return score;
 }
 
+function selectLines(scored: Array<{ line: string; score: number }>, maxChars: number, maxLines: number): string {
+    scored.sort((a, b) => b.score - a.score);
+
+    const selected: string[] = [];
+    let used = 0;
+    for (const { line } of scored) {
+        if (selected.includes(line)) continue;
+        const nextLen = used + (selected.length > 0 ? 1 : 0) + line.length;
+        if (nextLen > maxChars) continue;
+        selected.push(line);
+        used = nextLen;
+        if (selected.length >= maxLines) break;
+    }
+
+    if (selected.length === 0) {
+        const base = scored[0]?.line ?? "";
+        if (!base) return "";
+        return base.length > maxChars ? `${base.slice(0, Math.max(1, maxChars - 1))}…` : base;
+    }
+
+    return selected.join("\n");
+}

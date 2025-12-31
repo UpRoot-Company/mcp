@@ -57,6 +57,7 @@ export type StoredEvidencePack = {
 
 export class EvidencePackRepository {
     private readonly db: Database.Database;
+    private readonly summaryHasContentHash: boolean;
 
     private readonly upsertPackStmt: Database.Statement;
     private readonly deletePackStmt: Database.Statement;
@@ -68,6 +69,8 @@ export class EvidencePackRepository {
 
     constructor(private readonly indexDb: IndexDatabase) {
         this.db = indexDb.getHandle();
+        const summaryCols = this.db.prepare(`PRAGMA table_info(chunk_summaries)`).all() as Array<{ name?: string }>;
+        this.summaryHasContentHash = summaryCols.some(col => col?.name === "content_hash");
 
         this.upsertPackStmt = this.db.prepare(`
             INSERT INTO evidence_packs (pack_id, query, options_json, created_at, expires_at, meta_json, root_fingerprint)
@@ -126,18 +129,34 @@ export class EvidencePackRepository {
             ORDER BY role ASC, rank ASC
         `);
 
-        this.upsertSummaryStmt = this.db.prepare(`
-            INSERT INTO chunk_summaries (chunk_id, style, summary, created_at)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(chunk_id, style) DO UPDATE SET
-                summary = excluded.summary,
-                created_at = excluded.created_at
-        `);
-        this.selectSummaryStmt = this.db.prepare(`
-            SELECT summary
-            FROM chunk_summaries
-            WHERE chunk_id = ? AND style = ?
-        `);
+        if (this.summaryHasContentHash) {
+            this.upsertSummaryStmt = this.db.prepare(`
+                INSERT INTO chunk_summaries (chunk_id, style, summary, created_at, content_hash)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(chunk_id, style) DO UPDATE SET
+                    summary = excluded.summary,
+                    created_at = excluded.created_at,
+                    content_hash = excluded.content_hash
+            `);
+            this.selectSummaryStmt = this.db.prepare(`
+                SELECT summary, content_hash
+                FROM chunk_summaries
+                WHERE chunk_id = ? AND style = ?
+            `);
+        } else {
+            this.upsertSummaryStmt = this.db.prepare(`
+                INSERT INTO chunk_summaries (chunk_id, style, summary, created_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(chunk_id, style) DO UPDATE SET
+                    summary = excluded.summary,
+                    created_at = excluded.created_at
+            `);
+            this.selectSummaryStmt = this.db.prepare(`
+                SELECT summary
+                FROM chunk_summaries
+                WHERE chunk_id = ? AND style = ?
+            `);
+        }
     }
 
     public upsertPack(pack: StoredEvidencePack): void {
@@ -254,18 +273,28 @@ export class EvidencePackRepository {
         };
     }
 
-    public getSummary(chunkId: string, style: "preview" | "summary" = "preview"): string | null {
+    public getSummary(chunkId: string, style: "preview" | "summary" = "preview", contentHash?: string): string | null {
         if (!chunkId) return null;
-        const row = this.selectSummaryStmt.get(chunkId, style) as { summary?: string } | undefined;
+        const row = this.selectSummaryStmt.get(chunkId, style) as { summary?: string; content_hash?: string | null } | undefined;
         const value = row?.summary;
+        if (this.summaryHasContentHash && contentHash) {
+            const storedHash = row?.content_hash ?? null;
+            if (!storedHash || storedHash !== contentHash) {
+                return null;
+            }
+        }
         return typeof value === "string" && value.trim().length > 0 ? value : null;
     }
 
-    public upsertSummary(chunkId: string, style: "preview" | "summary", summary: string): void {
+    public upsertSummary(chunkId: string, style: "preview" | "summary", summary: string, contentHash?: string): void {
         if (!chunkId) return;
         const normalized = String(summary ?? "").trim();
         if (!normalized) return;
-        this.upsertSummaryStmt.run(chunkId, style, normalized, Date.now());
+        if (this.summaryHasContentHash) {
+            this.upsertSummaryStmt.run(chunkId, style, normalized, Date.now(), contentHash ?? null);
+        } else {
+            this.upsertSummaryStmt.run(chunkId, style, normalized, Date.now());
+        }
     }
 }
 

@@ -450,14 +450,17 @@ export class ChangePillar {
       const next = { ...doc };
       if (sectionLimit > 0 && attached < sectionLimit && Array.isArray(doc.sectionPath) && doc.sectionPath.length > 0) {
         try {
+          const maxChars = Number.parseInt(process.env.SMART_CONTEXT_DOC_SECTION_MAX_CHARS ?? "4000", 10);
           const section = await this.runTool(context, 'doc_section', {
             filePath: doc.filePath,
             headingPath: doc.sectionPath,
-            includeSubsections: false
+            includeSubsections: false,
+            mode: "preview",
+            maxChars
           });
           if (section?.success && typeof section?.content === 'string') {
             next.section = {
-              content: section.content.slice(0, 2000),
+              content: section.content,
               resolvedHeadingPath: section.resolvedHeadingPath
             };
             attached += 1;

@@ -192,5 +192,21 @@ export const MIGRATIONS: Migration[] = [
                 `INSERT OR REPLACE INTO metadata(key, value) VALUES ('schema_version', '5')`
             ).run();
         }
+    },
+    {
+        version: 6,
+        name: "chunk_summaries_content_hash_v6",
+        up: (db) => {
+            // Add content_hash to allow staleness detection for cached previews/summaries.
+            const columns = db.prepare(`PRAGMA table_info(chunk_summaries)`).all() as Array<{ name: string }>;
+            const hasContentHash = columns.some(c => c?.name === "content_hash");
+            if (!hasContentHash) {
+                db.exec(`ALTER TABLE chunk_summaries ADD COLUMN content_hash TEXT;`);
+            }
+            db.exec(`CREATE INDEX IF NOT EXISTS idx_chunk_summaries_hash ON chunk_summaries(content_hash);`);
+            db.prepare(
+                `INSERT OR REPLACE INTO metadata(key, value) VALUES ('schema_version', '6')`
+            ).run();
+        }
     }
 ];

@@ -72,7 +72,7 @@ export interface DocumentSearchResponse {
 
 export class DocumentSearchEngine {
     private readonly bm25 = new BM25FRanking();
-    private readonly packCache: LRUCache<string, { response: DocumentSearchResponse; createdAt: number; expiresAt?: number }>;
+    private readonly packCache: LRUCache<string, { response: DocumentSearchResponse; createdAt: number; expiresAt?: number; staleCheckItems: Array<{ chunkId: string; snapshot?: { contentHash?: string } }> }>;
 
     constructor(
         private readonly searchEngine: SearchEngine,
@@ -84,13 +84,13 @@ export class DocumentSearchEngine {
         private readonly symbolIndex?: { getSymbolsForFile(filePath: string): Promise<unknown> },
         private readonly evidencePacks?: EvidencePackRepository
     ) {
-        const max = Number.parseInt(process.env.SMART_CONTEXT_EVIDENCE_PACK_CACHE_SIZE ?? "50", 10);
-        this.packCache = new LRUCache({ max: Number.isFinite(max) && max > 0 ? max : 50 });
+        const max = Number.parseInt(process.env.SMART_CONTEXT_EVIDENCE_PACK_CACHE_SIZE ?? "100", 10);
+        this.packCache = new LRUCache({ max: Number.isFinite(max) && max > 0 ? max : 100 });
     }
 
     public async search(query: string, options: DocumentSearchOptions = {}): Promise<DocumentSearchResponse> {
         const output = options.output ?? "full";
-        const packTtlMs = Number.parseInt(process.env.SMART_CONTEXT_EVIDENCE_PACK_TTL_MS ?? "3600000", 10); // 1h
+        const packTtlMs = Number.parseInt(process.env.SMART_CONTEXT_EVIDENCE_PACK_TTL_MS ?? "86400000", 10); // 24h
 
         if (!query || !query.trim()) {
             return {
@@ -153,15 +153,19 @@ export class DocumentSearchEngine {
         if (cached) {
             const now = Date.now();
             if (!cached.expiresAt || cached.expiresAt > now) {
-                return {
-                    ...cached.response,
-                    pack: {
-                        packId: effectivePackId,
-                        hit: true,
-                        createdAt: cached.createdAt,
-                        expiresAt: cached.expiresAt
-                    }
-                };
+                const stale = await this.isPackStale(cached.staleCheckItems ?? []);
+                if (!stale) {
+                    return {
+                        ...cached.response,
+                        pack: {
+                            packId: effectivePackId,
+                            hit: true,
+                            createdAt: cached.createdAt,
+                            expiresAt: cached.expiresAt
+                        }
+                    };
+                }
+                this.packCache.delete(effectivePackId);
             }
             this.packCache.delete(effectivePackId);
         }
@@ -175,7 +179,10 @@ export class DocumentSearchEngine {
                 const responseFromDb = this.hydrateResponseFromPack(stored, output, includeEvidence);
                 const createdAt = stored.createdAt;
                 const expiresAt = stored.expiresAt;
-                this.packCache.set(effectivePackId, { response: responseFromDb, createdAt, expiresAt });
+                const staleCheckItems = (stored.items ?? [])
+                    .map(item => ({ chunkId: item.chunkId, snapshot: { contentHash: item.snapshot?.contentHash } }))
+                    .filter(item => Boolean(item.snapshot?.contentHash));
+                this.packCache.set(effectivePackId, { response: responseFromDb, createdAt, expiresAt, staleCheckItems });
                 return {
                     ...responseFromDb,
                     pack: { packId: effectivePackId, hit: true, createdAt, expiresAt }
@@ -222,7 +229,7 @@ export class DocumentSearchEngine {
             };
             const createdAt = Date.now();
             const expiresAt = Number.isFinite(packTtlMs) && packTtlMs > 0 ? createdAt + packTtlMs : undefined;
-            this.packCache.set(effectivePackId, { response, createdAt, expiresAt });
+            this.packCache.set(effectivePackId, { response, createdAt, expiresAt, staleCheckItems: [] });
             if (this.evidencePacks) {
                 try {
                     this.evidencePacks.upsertPack({
@@ -397,7 +404,8 @@ export class DocumentSearchEngine {
 
         const createdAt = Date.now();
         const expiresAt = Number.isFinite(packTtlMs) && packTtlMs > 0 ? createdAt + packTtlMs : undefined;
-        this.packCache.set(effectivePackId, { response, createdAt, expiresAt });
+        const staleCheckItems = this.buildStaleCheckItems(results, evidence, includeEvidence, chunks);
+        this.packCache.set(effectivePackId, { response, createdAt, expiresAt, staleCheckItems });
         if (this.evidencePacks) {
             try {
                 const storedItems = this.toStoredItems(results, evidence, includeEvidence, chunks, bm25ScoreMap, vectorScores, vectorEnabled);
@@ -419,6 +427,29 @@ export class DocumentSearchEngine {
             ...response,
             pack: { packId: effectivePackId, hit: false, createdAt, expiresAt }
         };
+    }
+
+    private buildStaleCheckItems(
+        results: DocumentSearchSection[],
+        evidence: DocumentSearchSection[] | undefined,
+        includeEvidence: boolean,
+        chunks: StoredDocumentChunk[]
+    ): Array<{ chunkId: string; snapshot?: { contentHash?: string } }> {
+        const byId = new Map(chunks.map(c => [c.id, c]));
+        const out: Array<{ chunkId: string; snapshot?: { contentHash?: string } }> = [];
+        for (const r of results) {
+            const chunk = byId.get(r.id);
+            if (!chunk?.contentHash) continue;
+            out.push({ chunkId: r.id, snapshot: { contentHash: chunk.contentHash } });
+        }
+        if (includeEvidence && Array.isArray(evidence)) {
+            for (const e of evidence) {
+                const chunk = byId.get(e.id);
+                if (!chunk?.contentHash) continue;
+                out.push({ chunkId: e.id, snapshot: { contentHash: chunk.contentHash } });
+            }
+        }
+        return out;
     }
 
     private hydrateResponseFromPack(
@@ -550,7 +581,7 @@ export class DocumentSearchEngine {
         for (const section of sections) {
             const chunk = chunkById.get(section.id);
             if (!chunk) continue;
-            const cached = this.evidencePacks?.getSummary(section.id, "preview");
+            const cached = this.evidencePacks?.getSummary(section.id, "preview", chunk.contentHash);
             if (cached) {
                 section.preview = cached.length > maxChars ? `${cached.slice(0, Math.max(1, maxChars - 1))}…` : cached;
                 continue;
@@ -563,7 +594,7 @@ export class DocumentSearchEngine {
             });
             section.preview = built.preview;
             try {
-                this.evidencePacks?.upsertSummary(section.id, "preview", built.preview);
+                this.evidencePacks?.upsertSummary(section.id, "preview", built.preview, chunk.contentHash);
             } catch {
                 // best-effort
             }
