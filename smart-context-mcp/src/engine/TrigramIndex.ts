@@ -71,7 +71,7 @@ export class TrigramIndex {
                 ".py", ".go", ".java", ".cs", ".rs", ".rb",
                 ".php", ".kt", ".swift", ".scala",
                 ".json", ".yaml", ".yml", ".toml",
-                ".md", ".txt", ".css", ".scss", ".less",
+                ".md", ".txt", ".log", ".css", ".scss", ".less",
                 ".html", ".astro"
             ]
         };

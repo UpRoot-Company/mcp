@@ -34,6 +34,20 @@ function setupWorkspace(): string {
     return rootDir;
 }
 
+function setupWorkspaceWithLog(): string {
+    const rootDir = setupWorkspace();
+    fs.mkdirSync(path.join(rootDir, "logs"), { recursive: true });
+    fs.writeFileSync(
+        path.join(rootDir, "logs", "app.log"),
+        [
+            "2025-12-31T00:00:00Z INFO Booting service",
+            "2025-12-31T00:00:02Z ERROR install failed: missing dependency",
+            ""
+        ].join("\n")
+    );
+    return rootDir;
+}
+
 function setupWorkspaceWithCode(): string {
     const rootDir = setupWorkspace();
     fs.mkdirSync(path.join(rootDir, "src"), { recursive: true });
@@ -625,6 +639,37 @@ describe("DocumentSearchEngine", () => {
         if (Array.isArray(response.evidence) && response.evidence.length > 0) {
             expect(response.evidence[0]?.preview).toBe("");
         }
+
+        indexDatabase.close();
+        await searchEngine.dispose();
+        fs.rmSync(rootDir, { recursive: true, force: true });
+    });
+
+    it("indexes .log files as text documents", async () => {
+        const rootDir = setupWorkspaceWithLog();
+        const fileSystem = new NodeFileSystem(rootDir);
+        const indexDatabase = new IndexDatabase(rootDir);
+        const embeddingRepository = new EmbeddingRepository(indexDatabase);
+        const documentIndexer = new DocumentIndexer(rootDir, fileSystem, indexDatabase, { embeddingRepository });
+        await documentIndexer.indexFile("logs/app.log");
+
+        const searchEngine = new SearchEngine(rootDir, fileSystem);
+        const engine = new DocumentSearchEngine(
+            searchEngine,
+            documentIndexer,
+            new DocumentChunkRepository(indexDatabase),
+            embeddingRepository,
+            new EmbeddingProviderFactory({
+                provider: "local",
+                normalize: true,
+                local: { model: "hash-test", dims: 64 }
+            }),
+            rootDir
+        );
+
+        const response = await engine.search("install failed", { output: "compact", includeEvidence: false });
+        const match = response.results.find(r => r.filePath === "logs/app.log");
+        expect(match).toBeTruthy();
 
         indexDatabase.close();
         await searchEngine.dispose();

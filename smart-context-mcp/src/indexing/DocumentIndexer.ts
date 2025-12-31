@@ -11,7 +11,7 @@ import { EmbeddingRepository } from "./EmbeddingRepository.js";
 import { EmbeddingProviderFactory } from "../embeddings/EmbeddingProviderFactory.js";
 import { extractHtmlTextPreserveLines } from "../documents/html/HtmlTextExtractor.js";
 
-const SUPPORTED_DOC_EXTENSIONS = new Set<string>([".md", ".mdx", ".txt", ".html", ".htm", ".css"]);
+const SUPPORTED_DOC_EXTENSIONS = new Set<string>([".md", ".mdx", ".txt", ".log", ".html", ".htm", ".css"]);
 const WELL_KNOWN_TEXT_FILES = new Set<string>([
     "README",
     "LICENSE",
@@ -226,6 +226,7 @@ function inferKind(filePath: string): DocumentKind {
     if (ext === ".mdx") return "mdx";
     if (ext === ".md") return "markdown";
     if (ext === ".txt") return "text";
+    if (ext === ".log") return "text";
     const base = path.basename(filePath);
     if (WELL_KNOWN_TEXT_FILES.has(base)) return "text";
     return "unknown";

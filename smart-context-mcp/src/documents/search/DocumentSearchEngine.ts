@@ -623,6 +623,7 @@ export class DocumentSearchEngine {
             "**/*.md",
             "**/*.mdx",
             "**/*.txt",
+            "**/*.log",
             "**/*.html",
             "**/*.htm",
             "**/*.css",

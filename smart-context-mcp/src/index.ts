@@ -1276,7 +1276,7 @@ export class SmartContextServer {
         if (ext === ".md") return "markdown";
         if (ext === ".html" || ext === ".htm") return "html";
         if (ext === ".css") return "css";
-        if (ext === ".txt") return "text";
+        if (ext === ".txt" || ext === ".log") return "text";
         return "unknown";
     }
 
