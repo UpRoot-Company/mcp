@@ -261,39 +261,36 @@ export class OrchestrationEngine {
 
 
   private mapArgsToIntent(category: string, args: any): ParsedIntent {
-    let targets = args.target
-      ? [args.target]
-      : (args.targetFiles || (args.targetPath ? [args.targetPath] : []));
-    if ((!targets || targets.length === 0) && typeof args?.goal === 'string') {
-      targets = [args.goal];
+    const rawArgs = (args && typeof args === 'object') ? args : {};
+    const options = (rawArgs.options && typeof rawArgs.options === 'object') ? rawArgs.options : {};
+
+    let targets: string[] = [];
+    if (typeof rawArgs.target === 'string' && rawArgs.target.length > 0) {
+      targets = [rawArgs.target];
+    } else if (Array.isArray(rawArgs.paths) && rawArgs.paths.length > 0) {
+      targets = rawArgs.paths;
+    } else if (Array.isArray(rawArgs.targetFiles) && rawArgs.targetFiles.length > 0) {
+      targets = rawArgs.targetFiles;
+    } else if (typeof rawArgs.targetPath === 'string' && rawArgs.targetPath.length > 0) {
+      targets = [rawArgs.targetPath];
+    } else if (typeof rawArgs.goal === 'string' && rawArgs.goal.length > 0) {
+      targets = [rawArgs.goal];
     }
+
+    const originalIntent =
+      typeof rawArgs.intent === 'string' ? rawArgs.intent :
+      typeof rawArgs.goal === 'string' ? rawArgs.goal :
+      JSON.stringify(rawArgs);
 
     return {
       category: category as any,
-      action: args.action || args.command || 'execute',
+      action: rawArgs.action || rawArgs.command || 'execute',
       targets,
-      originalIntent: JSON.stringify(args),
-      constraints: {
-        ...(args.options || {}),
-        goal: args.goal,
-        depth: args.depth,
-        scope: args.scope,
-        limit: args.limit,
-        include: args.include,
-        edits: args.edits,
-        view: args.view,
-        lineRange: args.lineRange,
-        sectionId: args.sectionId,
-        headingPath: args.headingPath,
-        includeSubsections: args.includeSubsections,
-        outlineOptions: args.outlineOptions,
-        includeProfile: args.includeProfile,
-        includeHash: args.includeHash,
-        context: args.context,
-        targetPath: args.targetPath,
-        content: args.content,
-        template: args.template
-      },
+      originalIntent,
+      constraints: (() => {
+        const { options: _options, ...withoutOptions } = rawArgs as any;
+        return { ...withoutOptions, ...options };
+      })(),
       confidence: 1.0
     };
   }

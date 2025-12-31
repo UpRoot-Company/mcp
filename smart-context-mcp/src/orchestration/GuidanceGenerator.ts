@@ -68,6 +68,32 @@ export class GuidanceGenerator {
     const history = context.history ?? [];
     const hasTestContext = this.detectTestContext(history);
 
+    if (context.lastResult?.success === false) {
+      message = context.lastResult?.message
+        ? `Operation failed: ${context.lastResult.message}`
+        : 'Operation failed.';
+
+      warnings.push({
+        severity: 'warning',
+        code: context.lastResult?.status ?? 'FAILED',
+        message: context.lastResult?.message ?? 'The operation did not succeed.'
+      });
+
+      if (context.lastPillar === 'explore' && context.lastResult?.status === 'invalid_args') {
+        suggestedActions.push({
+          priority: 1,
+          pillar: 'explore',
+          action: 'retry',
+          description: 'Retry explore with a query or explicit paths.',
+          rationale: 'The explore tool requires at least one of query or paths.',
+          toolCall: {
+            tool: 'explore',
+            args: { query: 'package.json', view: 'preview' }
+          }
+        });
+      }
+    }
+
     // Rule 1: Post-Understand -> Examine primary file
     if (context.lastPillar === 'understand' && context.lastResult.primaryFile) {
       message = `Codebase structure for "${context.lastResult.summary}" has been analyzed.`;

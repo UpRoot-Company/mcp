@@ -29,6 +29,31 @@ describe("OrchestrationEngine", () => {
     expect(result.metadata.filePath).toBe("src/demo.ts");
   });
 
+  it("passes explore args through to the pillar (query/paths)", async () => {
+    const registry = new InternalToolRegistry();
+    registry.register("doc_search", async () => ({
+      results: [
+        { filePath: "docs/ARCHITECTURE.md", preview: "ok", scores: { final: 0.9 } }
+      ]
+    } as any));
+    registry.register("search_project", async () => ({
+      results: [
+        { path: "package.json", context: "{}", score: 0.8, line: 1, type: "file" }
+      ]
+    } as any));
+
+    const engine = buildEngine(registry);
+    const result = await engine.executePillar("explore", {
+      query: "package.json ARCHITECTURE.md index.ts",
+      view: "full"
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.status).toBe("ok");
+    expect(result.query).toBe("package.json ARCHITECTURE.md index.ts");
+    expect(result.data.docs.length + result.data.code.length).toBeGreaterThan(0);
+  });
+
   it("marks plan failures when a step returns success=false", async () => {
     const registry = new InternalToolRegistry();
     registry.register("search_project", async () => ({
