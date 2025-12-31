@@ -83,6 +83,7 @@ export class ClusterPrecomputationEngine {
                 this.logger("[ClusterPrecompute] cycle failed", error);
             });
         }, delay);
+        this.timer.unref?.();
     }
 
     private async runCycle(): Promise<void> {

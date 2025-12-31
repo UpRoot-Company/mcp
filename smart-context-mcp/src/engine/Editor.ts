@@ -650,6 +650,7 @@ export class EditorEngine {
         lineRange?: LineRange
     ): Match[] {
         const targetLen = target.length;
+        const targetHasNewline = /[\r\n]/.test(target.replace(/\r?\n$/, ""));
         
         if (targetLen >= 256) {
             throw new Error(
@@ -712,8 +713,14 @@ export class EditorEngine {
 
         for (const candidate of candidates) {
             const lineStart = lineCounter.getCharIndexForLine(candidate.lineNumber);
-            const windowStart = Math.max(searchStart, Math.max(0, lineStart - maxWindow));
-            const windowEnd = Math.min(searchEnd, Math.min(content.length, lineStart + maxWindow * 2));
+            const lineEnd = this.getLineEndIndex(candidate.lineNumber, content.length, lineCounter);
+            let windowStart = Math.max(searchStart, Math.max(0, lineStart - maxWindow));
+            let windowEnd = Math.min(searchEnd, Math.min(content.length, lineStart + maxWindow * 2));
+
+            if (!targetHasNewline) {
+                windowStart = Math.max(searchStart, lineStart);
+                windowEnd = Math.min(searchEnd, lineEnd);
+            }
 
             if (windowEnd <= windowStart) {
                 continue;
@@ -1367,6 +1374,24 @@ export class EditorEngine {
                     (error as any).edit = edit;
                     throw error;
                 }
+            }
+        }
+
+        for (const match of plannedMatches) {
+            if (match.matchType !== 'levenshtein' && match.matchType !== 'whitespace-fuzzy') {
+                continue;
+            }
+            const lineStart = lineCounter.getCharIndexForLine(match.lineNumber);
+            if (match.start <= lineStart) {
+                continue;
+            }
+            const prefix = originalContent.substring(lineStart, match.start);
+            if (!prefix || !/^[ \t]+$/.test(prefix)) {
+                continue;
+            }
+            const leadingWhitespace = match.replacement.match(/^[ \t]+/)?.[0] ?? '';
+            if (leadingWhitespace && match.replacement.startsWith(prefix)) {
+                match.replacement = match.replacement.slice(prefix.length);
             }
         }
 

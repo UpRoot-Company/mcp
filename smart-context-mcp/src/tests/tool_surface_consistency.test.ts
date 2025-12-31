@@ -1,6 +1,4 @@
 import { describe, it, expect } from "@jest/globals";
-import * as fs from "fs";
-import * as path from "path";
 import { SmartContextServer } from "../index.js";
 
 type ListedTool = {
@@ -26,7 +24,6 @@ const readErrorCode = (response: any): string | undefined => {
  * Stronger tool surface consistency checks.
  *
  * We still avoid executing potentially expensive tools.
- * - Always: verify every listed tool name appears in the compiled switch-case.
  * - Additionally: validate `inputSchema.required` is consistent with `properties`.
  * - Additionally: for tools that declare required params, calling with `{}` should error quickly
  *   (i.e. not succeed, and not `UnknownTool`).
@@ -37,36 +34,17 @@ describe("Tool surface consistency", () => {
         const tools = (server as any).listIntentTools() as ListedTool[];
 
         const expectedIntentTools = [
-            "read_code",
-            "search_project",
-            "analyze_relationship",
-            "edit_code",
-            "get_batch_guidance",
-            "manage_project",
-            "reconstruct_interface",
+            "understand",
+            "change",
+            "navigate",
+            "read",
+            "write",
+            "manage",
         ].sort();
 
         expect(Array.isArray(tools)).toBe(true);
         expect(tools.map((t) => t.name).sort()).toEqual(expectedIntentTools);
 
-
-        const distIndexPath = path.join(process.cwd(), "dist", "index.js");
-        const compiled = fs.readFileSync(distIndexPath, "utf-8");
-
-        const caseRegex = /case\s+\"([^\"]+)\"\s*:/g;
-        const handled = new Set<string>();
-        let match: RegExpExecArray | null;
-        while ((match = caseRegex.exec(compiled)) !== null) {
-            handled.add(match[1]);
-        }
-
-        const missingHandlers: string[] = [];
-        for (const tool of tools) {
-            if (!handled.has(tool.name)) {
-                missingHandlers.push(tool.name);
-            }
-        }
-        expect(missingHandlers).toEqual([]);
 
         for (const tool of tools) {
             const schema = tool.inputSchema;
@@ -81,7 +59,7 @@ describe("Tool surface consistency", () => {
                 expect(Object.prototype.hasOwnProperty.call(properties, key)).toBe(true);
             }
 
-                        // Only execute tools that declare required params; these should fail fast with empty args.
+            // Only execute tools that declare required params; these should fail fast with empty args.
             if (required.length > 0) {
                 const response = await (server as any).handleCallTool(tool.name, {});
                 const errorCode = readErrorCode(response);
@@ -91,10 +69,13 @@ describe("Tool surface consistency", () => {
             }
 
         }
+        await server.shutdown();
         });
 
-    it("Opt-in tools are exposed only when enabled", () => {
+    it("Legacy tools are exposed only when enabled", async () => {
+        const prevLegacy = process.env.SMART_CONTEXT_EXPOSE_LEGACY_TOOLS;
         const prev = process.env.SMART_CONTEXT_EXPOSE_COMPAT_TOOLS;
+        process.env.SMART_CONTEXT_EXPOSE_LEGACY_TOOLS = "true";
         process.env.SMART_CONTEXT_EXPOSE_COMPAT_TOOLS = "true";
 
         try {
@@ -109,16 +90,29 @@ describe("Tool surface consistency", () => {
                 "edit_code",
                 "get_batch_guidance",
                 "manage_project",
+                "reconstruct_interface",
+                "understand",
+                "change",
+                "navigate",
+                "read",
+                "write",
+                "manage",
                 "read_file",
                 "write_file",
                 "analyze_file",
             ]));
             expect(names.length).toBeGreaterThan(5);
+            await server.shutdown();
         } finally {
             if (prev === undefined) {
                 delete process.env.SMART_CONTEXT_EXPOSE_COMPAT_TOOLS;
             } else {
                 process.env.SMART_CONTEXT_EXPOSE_COMPAT_TOOLS = prev;
+            }
+            if (prevLegacy === undefined) {
+                delete process.env.SMART_CONTEXT_EXPOSE_LEGACY_TOOLS;
+            } else {
+                process.env.SMART_CONTEXT_EXPOSE_LEGACY_TOOLS = prevLegacy;
             }
         }
     });

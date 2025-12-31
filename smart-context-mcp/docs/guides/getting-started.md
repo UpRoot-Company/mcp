@@ -256,15 +256,15 @@ Consult your platform's MCP documentation for specific configuration details.
 
 Let's verify the installation with three progressive examples.
 
-### Example 1: File Structure (Easiest) 🟢
+### Example 1: Find Key Entry Points (Easiest) 🟢
 
 **You ask:**
-> "What's the project structure? Show me the main directories."
+> "Find the main entry points (package.json, server entry, config). Show me the structure of the main entry file."
 
 **What happens:**
-1. AI calls `list_directory` tool
-2. Smart Context returns directory tree
-3. AI summarizes structure
+1. AI calls `navigate` to locate entry/config files
+2. AI calls `read(view="skeleton")` (or `full` for small/non-code files)
+3. AI summarizes structure and next places to look
 
 **Success if:** You see actual directories from your project
 
@@ -276,8 +276,8 @@ Let's verify the installation with three progressive examples.
 > "Find the authentication code. Show me the structure of the main auth file without reading the whole implementation."
 
 **What happens:**
-1. AI calls `search_project(type="symbol")` to find auth-related code
-2. AI calls `read_code(view="skeleton")` on the auth file
+1. AI calls `navigate(context="definitions")` to find auth-related symbols/files
+2. AI calls `read(view="skeleton")` on the auth file
 3. You see function signatures but **no implementation bodies** (Skeleton view compresses 95% of tokens!)
 
 **Expected output (skeleton):**
@@ -303,11 +303,10 @@ export class AuthService {
 > "I want to rename the `validateUser` function to `authenticateUser`. What files will this affect? Is it safe?"
 
 **What happens:**
-1. AI calls `search_project` to find all occurrences
-2. AI calls `analyze_relationship(mode="impact")` to see dependencies
-3. AI plans atomic edits for all affected files
-4. AI uses `edit_code(dryRun=true)` to preview changes
-5. (Optional) You approve and AI applies with `dryRun=false`
+1. AI calls `navigate` to locate definitions/usages
+2. AI uses `change(options.dryRun=true)` to propose a safe multi-file plan
+3. You review the diff and impact summary
+4. (Optional) You approve and AI applies with `change(options.dryRun=false)`
 
 **Success if:**
 - ✅ AI identifies all files that use `validateUser`
@@ -377,22 +376,13 @@ Result: Agent can work while indexing happens!
 
 ---
 
-### ❌ Edit Failed: "NO_MATCH" / "AMBIGUOUS_MATCH"
+### ❌ Change Failed / Plan Looks Wrong
 
-**NO_MATCH** - Target string not found (whitespace differs or code changed)
-- **Fix:** Ask AI to `read_code` again, then retry with exact whitespace
+If a `change` dry-run plan doesn’t match what you intended:
 
-**AMBIGUOUS_MATCH** - Multiple matches found
-- **Fix:** Ask AI to add `beforeContext`/`afterContext` to disambiguate, or specify `lineRange`
-
-**Example:**
-```json
-// Instead of: "targetString": "return true;"
-// Use:
-"targetString": "return true;",
-"beforeContext": "if (isAdmin) {",
-"lineRange": {"start": 40, "end": 40}
-```
+- Re-run `read(view="fragment")` on the exact area you want changed (the code may have drifted).
+- Re-run `change` with tighter constraints (e.g., specify `targetFiles`, or mention “only change X, keep public API unchanged”).
+- If you already applied a bad change: `manage({ command: "undo" })`, then try again with a clearer intent.
 
 ---
 

@@ -10,6 +10,7 @@ export interface ReferenceResult {
     filePath: string;
     line: number;
     text: string;
+    snippet?: string;
     range: { startLine: number; endLine: number; startByte: number; endByte: number };
 }
 
@@ -61,6 +62,7 @@ export class ReferenceFinder {
                 if (!fs.existsSync(file)) continue;
                 
                 const content = fs.readFileSync(file, 'utf-8');
+                const lines = content.split(/\r?\n/);
                 const targetNames = await this.resolveLocalNames(file, normalizedDefPath, symbolName, content, treatAsDefaultExport);
                 if (targetNames.length === 0) {
                     continue;
@@ -71,10 +73,13 @@ export class ReferenceFinder {
                     if (file === normalizedDefPath && this.isDefinitionRange(id.range, targetDefinition)) {
                         continue;
                     }
+                    const lineNumber = id.range.startLine;
+                    const lineText = lines[lineNumber] ?? '';
                     results.push({
                         filePath: path.relative(this.rootPath, file),
-                        line: id.range.startLine + 1,
+                        line: lineNumber + 1,
                         text: id.name,
+                        snippet: lineText.trim(),
                         range: {
                             startLine: id.range.startLine + 1,
                             endLine: id.range.endLine + 1,

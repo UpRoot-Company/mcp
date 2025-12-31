@@ -1,31 +1,23 @@
 # Smart Context Architecture for AI Agents
 
-**Technical deep dive into the Scout → Read → Edit pipeline architecture.**
+**Technical deep dive into the orchestration that powers the Six Pillars (ADR-033).**
 
 ---
 
 ## Overview
 
-Smart Context implements a three-stage pipeline optimized for AI agents working with large codebases:
+Smart Context exposes a small **“What”** interface (Six Pillars), backed by a larger internal **“How”** layer:
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│                   Scout → Read → Edit Pipeline               │
-├──────────────────────────────────────────────────────────────┤
-│                                                              │
-│  SCOUT                 READ                EDIT              │
-│  (locate)              (understand)        (modify)          │
-│                                                              │
-│  • BM25F ranking       • Skeleton view     • Normalization   │
-│  • Trigram filtering   • Full content      • Fuzzy matching  │
-│  • Type-aware search   • AST analysis      • Transactions    │
-│                        • Metadata          • Safety verify   │
-│                        • Dependencie       • Rollback        │
-│                                                              │
-│  P50: 200ms            P50: 100-300ms      P50: 100-500ms    │
-│  Token: 800-2K         Token: 200-5K       Token: 500-2K     │
-│                                                              │
-└──────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│                         Agent Interface (“What”)                      │
+├──────────────────────────────────────────────────────────────────────┤
+│  navigate   read   understand   change   write   manage               │
+├──────────────────────────────────────────────────────────────────────┤
+│                         Orchestration (“How”)                         │
+├──────────────────────────────────────────────────────────────────────┤
+│  search/index  skeleton/profile  graphs/impact  transactions  history │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
 **Design Goals:**

@@ -1,5 +1,8 @@
 import * as path from 'path';
+import * as fs from 'fs';
 import * as WebTreeSitterModule from 'web-tree-sitter';
+import { createRequire } from 'module';
+import { fileURLToPath } from 'url';
 import { AstBackend, AstDocument } from './AstBackend.js';
 import { LRUCache } from '../utils/LRUCache.js';
 import { BUILTIN_LANGUAGE_MAPPINGS } from '../config/LanguageConfig.js';
@@ -50,6 +53,7 @@ export class WebTreeSitterBackend implements AstBackend {
     private initFn: () => Promise<void>;
     private languageLoader: any;
     private cleanupInterval?: NodeJS.Timeout;
+    private readonly localRequire = createRequire(import.meta.url);
 
     constructor() {
         this.parserCtor = resolveParserConstructor(WebTreeSitterModule);
@@ -154,14 +158,43 @@ export class WebTreeSitterBackend implements AstBackend {
     }
 
     private getWasmPath(langName: string): string {
-        // Try to locate tree-sitter-wasms package
-        try {
-            const wasmPath = require.resolve(`tree-sitter-wasms/out/tree-sitter-${langName}.wasm`);
-            return wasmPath;
-        } catch (e) {
-            // Fallback for local development or different layout
-            return path.resolve(process.cwd(), `node_modules/tree-sitter-wasms/out/tree-sitter-${langName}.wasm`);
+        const overrideDir = (process.env.SMART_CONTEXT_WASM_DIR || '').trim();
+        if (overrideDir) {
+            return path.resolve(overrideDir, `tree-sitter-${langName}.wasm`);
         }
+
+        const candidates: string[] = [];
+        try {
+            const pkgPath = this.localRequire.resolve('tree-sitter-wasms/package.json');
+            const pkgDir = path.dirname(pkgPath);
+            candidates.push(path.join(pkgDir, 'out', `tree-sitter-${langName}.wasm`));
+        } catch {
+            // ignore
+        }
+
+        try {
+            candidates.push(this.localRequire.resolve(`tree-sitter-wasms/out/tree-sitter-${langName}.wasm`));
+        } catch {
+            // ignore
+        }
+
+        try {
+            const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+            candidates.push(path.resolve(moduleDir, '..', '..', 'node_modules', 'tree-sitter-wasms', 'out', `tree-sitter-${langName}.wasm`));
+        } catch {
+            // ignore
+        }
+
+        candidates.push(path.resolve(process.cwd(), 'node_modules', 'tree-sitter-wasms', 'out', `tree-sitter-${langName}.wasm`));
+
+        for (const candidate of candidates) {
+            if (candidate && fs.existsSync(candidate)) {
+                return candidate;
+            }
+        }
+
+        // Fall back to the last candidate so the error message includes a usable path.
+        return candidates[candidates.length - 1];
     }
 
     public dispose(): void {

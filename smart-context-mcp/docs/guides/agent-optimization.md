@@ -73,7 +73,7 @@ Optimize Smart Context MCP for different AI models by:
 - **Gemini:** Bulk operations - maxResults: 150-200, batch 100+ files, MCP + built-in tools
 
 **Gemini Tool Systems:**
-1. **MCP tools** (`includeTools`/`excludeTools`): search_project, read_code, edit_code
+1. **MCP tools** (`includeTools`/`excludeTools`): navigate, read, understand, change, write, manage
 2. **Built-in tools** (`tools.core`/`tools.exclude`): run_shell_command, read_file
 
 **For complete environment variable reference:** See [configuration.md](./configuration.md)
@@ -84,14 +84,14 @@ Optimize Smart Context MCP for different AI models by:
 
 ### Analysis-Only (Read-Only)
 
-**Tools:** search_project, read_code, analyze_relationship, analyze_file
+**Tools:** navigate, read, understand
 
 **Workflow:**
 ```
-1. analyze_file (get profile)
-2. search_project (find patterns)
-3. analyze_relationship (understand impact)
-4. read_code (detailed examination)
+1. navigate (find entry points)
+2. read(skeleton) (structure)
+3. understand (synthesis; enable include flags if needed)
+4. read(fragment/full) (details)
 ```
 
 **Permission:** Read-only tools only. See [permissions.md](./permissions.md#read-only-pattern)
@@ -100,16 +100,16 @@ Optimize Smart Context MCP for different AI models by:
 
 ### Auto-Fix (Automated Remediation)
 
-**Tools:** search_project, read_code, edit_code, manage_project + test commands
+**Tools:** navigate, read, change, manage + test commands
 
 **Workflow:**
 ```
-1. search_project (find problem)
-2. read_code(skeleton) (understand context)
-3. edit_code(dryRun: true) (preview fix)
-4. edit_code(final) (apply)
+1. navigate (find problem)
+2. read(skeleton) (understand context)
+3. change(dryRun: true) (preview fix)
+4. change(dryRun: false) (apply)
 5. Run tests
-6. manage_project undo (if tests fail)
+6. manage undo (if tests fail)
 ```
 
 **Permission:** Edit + test commands. See [permissions.md](./permissions.md#auto-fix-pattern)
@@ -127,15 +127,15 @@ SMART_CONTEXT_QUERY_TIMEOUT=15000
 ```
 
 **Tool Priority:**
-- ⚡⚡⚡ search_project, read_fragment, list_directory
-- ⚡⚡ analyze_file
-- AVOID: analyze_relationship, get_batch_guidance
+- ⚡⚡⚡ navigate, read(view="fragment"), read(view="skeleton")
+- ⚡⚡ understand (only when needed)
+- AVOID: deep `understand(include=...)` unless required
 
 ---
 
 ### Security-Hardened (Locked Down)
 
-**Tools:** search_project, read_code, analyze_relationship (read-only)
+**Tools:** navigate, read, understand (read-only)
 
 **Restrictions:**
 - ✅ Code analysis only
@@ -210,13 +210,13 @@ Testing results from 10,000-file project:
 ```
 What do you need?
 
-├─ Find code/files → search_project
-├─ Understand file → read_code(skeleton) or analyze_file
-├─ Specific lines → read_fragment
-├─ Relationships → analyze_relationship
-├─ Make changes → edit_code (use dryRun first)
-├─ Undo mistake → manage_project undo
-└─ Explore structure → list_directory
+├─ Find code/files → navigate
+├─ Read structure → read(view="skeleton")
+├─ Read specific lines → read(view="fragment")
+├─ Relationships/impact → understand (enable include flags as needed)
+├─ Make changes → change (use dryRun first)
+├─ Undo mistake → manage undo
+└─ Explore directory structure → Bash (ls/find)
 ```
 
 **For detailed tool selection:** See [tool-conflicts.md](./tool-conflicts.md)
@@ -246,43 +246,41 @@ What do you need?
 
 | Tool | Target | Acceptable | Slow |
 |------|--------|-----------|------|
-| search_project | 300ms | <1000ms | >2000ms |
-| read_code | 300ms | <1000ms | >2000ms |
-| read_fragment | 100ms | <500ms | >1000ms |
-| edit_code | 500ms | <2000ms | >5000ms |
-| analyze_relationship | 800ms | <3000ms | >5000ms |
+| navigate | 300ms | <1000ms | >2000ms |
+| read | 300ms | <1000ms | >2000ms |
+| understand | 800ms | <3000ms | >5000ms |
+| change | 500ms | <2000ms | >5000ms |
 
 ### Common Patterns
 
 **Pattern 1: Safe Single-File Edit**
 ```
-1. search_project (find file)
-2. read_code(skeleton) (understand structure)
-3. read_fragment (get exact location)
-4. edit_code(dryRun: true) (preview)
-5. edit_code(final) (apply)
+1. navigate (find file)
+2. read(skeleton) (understand structure)
+3. read(fragment) (get exact location)
+4. change(dryRun: true) (preview)
+5. change(dryRun: false) (apply)
 
 Token cost: ~2,000
 ```
 
 **Pattern 2: Bulk Refactoring (50+ files)**
 ```
-1. search_project(maxResults: 100)
-2. get_batch_guidance (clustering)
-3. For each cluster:
-   - read_code(skeleton)
-   - edit_code(dryRun)
-   - edit_code(final)
+1. navigate (find entry points + usages)
+2. change(dryRun: true) with clear intent + constraints (e.g., targetFiles)
+3. Split into batches if the dry-run diff is too large
+4. change(dryRun: false) to apply
+5. manage undo if needed
 
 Token cost: ~15,000-25,000
 ```
 
 **Pattern 3: Architecture Analysis**
 ```
-1. analyze_file (entry point)
-2. analyze_relationship (impact, maxDepth: 5)
-3. search_project (patterns)
-4. read_code (multiple files, skeleton)
+1. navigate (entry point)
+2. read(skeleton) (overview)
+3. understand(include=...) (relationships/impact as needed)
+4. read(fragment) (details)
 
 Token cost: ~8,000-15,000
 ```

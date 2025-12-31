@@ -89,11 +89,11 @@ export class TrigramIndex {
         }
     }
 
-    public async rebuild(): Promise<void> {
+    public async rebuild(options: { logEvery?: number; logger?: (message: string) => void; logTotals?: boolean } = {}): Promise<void> {
         this.isReady = false;
         this.fileEntries.clear();
         this.postings.clear();
-        this.buildPromise = this.buildIndex();
+        this.buildPromise = this.buildIndex(options);
         await this.buildPromise;
     }
 
@@ -176,22 +176,55 @@ export class TrigramIndex {
             .slice(0, limit);
     }
 
-    private async buildIndex(): Promise<void> {
+    private async buildIndex(options?: { logEvery?: number; logger?: (message: string) => void; logTotals?: boolean }): Promise<void> {
         if (this.isBuilding) return;
         this.isBuilding = true;
+        const logger = options?.logger;
+        const logEvery = options?.logEvery ?? 500;
+        const progress = logger
+            ? {
+                  indexed: 0,
+                  lastLogged: 0,
+                  logEvery,
+                  logger,
+                  total: options?.logTotals ? 0 : undefined
+              }
+            : undefined;
 
         try {
             // 1. Try to load from disk
             await this.loadPersistedIndex();
 
+            if (progress && options?.logTotals) {
+                const countStartedAt = Date.now();
+                progress.logger("[TrigramIndex] Counting indexable files...");
+                progress.total = await this.countIndexableFiles(this.rootPath, {
+                    logger: progress.logger,
+                    logEvery: Math.max(1000, progress.logEvery)
+                });
+                const countElapsed = Date.now() - countStartedAt;
+                progress.logger(`[TrigramIndex] Counted ${progress.total} files in ${countElapsed}ms.`);
+                progress.logger(`[TrigramIndex] Indexing 0/${progress.total} files (0%).`);
+            } else if (progress) {
+                progress.logger("[TrigramIndex] Indexing started.");
+            }
+
             // 2. Walk filesystem to find new/changed files
             const visited = new Set<string>();
-            await this.walk(this.rootPath, visited);
+            await this.walk(this.rootPath, visited, progress);
 
             // 3. Prune entries no longer on disk
             await this.pruneStaleEntries(visited);
 
             this.isReady = true;
+            if (progress) {
+                if (typeof progress.total === "number") {
+                    const percent = progress.total > 0 ? Math.round((progress.indexed / progress.total) * 100) : 100;
+                    progress.logger(`[TrigramIndex] Indexed ${progress.indexed}/${progress.total} files (${percent}%).`);
+                } else {
+                    progress.logger(`[TrigramIndex] Indexed ${progress.indexed} files.`);
+                }
+            }
             
             if (this.needsPersistAfterBuild) {
                 await this.persistIndex();
@@ -204,7 +237,11 @@ export class TrigramIndex {
         }
     }
 
-    private async walk(absDir: string, visited?: Set<string>): Promise<void> {
+    private async walk(
+        absDir: string,
+        visited?: Set<string>,
+        progress?: { indexed: number; lastLogged: number; logEvery: number; logger: (message: string) => void; total?: number }
+    ): Promise<void> {
         let entries: string[];
         try {
             entries = await this.fileSystem.readDir(absDir);
@@ -221,7 +258,7 @@ export class TrigramIndex {
             try {
                 const stats = await this.fileSystem.stat(absPath);
                 if (stats.isDirectory()) {
-                    await this.walk(absPath, visited);
+                    await this.walk(absPath, visited, progress);
                 } else if (this.shouldIndexFile(relPath, stats.size)) {
                     if (visited) visited.add(relPath);
                     
@@ -229,12 +266,67 @@ export class TrigramIndex {
                     if (!existing || existing.mtime !== stats.mtime) {
                         await this.indexFile(absPath, relPath, stats.mtime, stats.size);
                         this.markDirty();
+                        if (progress) {
+                            progress.indexed += 1;
+                            if (progress.indexed - progress.lastLogged >= progress.logEvery) {
+                                progress.lastLogged = progress.indexed;
+                                if (typeof progress.total === "number") {
+                                    const percent = progress.total > 0
+                                        ? Math.round((progress.indexed / progress.total) * 100)
+                                        : 100;
+                                    progress.logger(`[TrigramIndex] Indexed ${progress.indexed}/${progress.total} files (${percent}%).`);
+                                } else {
+                                    progress.logger(`[TrigramIndex] Indexed ${progress.indexed} files...`);
+                                }
+                            }
+                        }
                     }
                 }
             } catch {
                 // Ignore stat errors
             }
         }
+    }
+
+    private async countIndexableFiles(
+        absDir: string,
+        options: { logger?: (message: string) => void; logEvery?: number } = {}
+    ): Promise<number> {
+        let count = 0;
+        let scanned = 0;
+        let lastLogged = 0;
+        const stack = [absDir];
+        const logEvery = options.logEvery ?? 5000;
+        while (stack.length > 0) {
+            const current = stack.pop()!;
+            let entries: string[];
+            try {
+                entries = await this.fileSystem.readDir(current);
+            } catch {
+                continue;
+            }
+            for (const name of entries) {
+                const absPath = path.join(current, name);
+                const relPath = this.normalizeRelative(absPath);
+                if (!relPath || this.ignoreFilter.ignores(relPath)) continue;
+                try {
+                    const stats = await this.fileSystem.stat(absPath);
+                    scanned += 1;
+                    if (options.logger && scanned - lastLogged >= logEvery) {
+                        lastLogged = scanned;
+                        options.logger(`[TrigramIndex] Counting... scanned ${scanned} entries.`);
+                    }
+                    if (stats.isDirectory()) {
+                        stack.push(absPath);
+                    } else if (this.shouldIndexFile(relPath, stats.size)) {
+                        count += 1;
+                    }
+                } catch {
+                    // Ignore stat errors
+                }
+            }
+        }
+        return count;
     }
 
     private shouldIndexFile(relativePath: string, size: number): boolean {
@@ -326,6 +418,12 @@ export class TrigramIndex {
             }
         } catch (error) {
             console.warn("[TrigramIndex] Failed to load persisted index:", error);
+            try {
+                await fsp.rm(this.persistPath, { force: true });
+                this.needsPersistAfterBuild = true;
+            } catch {
+                // ignore cleanup errors
+            }
         }
     }
 
@@ -359,6 +457,7 @@ export class TrigramIndex {
         }
         if (this.persistTimer) clearTimeout(this.persistTimer);
         this.persistTimer = setTimeout(() => void this.persistIndex(), 5000);
+        this.persistTimer.unref?.();
     }
 
     private async persistIndex(): Promise<void> {

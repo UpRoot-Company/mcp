@@ -37,6 +37,7 @@ We will consolidate all runtime, configuration, and testing data into a single r
 ### Path Management Policy
 1. **Centralization**: All modules MUST resolve paths through a central `PathManager` utility.
 2. **Environment Awareness**: The root directory (`.smart-context`) can be overridden via `SMART_CONTEXT_DIR` environment variable.
+   - Legacy `.mcp/` paths are treated as deprecated and ignored unless `SMART_CONTEXT_ALLOW_LEGACY_MCP_DIR=true` is set.
 3. **Test Isolation**: Tests must use subdirectories within `.smart-context/temp/tests/` instead of the system temp folder to prevent polluting the host OS.
 
 ## 3. Technical Implementation

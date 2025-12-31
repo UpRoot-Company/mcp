@@ -17,12 +17,20 @@ export interface ConfigurationEventPayloads {
 }
 
 const WATCH_FILES = [
-    ".gitignore",
-    ".mcpignore",
     "tsconfig.json",
     "jsconfig.json",
     "package.json"
 ];
+const IGNORE_FILES = [".gitignore", ".mcpignore"];
+const IGNORE_SCAN_EXCLUDES = new Set([
+    ".git",
+    "node_modules",
+    ".mcp",
+    ".smart-context",
+    ".smart-context-index",
+    "dist",
+    "coverage"
+]);
 
 export class ConfigurationManager extends EventEmitter {
     private readonly watcher?: chokidar.FSWatcher;
@@ -34,7 +42,11 @@ export class ConfigurationManager extends EventEmitter {
         
         const isTestEnv = process.env.NODE_ENV === 'test' || process.env.JEST_WORKER_ID !== undefined;
         if (!isTestEnv) {
-            const watchTargets = WATCH_FILES.map(file => path.join(this.rootPath, file));
+            const ignoreTargets = this.collectIgnoreFiles();
+            const watchTargets = [
+                ...WATCH_FILES.map(file => path.join(this.rootPath, file)),
+                ...ignoreTargets
+            ];
             this.watcher = chokidar.watch(watchTargets, {
                 ignoreInitial: true,
                 persistent: true,
@@ -108,22 +120,69 @@ export class ConfigurationManager extends EventEmitter {
 
     private loadIgnorePatterns(): string[] {
         const patterns: string[] = [];
-        for (const file of [".gitignore", ".mcpignore"]) {
-            const absPath = path.join(this.rootPath, file);
-            if (!fs.existsSync(absPath)) {
-                continue;
-            }
+        const ignoreFiles = this.collectIgnoreFiles();
+        for (const absPath of ignoreFiles) {
             try {
                 const content = fs.readFileSync(absPath, "utf-8");
+                const relDir = path.relative(this.rootPath, path.dirname(absPath)).replace(/\\/g, "/");
                 const parsed = content
                     .split(/\r?\n/)
                     .map(line => line.trim())
-                    .filter(line => line.length > 0 && !line.startsWith("#"));
+                    .filter(line => line.length > 0 && !line.startsWith("#"))
+                    .map(line => this.normalizeIgnorePattern(line, relDir));
                 patterns.push(...parsed);
             } catch (error) {
-                console.warn(`[ConfigurationManager] Failed to read ${file}:`, error);
+                console.warn(`[ConfigurationManager] Failed to read ${path.basename(absPath)}:`, error);
             }
         }
         return patterns;
+    }
+
+    private collectIgnoreFiles(): string[] {
+        const ignoreFiles: string[] = [];
+        const stack = [this.rootPath];
+        while (stack.length > 0) {
+            const current = stack.pop()!;
+            let entries: fs.Dirent[] = [];
+            try {
+                entries = fs.readdirSync(current, { withFileTypes: true });
+            } catch {
+                continue;
+            }
+            for (const entry of entries) {
+                if (entry.isSymbolicLink()) {
+                    continue;
+                }
+                const entryPath = path.join(current, entry.name);
+                if (entry.isDirectory()) {
+                    if (IGNORE_SCAN_EXCLUDES.has(entry.name)) {
+                        continue;
+                    }
+                    stack.push(entryPath);
+                    continue;
+                }
+                if (IGNORE_FILES.includes(entry.name)) {
+                    ignoreFiles.push(entryPath);
+                }
+            }
+        }
+        return ignoreFiles;
+    }
+
+    private normalizeIgnorePattern(pattern: string, relDir: string): string {
+        if (!pattern) return pattern;
+        let negation = "";
+        let normalized = pattern;
+        if (normalized.startsWith("!")) {
+            negation = "!";
+            normalized = normalized.slice(1);
+        }
+        if (normalized.startsWith("/")) {
+            normalized = normalized.slice(1);
+        }
+        if (relDir && relDir.length > 0) {
+            normalized = `${relDir}/${normalized}`;
+        }
+        return `${negation}${normalized}`;
     }
 }

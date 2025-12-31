@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as resolve from 'resolve';
+import { builtinModules } from 'module';
 import { createMatchPath, loadConfig, MatchPath } from 'tsconfig-paths';
 
 export type ModuleResolverFallback = 'node' | 'bundler';
@@ -76,6 +77,23 @@ export class ModuleResolver {
         let metadata: Record<string, string> | undefined;
 
         const recordAttempt = (attempt: ResolutionAttempt) => attempts.push(attempt);
+        const isBareSpecifier = !importPath.startsWith('./') && !importPath.startsWith('../') && !path.isAbsolute(importPath);
+        if (isBareSpecifier) {
+            if (this.isCoreModule(importPath)) {
+                recordAttempt({ strategy: 'node', detail: 'core' });
+                strategy = 'node';
+                metadata = { core: 'true', specifier: importPath };
+                const result: ResolutionResult = {
+                    resolvedPath: null,
+                    strategy,
+                    attempts,
+                    error: undefined,
+                    metadata
+                };
+                this.resolutionCache.set(cacheKey, result);
+                return result;
+            }
+        }
 
         if (importPath.startsWith('./') || importPath.startsWith('../')) {
             recordAttempt({ strategy: 'relative' });
@@ -113,8 +131,29 @@ export class ModuleResolver {
             }
         }
 
+        if (resolved) {
+            const normalized = path.normalize(resolved);
+            const isExternal = normalized.includes(`${path.sep}node_modules${path.sep}`) || !normalized.startsWith(this.rootPath);
+            if (isExternal) {
+                metadata = { ...(metadata ?? {}), external: 'true' };
+            }
+        }
+
         if (strategy === 'unresolved') {
             metadata = metadata || {};
+            if (isBareSpecifier) {
+                metadata.external = 'true';
+                metadata.reason = `Unresolved bare specifier; treated as external`;
+                const result: ResolutionResult = {
+                    resolvedPath: null,
+                    strategy: 'node',
+                    attempts,
+                    error: undefined,
+                    metadata
+                };
+                this.resolutionCache.set(cacheKey, result);
+                return result;
+            }
             metadata.reason = `Unresolved after attempts: ${attempts.map(a => a.strategy).join(', ')}`;
         }
 
@@ -186,9 +225,15 @@ export class ModuleResolver {
         // 1. Exact match?
         if (this.isFile(absolutePath)) return absolutePath;
 
-        // 2. Try extensions
-        for (const ext of this.extensions) {
-            if (this.isFile(absolutePath + ext)) return absolutePath + ext;
+        const ext = path.extname(absolutePath);
+        if (ext) {
+            const mapped = this.resolveAlternateExtension(absolutePath, ext);
+            if (mapped) return mapped;
+        } else {
+            // 2. Try extensions
+            for (const extCandidate of this.extensions) {
+                if (this.isFile(absolutePath + extCandidate)) return absolutePath + extCandidate;
+            }
         }
 
         // 3. Try directory index
@@ -196,6 +241,34 @@ export class ModuleResolver {
             for (const ext of this.extensions) {
                 const indexPath = path.join(absolutePath, `index${ext}`);
                 if (this.isFile(indexPath)) return indexPath;
+            }
+        }
+
+        return null;
+    }
+
+    private isCoreModule(specifier: string): boolean {
+        const normalized = specifier.startsWith('node:') ? specifier.slice(5) : specifier;
+        return builtinModules.includes(normalized) || builtinModules.includes(`node:${normalized}`);
+    }
+
+    private resolveAlternateExtension(absolutePath: string, ext: string): string | null {
+        if (!this.extensions.includes(ext)) {
+            return null;
+        }
+
+        const base = absolutePath.slice(0, -ext.length);
+        const candidates: string[] = [];
+
+        if (ext === '.js' || ext === '.mjs' || ext === '.cjs') {
+            candidates.push(`${base}.ts`, `${base}.tsx`, `${base}.d.ts`, `${base}.jsx`);
+        } else if (ext === '.jsx') {
+            candidates.push(`${base}.tsx`, `${base}.ts`, `${base}.d.ts`);
+        }
+
+        for (const candidate of candidates) {
+            if (this.isFile(candidate)) {
+                return candidate;
             }
         }
 

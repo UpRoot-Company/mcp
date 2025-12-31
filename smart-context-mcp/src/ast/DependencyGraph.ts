@@ -35,6 +35,7 @@ export class DependencyGraph {
     private readonly resolver: ModuleResolver;
     private readonly db: IndexDatabase;
     private lastRebuiltAt = 0;
+    private loggingEnabled = true;
 
     private importExtractor: ImportExtractor;
     private exportExtractor: ExportExtractor;
@@ -49,6 +50,17 @@ export class DependencyGraph {
         this.importExtractor = new ImportExtractor(this.rootPath);
         this.exportExtractor = new ExportExtractor(this.rootPath);
         this.reverseIndex = new ReverseImportIndex();
+    }
+
+    public setLoggingEnabled(enabled: boolean): void {
+        this.loggingEnabled = enabled;
+    }
+
+    private log(level: 'log' | 'info' | 'warn' | 'error', ...args: any[]): void {
+        if (!this.loggingEnabled) {
+            return;
+        }
+        console[level](...args);
     }
 
     public isBuilt(): boolean {
@@ -82,17 +94,32 @@ export class DependencyGraph {
         this.lastRebuiltAt = Date.now();
     }
 
-    public async build(): Promise<void> {
+    public async build(options: { logEvery?: number } = {}): Promise<void> {
         const symbolMap = await this.symbolIndex.getAllSymbols();
+        const total = symbolMap.size;
+        const logEvery = options.logEvery ?? 200;
+        let processed = 0;
+        let lastLogged = 0;
+        const startedAt = Date.now();
+
+        this.log('info', `[DependencyGraph] Rebuild started (${total} files).`);
         for (const [pathOrRel, _] of symbolMap) {
             const absPath = path.isAbsolute(pathOrRel) ? pathOrRel : path.join(this.rootPath, pathOrRel);
             await this.updateFileDependencies(absPath);
+            processed += 1;
+            if (processed - lastLogged >= logEvery) {
+                lastLogged = processed;
+                const percent = total > 0 ? Math.round((processed / total) * 100) : 100;
+                this.log('info', `[DependencyGraph] Rebuild progress ${processed}/${total} (${percent}%).`);
+            }
         }
         this.lastRebuiltAt = Date.now();
+        const elapsedMs = Date.now() - startedAt;
+        this.log('info', `[DependencyGraph] Rebuild completed ${processed}/${total} in ${elapsedMs}ms.`);
     }
 
     public async updateFileDependencies(filePath: string): Promise<void> {
-        console.log(`[DependencyGraph] Updating dependencies for ${filePath}`);
+        this.log('log', `[DependencyGraph] Updating dependencies for ${filePath}`);
         
         const relPath = this.getNormalizedRelativePath(filePath);
         const stats = await fs.promises.stat(filePath).catch(() => undefined);
@@ -101,31 +128,40 @@ export class DependencyGraph {
         // Extract imports using AST parsing
         const imports = await this.importExtractor.extractImports(filePath);
         
-        console.log(`[DependencyGraph] Found ${imports.length} imports in ${filePath}`);
+        this.log('log', `[DependencyGraph] Found ${imports.length} imports in ${filePath}`);
         
         const outgoing: EdgeMetadata[] = [];
         const unresolved: UnresolvedMetadata[] = [];
 
         // Convert imports to dependency edges
         for (const imp of imports) {
-            if (imp.resolvedPath) {
-                const targetRelative = this.getNormalizedRelativePath(imp.resolvedPath);
+            const resolution = this.resolver.resolveDetailed(filePath, imp.specifier);
+            const isCore = resolution.metadata?.core === 'true';
+            const isExternal = resolution.metadata?.external === 'true';
+            if (isCore || isExternal) {
+                continue;
+            }
+
+            if (resolution.resolvedPath) {
+                const targetRelative = this.getNormalizedRelativePath(resolution.resolvedPath);
                 outgoing.push({
                     targetPath: targetRelative,
                     type: imp.importType,
                     metadata: {
                         what: imp.what.join(', '),
                         line: imp.line,
-                        specifier: imp.specifier
+                        specifier: imp.specifier,
+                        ...resolution.metadata
                     }
                 });
             } else {
                 unresolved.push({
                     specifier: imp.specifier,
-                    error: 'Module resolution failed',
+                    error: resolution.error ?? 'Module resolution failed',
                     metadata: {
                         what: imp.what.join(', '),
-                        line: imp.line
+                        line: imp.line,
+                        ...resolution.metadata
                     }
                 });
             }
@@ -273,11 +309,11 @@ export class DependencyGraph {
 
     public async rebuildUnresolved(): Promise<void> {
         if (!this.db) {
-            console.warn('[DependencyGraph] IndexDatabase not available; skipping unresolved rebuild');
+            this.log('warn', '[DependencyGraph] IndexDatabase not available; skipping unresolved rebuild');
             return;
         }
 
-        console.info('[DependencyGraph] Rebuilding unresolved dependencies...');
+        this.log('info', '[DependencyGraph] Rebuilding unresolved dependencies...');
         try {
             const unresolved = this.db.listUnresolved();
             const filePathSet = new Set<string>();
@@ -295,13 +331,13 @@ export class DependencyGraph {
                     await this.updateFileDependencies(absPath);
                     rebuiltCount++;
                 } catch (error) {
-                    console.warn(`[DependencyGraph] Failed to rebuild dependencies for ${relativePath}:`, error);
+                    this.log('warn', `[DependencyGraph] Failed to rebuild dependencies for ${relativePath}:`, error);
                 }
             }
 
-            console.info(`[DependencyGraph] Rebuilt dependencies for ${rebuiltCount} files with previously unresolved imports`);
+            this.log('info', `[DependencyGraph] Rebuilt dependencies for ${rebuiltCount} files with previously unresolved imports`);
         } catch (error) {
-            console.error('[DependencyGraph] Error rebuilding unresolved dependencies:', error);
+            this.log('error', '[DependencyGraph] Error rebuilding unresolved dependencies:', error);
         }
     }
 
@@ -370,6 +406,12 @@ export class DependencyGraph {
         outgoing: EdgeMetadata[],
         unresolved: UnresolvedMetadata[]
     ): void {
+        const isCore = resolution.metadata?.core === 'true';
+        const isExternal = resolution.metadata?.external === 'true';
+        if (isCore || isExternal) {
+            return;
+        }
+
         const resolved = resolution.resolvedPath;
         if (resolved && resolved.startsWith(this.rootPath)) {
             const targetRelative = path.relative(this.rootPath, resolved);

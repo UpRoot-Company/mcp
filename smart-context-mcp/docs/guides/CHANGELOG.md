@@ -53,7 +53,7 @@ Smart Context MCP v1.0.0 is the first stable release of the Model Context Protoc
 | Feature | Details |
 |---------|---------|
 | **Languages** | TypeScript, JavaScript, Python, JSON |
-| **Tools** | 10+ MCP tools for search, read, edit, analysis |
+| **Tools** | Six Pillars (6 tools) + opt-in legacy/compat tools |
 | **Platforms** | Claude, Copilot, Cursor, and custom LLM integrations |
 | **IDE Integration** | VSCode, JetBrains, Vim, Emacs via plugins |
 | **CI/CD** | GitHub Actions, GitLab, pre-commit hooks |
@@ -79,10 +79,13 @@ Smart Context MCP v1.0.0 is the first stable release of the Model Context Protoc
 
 ### Architecture
 
-Built on a Scout → Read → Edit pipeline:
-1. **Scout** - Find relevant code using indexing and ranking
-2. **Read** - Understand structure with AST analysis and skeleton generation
-3. **Edit** - Modify safely with transactions and fuzzy matching
+Exposes the **Six Pillars** (ADR-033):
+1. **navigate** - Find relevant symbols/files
+2. **read** - Skeleton/fragment/full views (token-efficient by default)
+3. **understand** - Synthesize structure/relationships (opt-in deeper graphs)
+4. **change** - Plan (dry-run) → review → apply safely
+5. **write** - Create/scaffold files
+6. **manage** - status/undo/redo/reindex/history
 
 ### Documentation
 
@@ -104,7 +107,7 @@ Comprehensive documentation included:
 
 - **Source Lines of Code:** ~15,000
 - **Test Coverage:** 87%
-- **Architecture Decision Records (ADRs):** 26
+- **Architecture Decision Records (ADRs):** see `smart-context-mcp/docs/adr/`
 - **Architectural Patterns:** 8+ design patterns documented
 - **Code Examples:** 60+ from actual source
 

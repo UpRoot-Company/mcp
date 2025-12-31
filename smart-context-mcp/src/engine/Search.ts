@@ -16,6 +16,7 @@ import { FilenameScorer } from './scoring/FilenameScorer.js';
 import { CommentParser } from '../utils/CommentParser.js';
 import { DependencyGraph } from "../ast/DependencyGraph.js";
 import { QueryIntentDetector } from './search/QueryIntent.js';
+import { createLogger } from "../utils/StructuredLogger.js";
 
 const execAsync = promisify(exec);
 
@@ -79,6 +80,7 @@ export class SearchEngine {
     private readonly queryTokenizer: QueryTokenizer;
     private readonly callGraphMetricsBuilder?: CallGraphMetricsBuilder;
     private callGraphSignals?: Map<string, CallGraphSignals>;
+    private readonly logger = createLogger("Search");
 
     private hybridScorer: HybridScorer;
     private candidateCollector: CandidateCollector;
@@ -140,12 +142,16 @@ export class SearchEngine {
         await this.trigramIndex.updateIgnoreGlobs(this.defaultExcludeGlobs);
     }
 
+    public getExcludeGlobs(): string[] {
+        return [...this.defaultExcludeGlobs];
+    }
+
     public async warmup(): Promise<void> {
         await this.trigramIndex.ensureReady();
     }
 
-    public async rebuild(): Promise<void> {
-        await this.trigramIndex.rebuild();
+    public async rebuild(options?: { logEvery?: number; logger?: (message: string) => void; logTotals?: boolean }): Promise<void> {
+        await this.trigramIndex.rebuild(options);
         this.callGraphSignals = undefined;
     }
 
@@ -211,7 +217,7 @@ export class SearchEngine {
         const normalizedQuery = effectiveQuery ? this.queryTokenizer.normalize(effectiveQuery) : '';
         const intent = this.queryIntentDetector.detect(effectiveQuery);
 
-        console.log(`[Search] Hybrid search for query: "${effectiveQuery}" (intent: ${intent}, keywords: ${keywordLabels.join(', ')})`);
+        this.logger.debug(`[Search] Hybrid search for query: "${effectiveQuery}" (intent: ${intent}, keywords: ${keywordLabels.join(', ')})`);
 
         const combinedExcludeGlobs = [...this.defaultExcludeGlobs, ...(excludeGlobs || [])];
         const includeRegexes = includeGlobs && includeGlobs.length > 0
@@ -231,7 +237,7 @@ export class SearchEngine {
             );
             if (fallbackCandidates.size > 0) {
                 candidates = fallbackCandidates;
-                console.log(`[Search] Added ${fallbackCandidates.size} fallback candidates via filesystem scan, total: ${candidates.size}`);
+                this.logger.debug(`[Search] Added ${fallbackCandidates.size} fallback candidates via filesystem scan, total: ${candidates.size}`);
             }
         }
 
@@ -240,7 +246,7 @@ export class SearchEngine {
             for (const file of allFiles) candidates.add(file);
         }
 
-        console.log(`[Search] Collected ${candidates.size} candidates`);
+        this.logger.debug(`[Search] Collected ${candidates.size} candidates`);
 
         const documents: Document[] = [];
         const candidateEntries: Array<{ absPath: string, relativeToBase: string }> = [];
@@ -361,7 +367,7 @@ export class SearchEngine {
         }
 
         fileSearchResults.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
-        console.log(`[Search] Returning ${fileSearchResults.length} results`);
+        this.logger.debug(`[Search] Returning ${fileSearchResults.length} results`);
 
         return this.resultProcessor.postProcessResults(fileSearchResults, {
             fileTypes: args.fileTypes,

@@ -27,14 +27,20 @@ export class ImportExtractor {
       return [];
     }
 
-    const source = await fs.promises.readFile(filePath, 'utf-8');
     const isTypeScript = this.isTypeScriptFile(filePath);
-    
     if (isTypeScript) {
+      const source = await fs.promises.readFile(filePath, 'utf-8');
       return this.extractTypeScriptImports(source, filePath);
-    } else {
+    }
+
+    // Only attempt Babel parsing for JavaScript-like files.
+    // This prevents noisy errors when indexing non-JS assets (e.g. .py, .dart, .sh).
+    if (['.js', '.jsx', '.mjs', '.cjs'].includes(ext)) {
+      const source = await fs.promises.readFile(filePath, 'utf-8');
       return this.extractJavaScriptImports(source, filePath);
     }
+
+    return [];
   }
   
   /**

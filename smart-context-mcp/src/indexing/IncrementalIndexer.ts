@@ -727,6 +727,7 @@ export class IncrementalIndexer {
                 await this.indexManager.persistIndex(this.currentIndex);
             }
         }, 5 * 60 * 1000);
+        this.periodicPersistenceTimer.unref?.();
     }
 }
 
@@ -744,6 +745,7 @@ function debounce<T extends (...args: any[]) => any>(
     const debounced = (...args: Parameters<T>) => {
         if (timeout) clearTimeout(timeout);
         timeout = setTimeout(() => func(...args), wait);
+        timeout.unref?.();
     };
 
     debounced.cancel = () => {

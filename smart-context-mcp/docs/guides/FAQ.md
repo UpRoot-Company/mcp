@@ -2,6 +2,8 @@
 
 Quick answers to common questions about Smart Context MCP.
 
+**Note (ADR-033):** The primary interface is the **Six Pillars** (`navigate`, `read`, `understand`, `change`, `write`, `manage`). Some older sections may still mention legacy tool names (e.g. `read_code`); see `smart-context-mcp/docs/legacy/LEGACY_TOOL_CATALOG.md` for mappings.
+
 ---
 
 ## General Questions
@@ -57,10 +59,10 @@ Think of it as a "smart middleware" between AI and your filesystem.
 
 ```
 Do you need to understand the overall structure?
-  ├─ YES → read_code(view="skeleton") ⭐ Recommended
+  ├─ YES → read(view="skeleton") ⭐ Recommended
   └─ NO  → Do you know the line numbers?
-           ├─ YES → read_code(view="fragment", lineRange="10-50")
-           └─ NO  → read_code(view="full") (only if needed)
+           ├─ YES → read(view="fragment", lineRange="10-50")
+           └─ NO  → read(view="full") (only if needed)
 ```
 
 **Examples:**
@@ -442,17 +444,17 @@ SMART_CONTEXT_LANGUAGE_CONFIG=./languages.json npx smart-context-mcp
 
 ### Q: What's the most efficient workflow?
 
-**A:** Follow **Scout → Read → Edit**:
+**A:** Follow **Navigate → Read → Change** (Six Pillars):
 
 ```
-1. Scout: search_project(type="symbol")     ~100 tokens
-2. Read:  read_code(view="skeleton")        ~150 tokens
-3. Edit:  edit_code(dryRun=true)            ~100 tokens
+1. Navigate: navigate(context="definitions") ~100 tokens
+2. Read:     read(view="skeleton")          ~150 tokens
+3. Change:   change(dryRun=true)            ~100 tokens
 
 Total: ~350 tokens
 
 ❌ Bad approach:
-read_code(view="full") on 10 files = 50,000 tokens!
+read(view="full") on 10 files = 50,000 tokens!
 
 ✅ Savings: 99% token reduction!
 ```
@@ -461,13 +463,13 @@ read_code(view="full") on 10 files = 50,000 tokens!
 
 ### Q: When should I use `dryRun=true`?
 
-**A:** **Always for multi-file edits.**
+**A:** **Always for edits you haven’t reviewed yet** (especially multi-file).
 
 ```
 1. Ask AI: "Here's what I want to change..."
-2. AI: edit_code(dryRun=true)  ← Preview first
+2. AI: change(dryRun=true)     ← Preview first
 3. You: "Looks good" or "Fix this..."
-4. AI: edit_code(dryRun=false) ← Commit
+4. AI: change(dryRun=false)    ← Commit
 ```
 
 **Risk of skipping dry-run:** Wrong changes committed.
