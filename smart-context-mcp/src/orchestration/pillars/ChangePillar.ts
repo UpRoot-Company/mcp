@@ -5,6 +5,7 @@ import { ParsedIntent } from '../IntentRouter.js';
 import { ChangeBudgetManager } from '../ChangeBudgetManager.js';
 import { analyzeQuery } from '../../engine/search/QueryMetrics.js';
 import * as path from 'path';
+import { IntegrityEngine } from '../../integrity/IntegrityEngine.js';
 
 
 export class ChangePillar {
@@ -13,6 +14,10 @@ export class ChangePillar {
   public async execute(intent: ParsedIntent, context: OrchestrationContext): Promise<any> {
     const { targets, constraints, originalIntent, action } = intent;
     const { dryRun = true, includeImpact = false } = constraints;
+    const integrityOptions = IntegrityEngine.resolveOptions(constraints.integrity, "change");
+    const integrityReport = integrityOptions && integrityOptions.mode !== "off"
+      ? IntegrityEngine.buildPlaceholderReport(integrityOptions).report
+      : undefined;
 
     const rawEdits = Array.isArray(constraints.edits) ? constraints.edits : [];
     let targetPath: string | undefined = constraints.targetPath || targets[0] || this.extractTargetFromEdits(rawEdits);
@@ -198,6 +203,7 @@ export class ChangePillar {
       autoCorrectionAttempts: autoCorrectionAttempts.length > 0 ? autoCorrectionAttempts : undefined,
       guidance: failureGuidance ?? successGuidance,
       relatedDocs,
+      integrity: integrityReport,
       degraded: !finalResult.success && autoCorrectionAttempts.length === 0,
       refinement: {
         stage: refinementStage,

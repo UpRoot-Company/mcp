@@ -1,5 +1,6 @@
 
 import { DocumentOutlineOptions } from "../types.js";
+import type { IntegrityOptions } from "../integrity/IntegrityTypes.js";
 
 export type IntentCategory = 'explore' | 'understand' | 'change' | 'navigate' | 'read' | 'write' | 'manage';
 
@@ -53,6 +54,7 @@ export interface IntentConstraints {
   allowSensitive?: boolean;
   allowBinary?: boolean;
   allowGlobs?: boolean;
+  integrity?: IntegrityOptions;
 }
 
 

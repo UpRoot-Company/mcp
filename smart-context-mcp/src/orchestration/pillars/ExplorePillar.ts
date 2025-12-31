@@ -4,6 +4,8 @@ import { LRUCache } from "lru-cache";
 import { InternalToolRegistry } from "../InternalToolRegistry.js";
 import { OrchestrationContext } from "../OrchestrationContext.js";
 import { ParsedIntent } from "../IntentRouter.js";
+import { IntegrityEngine } from "../../integrity/IntegrityEngine.js";
+import type { IntegrityReport } from "../../integrity/IntegrityTypes.js";
 
 type ExploreItem = {
     kind: "document_section" | "file_preview" | "file_full" | "symbol" | "directory";
@@ -25,6 +27,7 @@ type ExploreResponse = {
     data: { docs: ExploreItem[]; code: ExploreItem[] };
     pack?: { packId: string; hit: boolean; createdAt: number; expiresAt?: number };
     next?: { itemsCursor?: string; contentCursor?: string };
+    integrity?: IntegrityReport;
     degraded?: boolean;
     reasons?: string[];
     stats?: Record<string, unknown>;
@@ -120,6 +123,7 @@ export class ExplorePillar {
         const allowSensitive = constraints.allowSensitive === true;
         const allowBinary = constraints.allowBinary === true;
         const allowGlobs = constraints.allowGlobs === true;
+        const integrityOptions = IntegrityEngine.resolveOptions(constraints.integrity, "explore");
 
         if (!query && paths.length === 0) {
             return {
@@ -160,6 +164,9 @@ export class ExplorePillar {
             query,
             data: { docs: [], code: [] }
         };
+        if (integrityOptions && integrityOptions.mode !== "off") {
+            response.integrity = IntegrityEngine.buildPlaceholderReport(integrityOptions).report;
+        }
 
         const reasons: string[] = [];
         let degraded = false;
