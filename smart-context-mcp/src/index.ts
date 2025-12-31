@@ -360,6 +360,10 @@ export class SmartContextServer {
 
     private initProcessDiagnostics(): void {
         if (this.diagnosticsInitialized) return;
+        if (this.isTestEnv()) {
+            this.diagnosticsInitialized = true;
+            return;
+        }
         this.diagnosticsInitialized = true;
 
         const logMemory = (label: string) => {
