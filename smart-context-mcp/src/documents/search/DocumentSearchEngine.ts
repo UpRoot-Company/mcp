@@ -43,12 +43,17 @@ export interface DocumentSearchResponse {
     results: DocumentSearchSection[];
     evidence?: DocumentSearchSection[];
     degraded?: boolean;
+    reason?: string;
+    reasons?: string[];
     provider?: { name: string; model: string; dims: number } | null;
     stats: {
         candidateFiles: number;
         candidateChunks: number;
         vectorEnabled: boolean;
         mmrApplied: boolean;
+        evidenceSections: number;
+        evidenceChars: number;
+        evidenceTruncated: boolean;
     };
 }
 
@@ -72,12 +77,17 @@ export class DocumentSearchEngine {
                 results: [],
                 evidence: [],
                 degraded: false,
+                reason: undefined,
+                reasons: undefined,
                 provider: null,
                 stats: {
                     candidateFiles: 0,
                     candidateChunks: 0,
                     vectorEnabled: false,
-                    mmrApplied: false
+                    mmrApplied: false,
+                    evidenceSections: 0,
+                    evidenceChars: 0,
+                    evidenceTruncated: false
                 }
             };
         }
@@ -96,12 +106,14 @@ export class DocumentSearchEngine {
         const mmrLambda = options.mmrLambda ?? 0.7;
         const maxChunksEmbeddedPerRequest = options.maxChunksEmbeddedPerRequest ?? 32;
         const maxEmbeddingTimeMs = options.maxEmbeddingTimeMs ?? 2500;
+        const degradationReasons: string[] = [];
 
         const candidateFiles = await this.collectCandidateFiles(query, maxCandidates, options.includeComments === true);
         let chunks = await this.collectChunks(candidateFiles, options.includeComments === true);
         const initialChunkCount = chunks.length;
 
         if (chunks.length > maxChunkCandidates) {
+            degradationReasons.push("budget_exceeded");
             const queryTokens = tokenize(query);
             chunks = chunks
                 .map(chunk => ({
@@ -119,12 +131,17 @@ export class DocumentSearchEngine {
                 results: [],
                 evidence: includeEvidence ? [] : undefined,
                 degraded: false,
+                reason: undefined,
+                reasons: undefined,
                 provider: null,
                 stats: {
                     candidateFiles: candidateFiles.length,
                     candidateChunks: 0,
                     vectorEnabled: false,
-                    mmrApplied: false
+                    mmrApplied: false,
+                    evidenceSections: 0,
+                    evidenceChars: 0,
+                    evidenceTruncated: false
                 }
             };
         }
@@ -158,6 +175,9 @@ export class DocumentSearchEngine {
                 });
 
                 degraded = embeddingResult.degraded;
+                if (embeddingResult.reasons.length > 0) {
+                    degradationReasons.push(...embeddingResult.reasons);
+                }
                 vectorScores = embeddingResult.scores;
                 const vectorRanked = Array.from(vectorScores.entries())
                     .sort((a, b) => b[1] - a[1])
@@ -165,6 +185,7 @@ export class DocumentSearchEngine {
                 vectorRankMap = buildRankMap(vectorRanked.map(([id]) => id));
             } catch {
                 degraded = true;
+                degradationReasons.push("vector_disabled");
                 vectorEnabled = false;
                 vectorScores = new Map();
                 vectorRankMap = new Map();
@@ -221,21 +242,40 @@ export class DocumentSearchEngine {
             : scoredSections;
 
         const results = ordered.slice(0, maxResults).map(entry => toSearchSection(entry.chunk, entry.scores, snippetLength));
+        const evidenceCandidates = includeEvidence
+            ? ordered.map(entry => toSearchSection(entry.chunk, entry.scores, snippetLength))
+            : [];
         const evidence = includeEvidence
-            ? limitEvidence(ordered.map(entry => toSearchSection(entry.chunk, entry.scores, snippetLength)), maxEvidenceSections, maxEvidenceChars)
+            ? limitEvidence(evidenceCandidates, maxEvidenceSections, maxEvidenceChars)
             : undefined;
+
+        const evidenceChars = (evidence ?? []).reduce((sum, section) => sum + (section.preview?.length ?? 0), 0);
+        const evidenceTruncated = includeEvidence && evidence != null && evidence.length < evidenceCandidates.length;
+        if (evidenceTruncated) {
+            degradationReasons.push("evidence_truncated");
+        }
+
+        const uniqueReasons = Array.from(new Set(degradationReasons.filter(Boolean)));
+        const degradedAny = degraded || uniqueReasons.length > 0;
+        const reason = uniqueReasons.length > 0 ? uniqueReasons[0] : undefined;
+        const reasons = uniqueReasons.length > 1 ? uniqueReasons : undefined;
 
         return {
             query,
             results,
             evidence,
-            degraded,
+            degraded: degradedAny,
+            reason,
+            reasons,
             provider: vectorEnabled ? { name: provider.provider, model: provider.model, dims: provider.dims } : null,
             stats: {
                 candidateFiles: candidateFiles.length,
                 candidateChunks: initialChunkCount,
                 vectorEnabled,
-                mmrApplied: useMmr
+                mmrApplied: useMmr,
+                evidenceSections: evidence?.length ?? 0,
+                evidenceChars,
+                evidenceTruncated
             }
         };
     }
@@ -304,10 +344,11 @@ export class DocumentSearchEngine {
         chunks: StoredDocumentChunk[],
         provider: { provider: string; model: string; dims: number; normalize: boolean; embed(texts: string[]): Promise<Float32Array[]> },
         limits: { maxChunks: number; maxTimeMs: number }
-    ): Promise<{ scores: Map<string, number>; degraded: boolean }> {
+    ): Promise<{ scores: Map<string, number>; degraded: boolean; reasons: string[] }> {
+        const reasons: string[] = [];
         const [queryVector] = await provider.embed([query]);
         if (!queryVector) {
-            return { scores: new Map(), degraded: true };
+            return { scores: new Map(), degraded: true, reasons: ["vector_disabled"] };
         }
         const scores = new Map<string, number>();
         const missing: StoredDocumentChunk[] = [];
@@ -325,7 +366,7 @@ export class DocumentSearchEngine {
         }
 
         if (missing.length === 0) {
-            return { scores, degraded: false };
+            return { scores, degraded: false, reasons: [] };
         }
 
         const startedAt = Date.now();
@@ -333,6 +374,7 @@ export class DocumentSearchEngine {
         const limited = missing.slice(0, limits.maxChunks);
         if (missing.length > limits.maxChunks) {
             degraded = true;
+            reasons.push("embedding_partial");
         }
 
         const batchSize = Math.max(1, Math.min(limits.maxChunks, 16));
@@ -340,6 +382,7 @@ export class DocumentSearchEngine {
             const elapsed = Date.now() - startedAt;
             if (elapsed > limits.maxTimeMs) {
                 degraded = true;
+                reasons.push("embedding_timeout");
                 break;
             }
             const batch = limited.slice(i, i + batchSize);
@@ -362,7 +405,7 @@ export class DocumentSearchEngine {
             }
         }
 
-        return { scores, degraded };
+        return { scores, degraded, reasons: Array.from(new Set(reasons)) };
     }
 
     private async resolveEmbeddingProvider(override?: EmbeddingConfig) {

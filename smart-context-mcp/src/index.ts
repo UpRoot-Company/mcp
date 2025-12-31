@@ -502,7 +502,7 @@ export class SmartContextServer {
             },
             {
                 name: 'doc_search',
-                description: 'Search markdown/MDX sections with hybrid ranking (BM25 + vector).',
+                description: 'Search project documents (md/mdx/txt/html/css + well-known text files) with hybrid ranking (BM25 + vector). Optionally include code comments as a separate corpus (kind="code_comment").',
                 inputSchema: {
                     type: 'object',
                     properties: {
@@ -521,6 +521,7 @@ export class SmartContextServer {
                         mmrLambda: { type: 'number' },
                         maxChunksEmbeddedPerRequest: { type: 'number' },
                         maxEmbeddingTimeMs: { type: 'number' },
+                        includeComments: { type: 'boolean' },
                         embedding: {
                             type: 'object',
                             properties: {
@@ -1177,12 +1178,17 @@ export class SmartContextServer {
                 results: [],
                 evidence: [],
                 degraded: false,
+                reason: undefined,
+                reasons: undefined,
                 provider: null,
                 stats: {
                     candidateFiles: 0,
                     candidateChunks: 0,
                     vectorEnabled: false,
-                    mmrApplied: false
+                    mmrApplied: false,
+                    evidenceSections: 0,
+                    evidenceChars: 0,
+                    evidenceTruncated: false
                 }
             };
         }
