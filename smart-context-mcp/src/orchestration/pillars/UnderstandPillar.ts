@@ -254,7 +254,7 @@ export class UnderstandPillar {
   }
 
   private isDocumentPath(filePath: string): boolean {
-    return /\.(md|mdx|txt|log)$/i.test(filePath);
+    return /\.(md|mdx|txt|log|docx)$/i.test(filePath);
   }
 
   private categorizeDocLinks(links: Array<{ resolvedPath?: string }>) {

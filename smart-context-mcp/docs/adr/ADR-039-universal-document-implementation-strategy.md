@@ -187,6 +187,7 @@ export interface UniversalExtractedDocument {
 - DOCX 파서 추가(HTML 변환 기반)
 - 헤더 path/테이블 텍스트화
 - 이미지/도표는 OCR 없이 placeholder + 캡션/alt 텍스트만(가능한 범위)
+- 파서 미설치/실패 시 `docx_parser_missing` / `docx_parse_failed` degrade 이유 노출
 - 테스트: DOCX 샘플에서 헤더 기반 outline/섹션 검색이 동작
 
 ### Phase 2 — XLSX (table-first)

@@ -10,8 +10,9 @@ import { DocumentKind, DocumentOutlineOptions } from "../types.js";
 import { EmbeddingRepository } from "./EmbeddingRepository.js";
 import { EmbeddingProviderFactory } from "../embeddings/EmbeddingProviderFactory.js";
 import { extractHtmlTextPreserveLines } from "../documents/html/HtmlTextExtractor.js";
+import { extractDocxAsHtml, DocxExtractError } from "../documents/extractors/DocxExtractor.js";
 
-const SUPPORTED_DOC_EXTENSIONS = new Set<string>([".md", ".mdx", ".txt", ".log", ".html", ".htm", ".css"]);
+const SUPPORTED_DOC_EXTENSIONS = new Set<string>([".md", ".mdx", ".txt", ".log", ".html", ".htm", ".css", ".docx"]);
 const WELL_KNOWN_TEXT_FILES = new Set<string>([
     "README",
     "LICENSE",
@@ -79,8 +80,23 @@ export class DocumentIndexer {
         if (this.shouldIgnore(relativePath)) return;
 
         const stats = await this.fileSystem.stat(relativePath);
-        const kind = inferKind(relativePath);
-        const rawContent = await this.readDocumentContent(relativePath, stats.size);
+        const ext = path.extname(relativePath).toLowerCase();
+        const isDocx = ext === ".docx";
+        const kind = isDocx ? "html" : inferKind(relativePath);
+        let rawContent = "";
+        if (isDocx) {
+            const absPath = path.resolve(this.rootPath, relativePath);
+            try {
+                const extracted = await extractDocxAsHtml(absPath);
+                rawContent = extracted.html ?? "";
+            } catch (error: any) {
+                const reason = error instanceof DocxExtractError ? error.reason : "docx_parse_failed";
+                console.warn(`[DocumentIndexer] Failed to extract DOCX (${relativePath}): ${reason}`);
+                return;
+            }
+        } else {
+            rawContent = await this.readDocumentContent(relativePath, stats.size);
+        }
         const contentForChunking = kind === "html" ? extractHtmlTextPreserveLines(rawContent) : rawContent;
 
         const fileRecord = this.indexDatabase.getOrCreateFile(relativePath, stats.mtime, kind);
@@ -227,6 +243,7 @@ function inferKind(filePath: string): DocumentKind {
     if (ext === ".md") return "markdown";
     if (ext === ".txt") return "text";
     if (ext === ".log") return "text";
+    if (ext === ".docx") return "html";
     const base = path.basename(filePath);
     if (WELL_KNOWN_TEXT_FILES.has(base)) return "text";
     return "unknown";

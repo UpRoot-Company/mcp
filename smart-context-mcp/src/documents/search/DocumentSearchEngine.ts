@@ -624,6 +624,7 @@ export class DocumentSearchEngine {
             "**/*.mdx",
             "**/*.txt",
             "**/*.log",
+            "**/*.docx",
             "**/*.html",
             "**/*.htm",
             "**/*.css",
@@ -649,7 +650,22 @@ export class DocumentSearchEngine {
         });
 
         const paths = scoutResults.map(result => result.filePath).filter(Boolean);
-        const unique = Array.from(new Set(paths));
+        const seen = new Set<string>();
+        const unique: string[] = [];
+        for (const candidate of paths) {
+            if (!candidate || seen.has(candidate)) continue;
+            seen.add(candidate);
+            unique.push(candidate);
+        }
+        if (unique.length < maxCandidates) {
+            const extras = this.chunkRepository.listDocumentFiles(maxCandidates * 2);
+            for (const extra of extras) {
+                if (seen.has(extra)) continue;
+                seen.add(extra);
+                unique.push(extra);
+                if (unique.length >= maxCandidates) break;
+            }
+        }
         if (unique.length > 0) return unique;
 
         const filenameFallback = await this.searchEngine.searchFilenames(query, { maxResults: maxCandidates });

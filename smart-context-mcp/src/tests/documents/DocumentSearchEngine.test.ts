@@ -16,9 +16,19 @@ import { SkeletonGenerator } from "../../ast/SkeletonGenerator.js";
 import { EvidencePackRepository } from "../../indexing/EvidencePackRepository.js";
 
 let tempDir: string;
+let mammothAvailable = true;
+const SAMPLE_DOCX_BASE64 = "UEsDBBQAAAAIAG9+n1udxYoq8gAAALkBAAATAAAAW0NvbnRlbnRfVHlwZXNdLnhtbH2QzU7DMBCE73kKy1eUOHBACCXpgZ8jcCgPsLI3iVV7bXnd0r49TgtFQpSjNfPNrKdb7b0TO0xsA/XyummlQNLBWJp6+b5+ru+k4AxkwAXCXh6Q5WqouvUhIosCE/dyzjneK8V6Rg/chIhUlDEkD7k806Qi6A1MqG7a9lbpQBkp13nJkEMlRPeII2xdFk/7opxuSehYioeTd6nrJcTorIZcdLUj86uo/ippCnn08GwjXxWDVJdKFvFyxw/6WiZK1qB4g5RfwBej+gjJKBP01he4+T/pj2vDOFqNZ35JiyloZC7be9ecFQ+Wvn/RqePwQ/UJUEsDBBQAAAAIAG9+n1tAoFMJsgAAAC8BAAALAAAAX3JlbHMvLnJlbHONz7sOgjAUBuCdp2jOLgUHYwyFxZiwGnyApj2URnpJWy+8vR0cxDg4ntt38jfd08zkjiFqZxnUZQUErXBSW8XgMpw2eyAxcSv57CwyWDBC1xbNGWee8k2ctI8kIzYymFLyB0qjmNDwWDqPNk9GFwxPuQyKei6uXCHdVtWOhk8D2oKQFUt6ySD0sgYyLB7/4d04aoFHJ24Gbfrx5WsjyzwoTAweLkgq3+0ys0BzSrqK2RYvUEsDBBQAAAAIAG9+n1vuW4Vu3wAAAF8BAAARAAAAd29yZC9kb2N1bWVudC54bWx1kM9OxCAQxu99igl3S7dRs2la9qbxZvzzAFjGlgQGAlRcn15odm96+fIN8Jv5mPH0bQ18YYja0cQObccAaXZK0zKx97eHmyODmCQpaRzhxM4Y2Uk0Yx6UmzeLlKB0oDjkia0p+YHzOK9oZWydRyp3ny5YmUoZFp5dUD64GWMsA6zhfdfdcys1MdEAlK4fTp2r3QsvioQqSTxRiWEMPG5a4cjrUdWwq/8TedkIyFvQFzQ5iJhg8+3/fMQ5Pe+8X15/INd/Hfr+tuwlD2vxd8fi+U5d3tbg/Jq8uutmRPMLUEsBAhQDFAAAAAgAb36fW53FiiryAAAAuQEAABMAAAAAAAAAAAAAAIABAAAAAFtDb250ZW50X1R5cGVzXS54bWxQSwECFAMUAAAACABvfp9bQKBTCbIAAAAvAQAACwAAAAAAAAAAAAAAgAEjAQAAX3JlbHMvLnJlbHNQSwECFAMUAAAACABvfp9b7luFbt8AAABfAQAAEQAAAAAAAAAAAAAAgAH+AQAAd29yZC9kb2N1bWVudC54bWxQSwUGAAAAAAMAAwC5AAAADAMAAAAA";
 
 beforeAll(() => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "smart-context-doc-search-"));
+});
+
+beforeAll(async () => {
+    try {
+        await import("mammoth");
+    } catch {
+        mammothAvailable = false;
+    }
 });
 
 afterAll(() => {
@@ -669,6 +679,44 @@ describe("DocumentSearchEngine", () => {
 
         const response = await engine.search("install failed", { output: "compact", includeEvidence: false });
         const match = response.results.find(r => r.filePath === "logs/app.log");
+        expect(match).toBeTruthy();
+
+        indexDatabase.close();
+        await searchEngine.dispose();
+        fs.rmSync(rootDir, { recursive: true, force: true });
+    });
+
+    it("indexes .docx files when parser is available", async () => {
+        if (!mammothAvailable) {
+            return;
+        }
+        const rootDir = setupWorkspace();
+        const fileSystem = new NodeFileSystem(rootDir);
+        const indexDatabase = new IndexDatabase(rootDir);
+        const embeddingRepository = new EmbeddingRepository(indexDatabase);
+        const documentIndexer = new DocumentIndexer(rootDir, fileSystem, indexDatabase, { embeddingRepository });
+
+        const docxPath = path.join(rootDir, "docs", "sample.docx");
+        fs.writeFileSync(docxPath, Buffer.from(SAMPLE_DOCX_BASE64, "base64"));
+
+        await documentIndexer.indexFile("docs/sample.docx");
+
+        const searchEngine = new SearchEngine(rootDir, fileSystem);
+        const engine = new DocumentSearchEngine(
+            searchEngine,
+            documentIndexer,
+            new DocumentChunkRepository(indexDatabase),
+            embeddingRepository,
+            new EmbeddingProviderFactory({
+                provider: "local",
+                normalize: true,
+                local: { model: "hash-test", dims: 64 }
+            }),
+            rootDir
+        );
+
+        const response = await engine.search("Install Guide", { output: "compact", includeEvidence: false });
+        const match = response.results.find(r => r.filePath === "docs/sample.docx");
         expect(match).toBeTruthy();
 
         indexDatabase.close();
