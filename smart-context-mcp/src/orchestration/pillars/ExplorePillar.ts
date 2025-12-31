@@ -122,6 +122,7 @@ export class ExplorePillar {
         const maxFiles = Number.isFinite(limits.maxFiles) && limits.maxFiles! > 0 ? limits.maxFiles! : DEFAULT_MAX_FILES;
         const includeDocs = include.docs !== false;
         const includeCode = include.code !== false;
+        const includeComments = include.comments === true;
 
         const response: ExploreResponse = {
             success: true,
@@ -135,22 +136,27 @@ export class ExplorePillar {
         let totalChars = 0;
 
         if (query) {
-            if (includeDocs) {
+            if (includeDocs || includeComments) {
                 const docResults = await this.runTool(context, "doc_search", {
                     query,
                     output: "compact",
                     maxResults,
                     includeEvidence: false,
-                    packId
+                    packId,
+                    includeComments
                 });
                 const sections = Array.isArray(docResults?.results) ? docResults.results : [];
-                response.data.docs = sections.map((section: any) => ({
+                const filtered = includeDocs
+                    ? sections
+                    : sections.filter((section: any) => section?.kind === "code_comment");
+                response.data.docs = filtered.map((section: any) => ({
                     kind: "document_section",
                     filePath: section.filePath ?? "",
                     title: section.heading ?? section.sectionPath?.slice?.(-1)?.[0],
                     score: section.scores?.final,
                     range: { startLine: section.range?.startLine, endLine: section.range?.endLine },
                     preview: truncate(section.preview ?? "", maxItemChars),
+                    metadata: section.kind ? { kind: section.kind } : undefined,
                     why: ["doc_search"]
                 }));
                 if (docResults?.pack) {

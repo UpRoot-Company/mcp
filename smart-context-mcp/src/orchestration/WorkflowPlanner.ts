@@ -128,6 +128,25 @@ export class WorkflowPlanner {
           { id: 'profile', tool: 'file_profiler', params: {}, inputFrom: 'search.output.results[0].path', condition: 'search.output.results.length === 1' }
         ];
 
+      case 'explore': {
+        const query = subject || intent.originalIntent;
+        const limit = constraints.limit || 8;
+        return [
+          {
+            id: 'doc_search',
+            tool: 'doc_search',
+            params: { query, output: 'compact', maxResults: limit, includeEvidence: false },
+            parallel: true
+          },
+          {
+            id: 'code_search',
+            tool: 'search_project',
+            params: { query, type: 'file', maxResults: limit },
+            parallel: true
+          }
+        ];
+      }
+
       case 'read':
         return [
           { id: 'read', tool: 'read_code', params: { filePath: subject, view: constraints.depth === 'deep' ? 'full' : 'skeleton', lineRange: constraints.lineRange } }
