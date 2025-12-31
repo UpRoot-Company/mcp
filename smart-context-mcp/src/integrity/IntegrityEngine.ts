@@ -13,7 +13,8 @@ import type {
   IntegrityFinding
 } from "./IntegrityTypes.js";
 import { extractClaimsFromText } from "./ClaimExtractor.js";
-import { detectDocConflicts } from "./ConflictDetector.js";
+import { extractClaimsFromCode } from "./CodeConstraintExtractor.js";
+import { detectNumericConflicts } from "./ConflictDetector.js";
 
 export type IntegrityPillar = "explore" | "understand" | "change";
 export type IntegrityToolRunner = (tool: string, args: any) => Promise<any>;
@@ -105,7 +106,9 @@ export class IntegrityEngine {
       ? request.sources
       : DEFAULT_SOURCES;
     const docSources = sources.filter(source => source === "adr" || source === "docs" || source === "readme");
-    const unsupported = sources.filter(source => source === "comment" || source === "code" || source === "logs" || source === "metrics");
+    const includeComments = sources.includes("comment");
+    const includeCode = sources.includes("code");
+    const unsupported = sources.filter(source => source === "logs" || source === "metrics");
 
     let searchResponse: any;
     try {
@@ -114,7 +117,7 @@ export class IntegrityEngine {
         output: "compact",
         includeEvidence: true,
         maxResults: Math.max(6, request.limits?.maxFindings ?? DEFAULT_MAX_FINDINGS),
-        includeComments: false
+        includeComments
       });
     } catch (error) {
       return {
@@ -133,11 +136,19 @@ export class IntegrityEngine {
     }
 
     const packId = searchResponse?.pack?.packId ?? computeIntegrityPackId(query, scopeUsed, docSources, request.targetPaths);
-    const sections = filterDocSections(searchResponse?.evidence ?? searchResponse?.results ?? []);
-    const claims = extractClaimsFromSections(sections, packId, docSources);
-    const findings = detectDocConflicts(claims);
+    const sections = Array.isArray(searchResponse?.evidence) && searchResponse.evidence.length > 0
+      ? searchResponse.evidence
+      : (searchResponse?.results ?? []);
+    const claims = extractClaimsFromSections(sections, packId, sources);
+    const codeClaims = includeCode
+      ? await extractClaimsFromCodeTargets(runTool, request.targetPaths ?? [], packId)
+      : [];
+    const noteMissingCodeTargets =
+      includeCode && (request.targetPaths ?? []).filter(isCodePath).length === 0;
+    const findings = detectNumericConflicts([...claims, ...codeClaims]);
     const degradedReason = buildDegradedReason(searchResponse, unsupported, request.scope)
-      ?? (claims.length === 0 ? "no_claims" : undefined);
+      ?? (noteMissingCodeTargets ? "missing_code_targets" : undefined)
+      ?? ((claims.length + codeClaims.length) === 0 ? "no_claims" : undefined);
 
     const report = buildReport(findings, scopeUsed, {
       degradedReason,
@@ -215,17 +226,6 @@ function toFloat(value: string | undefined, fallback: number): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-function filterDocSections(sections: any[]): any[] {
-  if (!Array.isArray(sections)) return [];
-  return sections.filter(section => {
-    const filePath = String(section?.filePath ?? "");
-    const normalized = filePath.replace(/\\/g, "/");
-    if (!filePath) return false;
-    if (isReadmePath(normalized)) return true;
-    return normalized.startsWith("docs/") || normalized.includes("/docs/");
-  });
-}
-
 function extractClaimsFromSections(
   sections: any[],
   packId: string,
@@ -236,8 +236,10 @@ function extractClaimsFromSections(
     const filePath = String(section?.filePath ?? "");
     if (!filePath) continue;
     const normalized = filePath.replace(/\\/g, "/");
-    const sourceType = classifySourceType(normalized);
+    const isComment = section?.kind === "code_comment";
+    const sourceType = isComment ? "comment" : classifySourceType(normalized);
     if (!sources.includes(sourceType)) continue;
+    if (!isComment && !isDocOrReadmePath(normalized)) continue;
     const heading = section?.heading ?? section?.sectionPath?.join(" > ");
     const preview = section?.preview ?? "";
     const text = [heading, preview].filter(Boolean).join("\n");
@@ -271,6 +273,11 @@ function classifySourceType(filePath: string): IntegritySourceType {
 function isReadmePath(filePath: string): boolean {
   const base = filePath.split("/").pop() ?? "";
   return /^readme(\.|$)/i.test(base);
+}
+
+function isDocOrReadmePath(filePath: string): boolean {
+  if (isReadmePath(filePath)) return true;
+  return filePath.startsWith("docs/") || filePath.includes("/docs/");
 }
 
 function buildReport(
@@ -365,4 +372,34 @@ function stableStringify(value: any): string {
     return `{${parts.join(",")}}`;
   }
   return JSON.stringify(String(value));
+}
+
+async function extractClaimsFromCodeTargets(
+  runTool: IntegrityToolRunner,
+  targetPaths: string[],
+  packId: string
+): Promise<IntegrityClaim[]> {
+  const codeTargets = targetPaths.filter(isCodePath).slice(0, 3);
+  if (codeTargets.length === 0) return [];
+  const claims: IntegrityClaim[] = [];
+  for (const target of codeTargets) {
+    try {
+      const content = await runTool("read_code", { filePath: target, view: "skeleton" });
+      if (typeof content !== "string") continue;
+      claims.push(
+        ...extractClaimsFromCode({
+          content,
+          filePath: target,
+          packId
+        })
+      );
+    } catch {
+      // ignore per-file errors
+    }
+  }
+  return claims;
+}
+
+function isCodePath(filePath: string): boolean {
+  return /\.(ts|tsx|js|jsx|mjs|cjs|py|go|rs|java|kt|swift|cpp|cc|c|h|hpp|cs|rb)$/i.test(filePath);
 }

@@ -20,7 +20,7 @@ const STOPWORDS = new Set([
 
 const KO_STOPWORDS = new Set(["은", "는", "이", "가", "을", "를", "의", "와", "과", "및", "에서", "로", "으로", "하다", "합니다"]);
 
-export function detectDocConflicts(claims: IntegrityClaim[]): IntegrityFinding[] {
+export function detectNumericConflicts(claims: IntegrityClaim[]): IntegrityFinding[] {
   const constraints = claims
     .map(extractConstraint)
     .filter((c): c is Constraint => Boolean(c));
@@ -60,10 +60,11 @@ export function detectDocConflicts(claims: IntegrityClaim[]): IntegrityFinding[]
 
     const severity = resolveSeverity(left.claim, right.claim, tags);
     const confidence = resolveConfidence(left.claim, right.claim);
+    const kind = resolveKind(left.claim.sourceType, right.claim.sourceType);
 
     findings.push({
       id: hashFinding(left, right),
-      kind: "doc_vs_doc",
+      kind,
       severity,
       confidence,
       claimA: left.claim.text,
@@ -75,6 +76,10 @@ export function detectDocConflicts(claims: IntegrityClaim[]): IntegrityFinding[]
   }
 
   return findings;
+}
+
+export function detectDocConflicts(claims: IntegrityClaim[]): IntegrityFinding[] {
+  return detectNumericConflicts(claims);
 }
 
 function extractConstraint(claim: IntegrityClaim): Constraint | null {
@@ -176,4 +181,15 @@ function hashFinding(left: Constraint, right: Constraint): string {
 
 function dedupeTags(tags: string[]): string[] {
   return Array.from(new Set(tags.filter(Boolean)));
+}
+
+function resolveKind(
+  left: IntegrityClaim["sourceType"],
+  right: IntegrityClaim["sourceType"]
+): IntegrityFinding["kind"] {
+  const pair = new Set([left, right]);
+  if (pair.has("code") && pair.has("comment")) return "comment_vs_code";
+  if (pair.has("code") && pair.has("adr")) return "adr_vs_code";
+  if (pair.has("code") && (pair.has("docs") || pair.has("readme"))) return "doc_vs_code";
+  return "doc_vs_doc";
 }

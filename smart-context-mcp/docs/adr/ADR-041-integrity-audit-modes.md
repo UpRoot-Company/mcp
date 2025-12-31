@@ -171,6 +171,7 @@ Integrity 모드는 반드시 ADR-038의 evidence pack을 사용한다.
 - `integrity.scope`: `"auto"` (first pass는 docs+README)
 - `integrity.mode`: `explore/understand="warn"`, `change="preflight"`
 - `integrity.blockPolicy`: `"high_only"`
+- `integrity.codeTargets`: `targetPaths` 기반으로 최대 3개 파일만 검사(Phase 2)
 
 환경 변수 제안(기본값은 위와 동일):
 
@@ -527,6 +528,9 @@ export interface IntegrityResult {
 }
 ```
 
+Phase 2에서 `targetPaths`는 code constraint 추출의 유일한 입력으로 사용한다.
+(`explore`의 paths, `understand`의 resolved file, `change`의 targetPath)
+
 ### 10.3 Evidence Pack 저장 전략(기존 테이블 재사용)
 
 DB 마이그레이션을 피하기 위해, 기존 `EvidencePackRepository`를 그대로 사용한다.
@@ -594,6 +598,7 @@ const packId = sha256(stableStringify({
 - code comment index(ADR-037) 기반 claim 추출
 - public API/상수/조건식 기반의 code constraint 추출(보수적)
 - `comment_vs_code` / `doc_vs_code` finding 생성
+  - MVP는 docs/README와 code numeric constraints 간의 충돌만 탐지
 
 ### Phase 3 — Change Preflight + Apply Block
 
