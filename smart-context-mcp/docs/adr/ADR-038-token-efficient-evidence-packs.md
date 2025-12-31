@@ -279,6 +279,19 @@ CREATE TABLE IF NOT EXISTS chunk_summaries (
 - 이해/탐색 단계에서는 compact `doc_search`를 기본으로 사용
 - 사용자가 “해당 문서/섹션 전문 보여줘”를 요청할 때만 `doc_section(mode=raw)`로 확장
 
+### 8.3 Configuration (env knobs)
+
+> 기본값은 “토큰 효율(짧게)”에 맞춰져 있고, 필요 시 점진적으로 확장할 수 있도록 한다.
+
+| Env | Default | Purpose |
+| --- | --- | --- |
+| `SMART_CONTEXT_EVIDENCE_PACK_CACHE_SIZE` | `100` | in-memory evidence pack LRU 크기 |
+| `SMART_CONTEXT_EVIDENCE_PACK_TTL_MS` | `86400000` (24h) | evidence pack TTL(만료/프루닝 기준) |
+| `SMART_CONTEXT_ATTACH_DOC_SECTIONS` | `false` | CHANGE 등에서 `doc_section` 원문/요약을 “응답에 자동 첨부”할지 여부 |
+| `SMART_CONTEXT_ATTACH_DOC_SECTIONS_MAX` | `0` | 자동 첨부 시 최대 섹션 수(0이면 비활성) |
+| `SMART_CONTEXT_DOC_SNIPPET_MAX_CHARS` | `1200` | NAVIGATE 등에서 문서 스니펫 hard cap |
+| `SMART_CONTEXT_DOC_SKELETON_MAX_CHARS` | `2000` | READ에서 문서 skeleton hard cap |
+
 ---
 
 ## 9. Implementation Plan (4 Phases)
@@ -333,4 +346,3 @@ CREATE TABLE IF NOT EXISTS chunk_summaries (
 - 동일 작업 흐름에서 `doc_search` 반복 호출 횟수 감소(pack reuse로 재활용)
 - `doc_section(mode=raw)` 호출 비율이 “필요할 때만” 증가(무분별한 원문 전송 감소)
 - degraded reason을 통해 “왜 짧아졌는지/왜 잘렸는지” 설명 가능
-

@@ -38,7 +38,8 @@ export class ReadPillar {
         filePath: resolvedPath,
         options: constraints.outlineOptions
       });
-      content = docSkeleton?.skeleton ?? '';
+      const maxChars = Number.parseInt(process.env.SMART_CONTEXT_DOC_SKELETON_MAX_CHARS ?? "2000", 10);
+      content = truncateText(docSkeleton?.skeleton ?? '', maxChars);
       documentOutline = docSkeleton?.outline;
     } else {
       content = await this.runTool(context, 'read_code', {
@@ -144,6 +145,13 @@ export class ReadPillar {
     });
     return output;
   }
+}
+
+function truncateText(text: string, maxChars: number): string {
+  const limit = Number.isFinite(maxChars) && maxChars > 0 ? maxChars : 2000;
+  const value = String(text ?? "");
+  if (value.length <= limit) return value;
+  return `${value.slice(0, Math.max(1, limit - 1))}…`;
 }
 
 export class WritePillar {

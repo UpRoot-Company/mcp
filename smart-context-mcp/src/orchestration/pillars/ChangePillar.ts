@@ -377,7 +377,7 @@ export class ChangePillar {
     targetPath: string,
     edits: any[],
     intentText: string
-  ): Promise<Array<{ filePath: string; sectionPath?: string[]; score?: number; preview?: string; section?: { content: string; resolvedHeadingPath?: string[] } }> | undefined> {
+  ): Promise<Array<{ filePath: string; sectionPath?: string[]; chunkId?: string; packId?: string; score?: number; preview?: string; section?: { content: string; resolvedHeadingPath?: string[] } }> | undefined> {
     const queries = new Set<string>();
     const basename = path.basename(targetPath);
     const ext = path.extname(basename);
@@ -400,7 +400,7 @@ export class ChangePillar {
     const queryList = Array.from(queries).filter(q => q.length >= 3);
     if (queryList.length === 0) return undefined;
 
-    const aggregated: Array<{ filePath: string; sectionPath?: string[]; score?: number; preview?: string; section?: { content: string; resolvedHeadingPath?: string[] } }> = [];
+    const aggregated: Array<{ filePath: string; sectionPath?: string[]; chunkId?: string; packId?: string; score?: number; preview?: string; section?: { content: string; resolvedHeadingPath?: string[] } }> = [];
     for (const query of queryList.slice(0, 3)) {
       try {
         const result = await this.runTool(context, 'doc_search', {
@@ -413,8 +413,10 @@ export class ChangePillar {
         for (const section of sections) {
           if (!section?.filePath) continue;
           aggregated.push({
+            chunkId: section.id,
             filePath: section.filePath,
             sectionPath: section.sectionPath,
+            packId: result?.pack?.packId,
             score: section.scores?.final,
             preview: section.preview
           });
@@ -427,7 +429,7 @@ export class ChangePillar {
     if (aggregated.length === 0) return undefined;
     const seen = new Set<string>();
     const deduped = aggregated.filter(item => {
-      const key = `${item.filePath}::${(item.sectionPath ?? []).join('/')}`;
+      const key = `${item.filePath}::${item.chunkId ?? ''}::${(item.sectionPath ?? []).join('/')}`;
       if (seen.has(key)) return false;
       seen.add(key);
       return true;
@@ -438,14 +440,15 @@ export class ChangePillar {
 
   private async attachDocSections(
     context: OrchestrationContext,
-    docs: Array<{ filePath: string; sectionPath?: string[]; score?: number; preview?: string; section?: { content: string; resolvedHeadingPath?: string[] } }>
+    docs: Array<{ filePath: string; sectionPath?: string[]; chunkId?: string; packId?: string; score?: number; preview?: string; section?: { content: string; resolvedHeadingPath?: string[] } }>
   ) {
-    const output: Array<{ filePath: string; sectionPath?: string[]; score?: number; preview?: string; section?: { content: string; resolvedHeadingPath?: string[] } }> = [];
-    const sectionLimit = 3;
+    const output: Array<{ filePath: string; sectionPath?: string[]; chunkId?: string; packId?: string; score?: number; preview?: string; section?: { content: string; resolvedHeadingPath?: string[] } }> = [];
+    const enabled = process.env.SMART_CONTEXT_ATTACH_DOC_SECTIONS === "true";
+    const sectionLimit = enabled ? Number.parseInt(process.env.SMART_CONTEXT_ATTACH_DOC_SECTIONS_MAX ?? "0", 10) : 0;
     let attached = 0;
     for (const doc of docs) {
       const next = { ...doc };
-      if (attached < sectionLimit && Array.isArray(doc.sectionPath) && doc.sectionPath.length > 0) {
+      if (sectionLimit > 0 && attached < sectionLimit && Array.isArray(doc.sectionPath) && doc.sectionPath.length > 0) {
         try {
           const section = await this.runTool(context, 'doc_section', {
             filePath: doc.filePath,

@@ -42,11 +42,13 @@ export class NavigatePillar {
 
     if (docDirectEnabled) {
       const resolvedDoc = await this.resolveDocPath(context, target, progress);
-      if (resolvedDoc) {
-        try {
+        if (resolvedDoc) {
+          try {
           const docSkeleton = await this.runTool(context, 'doc_skeleton', { filePath: resolvedDoc }, progress);
           const docToc = await this.runTool(context, 'doc_toc', { filePath: resolvedDoc }, progress);
           const docRefs = await this.runTool(context, 'doc_references', { filePath: resolvedDoc }, progress);
+          const maxSnippetChars = Number.parseInt(process.env.SMART_CONTEXT_DOC_SNIPPET_MAX_CHARS ?? "1200", 10);
+          const skeletonSnippet = truncateText(docSkeleton?.skeleton ?? "", maxSnippetChars);
           return {
             success: true,
             status: 'success',
@@ -54,12 +56,12 @@ export class NavigatePillar {
               {
                 filePath: resolvedDoc,
                 line: 1,
-                snippet: docSkeleton?.skeleton ?? '',
+                snippet: skeletonSnippet,
                 relevance: 1,
                 type: 'doc'
               }
             ],
-            codePreview: docSkeleton?.skeleton ?? '',
+            codePreview: skeletonSnippet,
             document: {
               outline: docToc?.outline ?? [],
               references: docRefs?.references ?? [],
@@ -98,6 +100,8 @@ export class NavigatePillar {
             locations,
             codePreview: locations[0]?.snippet,
             document: {
+              query: target,
+              pack: docResults?.pack,
               results: sections
             },
             degraded: docResults?.degraded ?? false,
@@ -487,4 +491,11 @@ export class NavigatePillar {
     if (typeof symbolLine === 'number') return symbolLine;
     return 0;
   }
+}
+
+function truncateText(text: string, maxChars: number): string {
+  const limit = Number.isFinite(maxChars) && maxChars > 0 ? maxChars : 1200;
+  const value = String(text ?? "");
+  if (value.length <= limit) return value;
+  return `${value.slice(0, Math.max(1, limit - 1))}…`;
 }

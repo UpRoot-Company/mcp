@@ -118,12 +118,14 @@ describe("Pillars", () => {
     registry.register("doc_search", async () => ({
       results: [
         {
+          id: "chunk-1",
           filePath: "docs/guide.md",
           sectionPath: ["Setup"],
           scores: { final: 0.9 },
           preview: "Setup section"
         }
-      ]
+      ],
+      pack: { packId: "pack-1", hit: false, createdAt: Date.now() }
     } as any));
     registry.register("doc_section", async () => ({
       success: true,
@@ -149,7 +151,9 @@ describe("Pillars", () => {
     expect(result.success).toBe(true);
     expect(Array.isArray(result.relatedDocs)).toBe(true);
     expect(result.relatedDocs.length).toBeGreaterThan(0);
-    expect(result.relatedDocs[0].section?.content).toContain("Setup section content");
+    // Phase 4: token-aware defaults avoid auto-attaching doc_section content.
+    expect(result.relatedDocs[0].section).toBeUndefined();
+    expect(result.relatedDocs[0].packId).toBe("pack-1");
     const actions = result.guidance?.suggestedActions ?? [];
     expect(actions.some((action: any) => action?.pillar === "doc_section")).toBe(true);
   });
