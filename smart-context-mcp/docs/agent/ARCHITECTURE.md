@@ -1,18 +1,18 @@
 # Smart Context Architecture for AI Agents
 
-**Technical deep dive into the orchestration that powers the Six Pillars (ADR-033).**
+**Technical deep dive into the orchestration that powers the Five Pillars (ADR-040).**
 
 ---
 
 ## Overview
 
-Smart Context exposes a small **“What”** interface (Six Pillars), backed by a larger internal **“How”** layer:
+Smart Context exposes a small **“What”** interface (Five Pillars), backed by a larger internal **“How”** layer:
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
 │                         Agent Interface (“What”)                      │
 ├──────────────────────────────────────────────────────────────────────┤
-│  navigate   read   understand   change   write   manage               │
+│  explore   understand   change   write   manage                      │
 ├──────────────────────────────────────────────────────────────────────┤
 │                         Orchestration (“How”)                         │
 ├──────────────────────────────────────────────────────────────────────┤

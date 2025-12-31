@@ -1,19 +1,18 @@
-# Six Pillars API & Workflows
+# Five Pillars API & Workflows
 
-This document describes the **agent-facing API** after ADR-033: the **Six Pillars**.
+This document describes the **agent-facing API** after ADR-040: the **Five Pillars**.
 
 If you’re looking for parameter-level details, use:
 - `smart-context-mcp/docs/agent/TOOL_REFERENCE.md`
-- `smart-context-mcp/docs/adr/ADR-033-Six-Pillars-Architecture.md`
+- `smart-context-mcp/docs/adr/ADR-040-five-pillars-explore-consolidation.md`
 
 ---
 
-## The Six Pillars (What, not How)
+## The Five Pillars (What, not How)
 
 | Pillar | Intent | Typical outputs |
 |---|---|---|
-| `navigate` | “Find it” | candidate files/symbols/locations |
-| `read` | “Show it” | skeleton/fragment/full content (+ profile/hash) |
+| `explore` | “Find/read it” | preview/section/full content (+ evidence pack) |
 | `understand` | “Explain it” | synthesized summary + (optional) graphs/signals |
 | `change` | “Modify it safely” | dry-run plan/diff → apply + impact report |
 | `write` | “Create it” | created/scaffolded files + transaction metadata |
@@ -24,19 +23,18 @@ If you’re looking for parameter-level details, use:
 ## Recommended Workflows
 
 ### 1) Explore unfamiliar code
-1. `navigate({ target: "AuthService", context: "definitions" })`
-2. `read({ target: "src/auth/AuthService.ts", view: "skeleton" })`
+1. `explore({ query: "AuthService" })`
+2. `explore({ paths: ["src/auth/AuthService.ts"], view: "preview" })`
 3. `understand({ goal: "Explain the auth flow in AuthService" })`
 
 ### 2) Fix a bug (tight scope)
-1. `navigate({ target: "Invalid token", context: "all" })`
-2. `read({ target: "src/auth/validate.ts", view: "fragment", lineRange: "40-120" })`
+1. `explore({ query: "Invalid token" })`
+2. `explore({ paths: ["src/auth/validate.ts"], view: "section" })`
 3. `change({ intent: "Improve the Invalid token error message with actionable hints", options: { dryRun: true } })`
 4. Review → `change({ intent: "...", options: { dryRun: false } })`
 
 ### 3) Refactor safely (multi-file)
-1. `navigate({ target: "validateUser", context: "definitions" })`
-2. `navigate({ target: "validateUser(", context: "usages" })`
+1. `explore({ query: "validateUser" })`
 3. `change({ intent: "Rename validateUser to authenticateUser and update all call sites", options: { dryRun: true } })`
 4. Review impact/diff → apply with `dryRun: false`
 5. If needed: `manage({ command: "undo" })`
@@ -46,7 +44,7 @@ If you’re looking for parameter-level details, use:
 ## Practical Guidelines
 
 - Prefer **constraints** over verbosity: use `targetFiles` in `change` when you already know the blast radius.
-- Prefer **skeleton-first** reads: `read(view="skeleton")` then narrow with `fragment`.
+- Prefer **preview-first** reads: `explore(view="preview")` then expand with `section` or `full`.
 - Treat `understand(include=...)` as an **opt-in cost**: enable graphs/signals only when you need them.
 - Always plan before apply: default to `change(...dryRun=true)` and only apply after reviewing.
 

@@ -11,7 +11,7 @@ Practical guides for installing, integrating, and operating Smart Context MCP.
 
 ## Agent/hybrid guides
 
-- `prompt-engineering.md` — how to request work using the Six Pillars
+- `prompt-engineering.md` — how to request work using the Five Pillars
 - `agent-optimization.md` — model-specific strategies
 - `tool-conflicts.md` — Bash vs pillars decision guide
 

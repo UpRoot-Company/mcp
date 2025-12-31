@@ -6,13 +6,13 @@
 
 ## 🎯 Core Mission
 
-Smart Context enables AI agents to **efficiently understand and modify large codebases** via a small, intent-based interface (**Six Pillars**, ADR-033). Internally, it still relies on search/read/edit style capabilities, but those details are orchestrated for the agent.
+Smart Context enables AI agents to **efficiently understand and modify large codebases** via a small, intent-based interface (**Five Pillars**, ADR-040). Internally, it still relies on search/read/edit style capabilities, but those details are orchestrated for the agent.
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│                     Six Pillars (“What”)                      │
+│                     Five Pillars (“What”)                     │
 ├──────────────────────────────────────────────────────────────┤
-│  navigate  read  understand  change  write  manage            │
+│  explore  understand  change  write  manage                  │
 ├──────────────────────────────────────────────────────────────┤
 │                 Orchestration (“How”, internal)               │
 ├──────────────────────────────────────────────────────────────┤

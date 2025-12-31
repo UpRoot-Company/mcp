@@ -35,4 +35,4 @@ All ADRs live in `smart-context-mcp/docs/adr/`. This index is intentionally **cu
 
 ## Notes
 
-- Some older ADRs reference legacy tool names (`search_project`, `read_code`, `edit_code`). The recommended interface is the Six Pillars (ADR-033).
+- Some older ADRs reference legacy tool names (`search_project`, `read_code`, `edit_code`). The recommended interface is the Five Pillars (ADR-040).

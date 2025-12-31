@@ -1,9 +1,8 @@
 # Legacy Tool Catalog (Opt-in)
 
-This catalog exists to support **migration** and **compatibility**. The recommended interface is the **Six Pillars**:
+This catalog exists to support **migration** and **compatibility**. The recommended interface is the **Five Pillars**:
 
-- `navigate` → find symbols/files
-- `read` → read content (skeleton/fragment/full)
+- `explore` → find + read (preview/section/full)
 - `understand` → synthesize structure/relationships
 - `change` → plan/apply safe edits (dry-run first)
 - `write` → create/scaffold files
@@ -18,25 +17,25 @@ Enable legacy tools only when you must:
 
 | Legacy tool | Prefer now | Notes |
 |---|---|---|
-| `search_project` | `navigate` / `understand` | Use `navigate` for “find”, `understand` for “explain”. |
-| `read_code` | `read` / `understand` | `read(view="skeleton")` replaces skeleton-first. |
-| `read_fragment` | `read` | Use `read(view="fragment", lineRange=...)`. |
+| `search_project` | `explore` | Use `explore({ query })` for discovery. |
+| `read_code` | `explore` | Use `explore({ paths, view })`. |
+| `read_fragment` | `explore` | Use `explore({ paths, view: "section" })`. |
 | `edit_code` | `change` | Use `change(options.dryRun=true)` then apply. |
 | `analyze_relationship` | `understand` / `change` | Ask `understand` for deps/calls; `change` includes impact when enabled. |
 | `get_batch_guidance` | `change` | Prefer `change` dry-run plan across files. |
 | `manage_project` | `manage` | `rebuild` maps to `reindex` in current implementation. |
 | `list_directory` | Bash `ls` / `find` | Not part of pillars; keep as legacy if exposed. |
-| `read_file` / `write_file` / `analyze_file` | `read` / `write` / `understand` | These are “compat tools” (separate flag). |
+| `read_file` / `write_file` / `analyze_file` | `explore` / `write` / `understand` | These are “compat tools” (separate flag). |
 
 ## Minimal per-tool notes
 
 ### `search_project`
 - **Use for:** raw multi-modal searching (symbols/files/content)
-- **Prefer now:** `navigate({ target, context })` (and follow with `read`/`understand`)
+- **Prefer now:** `explore({ query })`
 
 ### `read_code` / `read_fragment`
 - **Use for:** raw file reads (skeleton/fragment/full)
-- **Prefer now:** `read({ target, view, lineRange })`
+- **Prefer now:** `explore({ paths: [file], view })`
 
 ### `edit_code`
 - **Use for:** structured string/patch edits with transaction safety

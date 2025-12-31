@@ -53,7 +53,7 @@ Smart Context MCP v1.0.0 is the first stable release of the Model Context Protoc
 | Feature | Details |
 |---------|---------|
 | **Languages** | TypeScript, JavaScript, Python, JSON |
-| **Tools** | Six Pillars (6 tools) + opt-in legacy/compat tools |
+| **Tools** | Five Pillars (5 tools) + opt-in legacy/compat tools |
 | **Platforms** | Claude, Copilot, Cursor, and custom LLM integrations |
 | **IDE Integration** | VSCode, JetBrains, Vim, Emacs via plugins |
 | **CI/CD** | GitHub Actions, GitLab, pre-commit hooks |
@@ -79,13 +79,12 @@ Smart Context MCP v1.0.0 is the first stable release of the Model Context Protoc
 
 ### Architecture
 
-Exposes the **Six Pillars** (ADR-033):
-1. **navigate** - Find relevant symbols/files
-2. **read** - Skeleton/fragment/full views (token-efficient by default)
-3. **understand** - Synthesize structure/relationships (opt-in deeper graphs)
-4. **change** - Plan (dry-run) → review → apply safely
-5. **write** - Create/scaffold files
-6. **manage** - status/undo/redo/reindex/history
+Exposes the **Five Pillars** (ADR-040):
+1. **explore** - Unified search + preview/section/full reads
+2. **understand** - Synthesize structure/relationships (opt-in deeper graphs)
+3. **change** - Plan (dry-run) → review → apply safely
+4. **write** - Create/scaffold files
+5. **manage** - status/undo/redo/reindex/history
 
 ### Documentation
 

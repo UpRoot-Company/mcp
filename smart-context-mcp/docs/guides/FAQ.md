@@ -2,7 +2,7 @@
 
 Quick answers to common questions about Smart Context MCP.
 
-**Note (ADR-033):** The primary interface is the **Six Pillars** (`navigate`, `read`, `understand`, `change`, `write`, `manage`). Some older sections may still mention legacy tool names (e.g. `read_code`); see `smart-context-mcp/docs/legacy/LEGACY_TOOL_CATALOG.md` for mappings.
+**Note (ADR-040):** The primary interface is the **Five Pillars** (`explore`, `understand`, `change`, `write`, `manage`). Some older sections may still mention legacy tool names (e.g. `read_code`); see `smart-context-mcp/docs/legacy/LEGACY_TOOL_CATALOG.md` for mappings.
 
 ---
 
@@ -53,28 +53,28 @@ Think of it as a "smart middleware" between AI and your filesystem.
 
 ---
 
-### Q: How do I choose between skeleton, fragment, and full views?
+### Q: How do I choose between preview/section and full views?
 
 **A:** Use this decision tree:
 
 ```
-Do you need to understand the overall structure?
-  ├─ YES → read(view="skeleton") ⭐ Recommended
-  └─ NO  → Do you know the line numbers?
-           ├─ YES → read(view="fragment", lineRange="10-50")
-           └─ NO  → read(view="full") (only if needed)
+Do you need a quick overview?
+  ├─ YES → explore(view="preview") ⭐ Recommended
+  └─ NO  → Do you need verbatim content?
+           ├─ YES → explore(view="full")
+           └─ NO  → explore(view="section") (target a doc section)
 ```
 
 **Examples:**
 
 | Task | View | Why |
 |------|------|-----|
-| Explore a new file | `skeleton` | Understand structure without noise |
-| Check specific function | `fragment` | Read exact lines you need |
+| Explore a new file | `preview` | Understand structure without noise |
+| Check specific area | `section` | Target the relevant section |
 | Understand algorithm | `full` | Need to see all implementation |
-| Find where to add code | `skeleton` | See overall organization |
+| Find where to add code | `preview` | See overall organization |
 
-**Token savings:** Skeleton uses 95% fewer tokens than full view.
+**Token savings:** Preview/section modes use far fewer tokens than full view.
 
 ---
 
@@ -444,17 +444,17 @@ SMART_CONTEXT_LANGUAGE_CONFIG=./languages.json npx smart-context-mcp
 
 ### Q: What's the most efficient workflow?
 
-**A:** Follow **Navigate → Read → Change** (Six Pillars):
+**A:** Follow **Explore → Change** (Five Pillars):
 
 ```
-1. Navigate: navigate(context="definitions") ~100 tokens
-2. Read:     read(view="skeleton")          ~150 tokens
+1. Explore:  explore(query="definitions")   ~150 tokens
+2. Explore:  explore(view="preview")        ~150 tokens
 3. Change:   change(dryRun=true)            ~100 tokens
 
 Total: ~350 tokens
 
 ❌ Bad approach:
-read(view="full") on 10 files = 50,000 tokens!
+explore(view="full") on 10 files = 50,000 tokens!
 
 ✅ Savings: 99% token reduction!
 ```

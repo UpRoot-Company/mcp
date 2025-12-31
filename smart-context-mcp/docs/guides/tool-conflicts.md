@@ -1,4 +1,4 @@
-# Tool Conflict Resolution (Bash vs Six Pillars)
+# Tool Conflict Resolution (Bash vs Five Pillars)
 
 Use Smart Context MCP when it provides **indexing**, **token efficiency**, or **transaction safety**. Use Bash when you need **shell/Git/build** capabilities.
 
@@ -8,8 +8,7 @@ Use Smart Context MCP when it provides **indexing**, **token efficiency**, or **
 
 | Task | Prefer | Why |
 |---|---|---|
-| Find symbols/files | `navigate` | ranked results + symbol awareness |
-| Read code | `read` | skeleton/fragment views reduce tokens |
+| Find or read content | `explore` | unified search + preview/section/full |
 | Explain architecture/impact | `understand` | synthesized view + optional graphs |
 | Modify code | `change` | dry-run plans + transactional safety |
 | Create scaffolding/files | `write` | intent-based creation |
@@ -22,7 +21,7 @@ Use Smart Context MCP when it provides **indexing**, **token efficiency**, or **
 
 ## Practical rules
 
-- If you’re about to `grep -R` for code understanding, prefer `navigate` + `read(skeleton)`.
+- If you’re about to `grep -R` for code understanding, prefer `explore({ query })`.
 - If you’re about to `sed -i` code, prefer `change` (plan → review → apply).
 - Keep Bash for Git and builds; keep Smart Context for codebase *understanding* and *safe edits*.
 

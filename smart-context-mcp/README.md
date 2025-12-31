@@ -2,12 +2,11 @@
 
 Smart Context MCP is a Model Context Protocol (MCP) server for AI-assisted code understanding and safe code changes.
 
-## Six Pillars (agent-facing API)
+## Five Pillars (agent-facing API)
 
-Per `smart-context-mcp/docs/adr/ADR-033-Six-Pillars-Architecture.md`, the primary interface is:
+Per `smart-context-mcp/docs/adr/ADR-040-five-pillars-explore-consolidation.md`, the primary interface is:
 
-- `navigate` — locate symbols/files
-- `read` — read content efficiently (skeleton/fragment/full)
+- `explore` — unified discovery (search + preview/section + optional full reads)
 - `understand` — synthesize structure/relationships
 - `change` — plan/apply safe edits (dry-run first)
 - `write` — create/scaffold files
@@ -40,4 +39,4 @@ npm run build:markdown-wasm -- --source /path/to/tree-sitter-markdown
 Default output is `smart-context-mcp/wasm/tree-sitter-markdown.wasm`. Override with `--out` or `SMART_CONTEXT_WASM_DIR`.  
 If you install the package globally or use `npm link`, the `smart-context-build-markdown-wasm` command will also be available.
 
-**Last Updated:** 2025-12-30
+**Last Updated:** 2025-12-31
