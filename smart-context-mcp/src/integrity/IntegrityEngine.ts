@@ -15,6 +15,7 @@ import type {
 import { extractClaimsFromText } from "./ClaimExtractor.js";
 import { extractClaimsFromCode } from "./CodeConstraintExtractor.js";
 import { detectNumericConflicts } from "./ConflictDetector.js";
+import { shouldAutoExpandScope } from "./ScopeResolver.js";
 
 export type IntegrityPillar = "explore" | "understand" | "change";
 export type IntegrityToolRunner = (tool: string, args: any) => Promise<any>;
@@ -172,7 +173,12 @@ export class IntegrityEngine {
             query,
             docClaimsCount: docClaims.length,
             findings: docFindings,
-            limits
+            limits,
+            defaults: {
+              minClaims: DEFAULT_MIN_CLAIMS,
+              minFindings: DEFAULT_MIN_FINDINGS,
+              minConfidence: DEFAULT_MIN_CONFIDENCE
+            }
           })
         : { expand: false };
       if (expansionDecision.expand) {
@@ -497,36 +503,4 @@ function supportsExtraSource(source: IntegritySourceType): boolean {
   if (source === "logs") return true;
   if (source === "metrics") return true;
   return source === "adr" || source === "docs" || source === "readme" || source === "comment" || source === "code";
-}
-
-function shouldAutoExpandScope(params: {
-  query: string;
-  docClaimsCount: number;
-  findings: IntegrityFinding[];
-  limits: IntegrityLimits;
-}): { expand: boolean; reason?: string } {
-  const minClaims = params.limits.minClaimsForAutoExpand ?? DEFAULT_MIN_CLAIMS;
-  const minFindings = params.limits.minFindingsForAutoExpand ?? DEFAULT_MIN_FINDINGS;
-  const minConfidence = params.limits.minConfidence ?? DEFAULT_MIN_CONFIDENCE;
-  const avgConfidence = averageConfidence(params.findings);
-
-  if (params.docClaimsCount < minClaims) return { expand: true, reason: "insufficient_claims" };
-  if (params.findings.length > 0 && params.findings.length < minFindings) {
-    return { expand: true, reason: "insufficient_findings" };
-  }
-  if (params.findings.length > 0 && avgConfidence < minConfidence) {
-    return { expand: true, reason: "low_confidence" };
-  }
-  if (isSpecQuery(params.query)) return { expand: true, reason: "spec_query" };
-  return { expand: false };
-}
-
-function averageConfidence(findings: Array<{ confidence: number }>): number {
-  if (findings.length === 0) return 1;
-  const total = findings.reduce((acc, finding) => acc + (finding.confidence ?? 0), 0);
-  return total / findings.length;
-}
-
-function isSpecQuery(query: string): boolean {
-  return /(\badr\b|\bspec\b|\bpolicy\b|\brequirement\b|\bcontract\b|\bcompliance\b|\bstandard\b|\bdesign\b|\b규격\b|\b명세\b|\b정책\b|\b요구사항\b|\b계약\b|\b표준\b|\b설계\b)/i.test(query);
 }

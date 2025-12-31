@@ -1,6 +1,7 @@
 import crypto from "crypto";
 import type { IntegrityClaim, IntegrityFinding } from "./IntegrityTypes.js";
 import { classifyTags } from "./TagClassifier.js";
+import { scoreIntegrityPriority } from "./IntegrityScorer.js";
 
 type Constraint = {
   key: string;
@@ -77,7 +78,7 @@ export function detectNumericConflicts(claims: IntegrityClaim[]): IntegrityFindi
       claimB: right.claim.text,
       tags,
       evidenceRefs: [left.claim.evidenceRef, right.claim.evidenceRef],
-      priority: scorePriority(severity, confidence, tags)
+      priority: scoreIntegrityPriority(severity, confidence, tags)
     });
   }
 
@@ -208,12 +209,6 @@ function resolveConfidence(left: IntegrityClaim, right: IntegrityClaim): number 
   if (left.strength === "must" || right.strength === "must") confidence += 0.15;
   if (left.strength === "should" || right.strength === "should") confidence += 0.05;
   return Math.min(0.9, confidence);
-}
-
-function scorePriority(severity: "info" | "warn" | "high", confidence: number, tags: string[]): number {
-  const base = severity === "high" ? 1.0 : severity === "warn" ? 0.6 : 0.3;
-  const tagBoost = tags.length > 0 ? 0.1 : 0;
-  return base * confidence + tagBoost;
 }
 
 function hashFinding(left: Constraint, right: Constraint): string {
