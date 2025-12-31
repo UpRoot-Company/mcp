@@ -12,13 +12,19 @@ type Constraint = {
 
 const EN_CONSTRAINT = /(.+?)\b(within|at most|no more than|less than|<=)\s*(\d+(?:\.\d+)?)\s*(ms|s|sec|seconds|m|min|minutes|h|hr|hours|d|days|%|percent)?/i;
 const KO_CONSTRAINT = /(.+?)(이내|이하|최대)\s*(\d+(?:\.\d+)?)\s*(초|분|시간|일|개월|퍼센트|%)?/i;
+const COMP_CONSTRAINT = /(.+?)\s*(<=|>=|<|>)\s*(\d+(?:\.\d+)?)\s*(ms|s|sec|seconds|m|min|minutes|h|hr|hours|d|days|%|percent|초|분|시간|일|개월|퍼센트)?/i;
+const ASSIGN_CONSTRAINT = /(.+?)\s*=\s*(\d+(?:\.\d+)?)\s*(ms|s|sec|seconds|m|min|minutes|h|hr|hours|d|days|%|percent|초|분|시간|일|개월|퍼센트)?/i;
 
 const STOPWORDS = new Set([
   "the", "a", "an", "to", "for", "of", "and", "is", "are", "be", "with", "within", "at", "most",
-  "no", "more", "than", "less", "maximum", "limit", "max", "min", "under", "over"
+  "no", "more", "than", "less", "maximum", "limit", "max", "min", "under", "over",
+  "time", "window", "hour", "hours", "minute", "minutes", "second", "seconds", "day", "days", "ms", "s", "m", "h", "d"
 ]);
 
-const KO_STOPWORDS = new Set(["은", "는", "이", "가", "을", "를", "의", "와", "과", "및", "에서", "로", "으로", "하다", "합니다"]);
+const KO_STOPWORDS = new Set([
+  "은", "는", "이", "가", "을", "를", "의", "와", "과", "및", "에서", "로", "으로", "하다", "합니다",
+  "초", "분", "시간", "일", "개월"
+]);
 
 export function detectNumericConflicts(claims: IntegrityClaim[]): IntegrityFinding[] {
   const constraints = claims
@@ -84,16 +90,42 @@ export function detectDocConflicts(claims: IntegrityClaim[]): IntegrityFinding[]
 
 function extractConstraint(claim: IntegrityClaim): Constraint | null {
   const text = claim.text;
-  const match = text.match(EN_CONSTRAINT) ?? text.match(KO_CONSTRAINT);
+  let match = text.match(EN_CONSTRAINT);
+  let label = "";
+  let rawValue = "";
+  let rawUnit = "";
+  if (match) {
+    label = match[1] ?? "";
+    rawValue = match[3] ?? "";
+    rawUnit = match[4] ?? "";
+  } else {
+    match = text.match(KO_CONSTRAINT);
+    if (match) {
+      label = match[1] ?? "";
+      rawValue = match[3] ?? "";
+      rawUnit = match[4] ?? "";
+    } else {
+      match = text.match(COMP_CONSTRAINT);
+      if (match) {
+        label = match[1] ?? "";
+        rawValue = match[3] ?? "";
+        rawUnit = match[4] ?? "";
+      } else {
+        match = text.match(ASSIGN_CONSTRAINT);
+        if (match) {
+          label = match[1] ?? "";
+          rawValue = match[2] ?? "";
+          rawUnit = match[3] ?? "";
+        }
+      }
+    }
+  }
   if (!match) return null;
-
-  const label = match[1] ?? "";
-  const rawValue = match[3] ?? "";
-  const rawUnit = match[4] ?? "";
+  const fallbackUnit = inferUnitFromLabel(label);
   const value = Number.parseFloat(rawValue);
   if (!Number.isFinite(value)) return null;
 
-  const { unit, unitType } = normalizeUnit(rawUnit);
+  const { unit, unitType } = normalizeUnit(rawUnit || fallbackUnit);
   const key = normalizeKey(label);
   if (!key) return null;
 
@@ -111,6 +143,16 @@ function normalizeUnit(unitRaw: string): { unit: string; unitType: "time" | "per
   if (["d", "days", "일"].includes(unit)) return { unit: "d", unitType: "time" };
   if (["개월"].includes(unit)) return { unit: "mo", unitType: "time" };
   return { unit, unitType: "unitless" };
+}
+
+function inferUnitFromLabel(label: string): string {
+  const lower = label.toLowerCase();
+  if (/(ms|millisecond)/.test(lower)) return "ms";
+  if (/(sec|second|초)/.test(lower)) return "s";
+  if (/(min|minute|분)/.test(lower)) return "m";
+  if (/(hour|시간)/.test(lower)) return "h";
+  if (/(day|일)/.test(lower)) return "d";
+  return "";
 }
 
 function normalizeValue(constraint: Constraint): string {

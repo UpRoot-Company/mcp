@@ -24,7 +24,8 @@ export function extractClaimsFromCode(input: CodeConstraintInput): IntegrityClai
     if (constMatch) {
       const name = constMatch[1];
       const value = constMatch[2];
-      const text = `${name} = ${value}`;
+      const unit = inferUnitFromName(name);
+      const text = unit ? `${name} = ${value} ${unit}` : `${name} = ${value}`;
       pushClaim(text, index);
     }
 
@@ -33,7 +34,7 @@ export function extractClaimsFromCode(input: CodeConstraintInput): IntegrityClai
       const subject = condMatch[1].trim() || "constraint";
       const op = condMatch[2];
       const value = condMatch[3];
-      const unit = condMatch[4] ?? "";
+      const unit = condMatch[4] ?? inferUnitFromName(subject);
       const text = `${subject} ${op} ${value}${unit ? ` ${unit}` : ""}`;
       pushClaim(text, index);
     }
@@ -67,4 +68,14 @@ export function extractClaimsFromCode(input: CodeConstraintInput): IntegrityClai
 function hashClaim(filePath: string, lineIndex: number, text: string): string {
   const normalized = `${filePath}:${lineIndex}:${text}`;
   return crypto.createHash("sha256").update(normalized).digest("hex");
+}
+
+function inferUnitFromName(name: string): string {
+  const upper = name.toUpperCase();
+  if (upper.includes("MS")) return "ms";
+  if (upper.includes("SEC") || upper.includes("SECOND")) return "s";
+  if (upper.includes("MIN")) return "m";
+  if (upper.includes("HOUR")) return "h";
+  if (upper.includes("DAY")) return "d";
+  return "";
 }

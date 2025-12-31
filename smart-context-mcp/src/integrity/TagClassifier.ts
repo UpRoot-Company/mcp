@@ -13,8 +13,9 @@ const PATH_TAG_RULES: Array<{ tag: "security" | "data-loss" | "payment"; pattern
 export function classifyTags(text: string, filePath: string): string[] {
   const tags = new Set<string>();
   const normalizedPath = String(filePath ?? "").replace(/\\/g, "/");
+  const normalizedText = String(text ?? "").replace(/[_-]+/g, " ");
   for (const rule of TAG_RULES) {
-    if (rule.pattern.test(text)) {
+    if (rule.pattern.test(normalizedText)) {
       tags.add(rule.tag);
     }
   }

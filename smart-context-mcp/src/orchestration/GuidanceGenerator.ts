@@ -192,6 +192,27 @@ export class GuidanceGenerator {
       });
     }
 
+    const integrityReport = context.lastResult?.integrity;
+    const integrityFindings = Array.isArray(integrityReport?.topFindings)
+      ? integrityReport.topFindings.slice(0, 3)
+      : [];
+    if (integrityFindings.length > 0) {
+      for (const finding of integrityFindings) {
+        warnings.push({
+          severity: this.mapIntegritySeverity(finding.severity),
+          code: "INTEGRITY_CONFLICT",
+          message: `Integrity conflict: ${this.summarizeIntegrityFinding(finding)}`,
+          affectedTargets: this.collectIntegrityTargets(finding)
+        });
+      }
+      if (!context.error && (context.lastResult?.status === "blocked" || integrityReport?.status === "blocked")) {
+        const summary = integrityFindings
+          .map((finding: any, index: number) => `${index + 1}) ${this.summarizeIntegrityFinding(finding)}`)
+          .join("; ");
+        message = `Integrity check blocked. Fix first: ${summary}`;
+      }
+    }
+
     // Rule 4: High Risk Warning Integration
     const highRisk = context.insights.find(i => i.severity === 'high');
     if (highRisk) {
@@ -344,6 +365,32 @@ export class GuidanceGenerator {
     const affectedFiles = Array.isArray(impactInsight.affectedFiles) ? impactInsight.affectedFiles : [];
     const primaryTarget = context.lastResult?.targetFile ?? context.lastResult?.filePath ?? affectedFiles[0];
     return { level, affectedFiles, primaryTarget };
+  }
+
+  private mapIntegritySeverity(severity: "info" | "warn" | "high"): "info" | "warning" | "critical" {
+    if (severity === "high") return "critical";
+    if (severity === "warn") return "warning";
+    return "info";
+  }
+
+  private summarizeIntegrityFinding(finding: { claimA?: string; claimB?: string }): string {
+    const left = this.compactText(String(finding.claimA ?? ""));
+    const right = this.compactText(String(finding.claimB ?? ""));
+    return right ? `${left} vs ${right}` : left;
+  }
+
+  private compactText(value: string, max = 80): string {
+    const trimmed = value.replace(/\s+/g, " ").trim();
+    if (trimmed.length <= max) return trimmed;
+    return `${trimmed.slice(0, max - 3)}...`;
+  }
+
+  private collectIntegrityTargets(finding: { evidenceRefs?: Array<{ filePath?: string | null }> }): string[] | undefined {
+    const targets = (finding.evidenceRefs ?? [])
+      .map(ref => ref?.filePath ?? "")
+      .filter(Boolean);
+    const unique = Array.from(new Set(targets));
+    return unique.length > 0 ? unique.slice(0, 3) : undefined;
   }
 }
 
