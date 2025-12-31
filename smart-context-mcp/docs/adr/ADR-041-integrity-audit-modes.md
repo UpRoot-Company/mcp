@@ -149,6 +149,8 @@ Smart Context MCP는 이제 Five Pillars(ADR-040) 기반으로 코드/문서/텍
 - `scope="docs"`: 위 기본(1~4)에서 문서 파트는 docs/README로 제한
 - `scope="project"`: 문서 파트가 프로젝트 전체 md/mdx로 확장
 - `scope="auto"`: 우선 docs/README로 시도 → (a) evidence 부족, (b) 불확실성 높음, (c) 질문이 “명세 기반”일 때 project로 확장
+- `extraSources=["logs","metrics"]`를 요청하면 logs/metrics도 문서 파트로 포함(Phase 4)
+  - metrics 파일은 약한 가중치 부스트로 우선순위를 약간 높임(기본 `SMART_CONTEXT_METRICS_SCORE_BOOST=0.12`)
 
 ### 6.3 토큰 효율: Evidence Pack 재사용
 
@@ -184,6 +186,7 @@ Integrity 모드는 반드시 ADR-038의 evidence pack을 사용한다.
 - `SMART_CONTEXT_INTEGRITY_SCOPE`
 - `SMART_CONTEXT_INTEGRITY_MODE`
 - `SMART_CONTEXT_INTEGRITY_BLOCK_POLICY`
+- `SMART_CONTEXT_METRICS_SCORE_BOOST`
 
 ---
 
@@ -354,6 +357,12 @@ integrity 결과는 별도 섹션으로 제공한다.
 export interface IntegrityReport {
   status: "ok" | "degraded" | "blocked";
   scopeUsed: IntegrityScope;
+  scopeExpansion?: {
+    requested: IntegrityScope;
+    used: IntegrityScope;
+    expanded: boolean;
+    reason?: "insufficient_claims" | "insufficient_findings" | "low_confidence" | "spec_query";
+  };
   healthScore: number; // 0..1
   summary: {
     totalFindings: number;

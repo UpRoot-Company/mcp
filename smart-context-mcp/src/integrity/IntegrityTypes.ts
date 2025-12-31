@@ -68,6 +68,12 @@ export interface IntegrityFinding {
 export interface IntegrityReport {
   status: "ok" | "degraded" | "blocked";
   scopeUsed: IntegrityScope;
+  scopeExpansion?: {
+    requested: IntegrityScope;
+    used: IntegrityScope;
+    expanded: boolean;
+    reason?: string;
+  };
   healthScore: number;
   summary: {
     totalFindings: number;

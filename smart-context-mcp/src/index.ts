@@ -520,6 +520,7 @@ export class SmartContextServer {
                     type: 'object',
                     properties: {
                         query: { type: 'string' },
+                        scope: { type: 'string', enum: ['all', 'docs', 'project'] },
                         output: { type: 'string', enum: ['full', 'compact', 'pack_only'] },
                         packId: { type: 'string' },
                         maxResults: { type: 'number' },
@@ -537,6 +538,8 @@ export class SmartContextServer {
                         maxChunksEmbeddedPerRequest: { type: 'number' },
                         maxEmbeddingTimeMs: { type: 'number' },
                         includeComments: { type: 'boolean' },
+                        includeLogs: { type: 'boolean' },
+                        includeMetrics: { type: 'boolean' },
                         embedding: {
                             type: 'object',
                             properties: {
@@ -1265,6 +1268,7 @@ export class SmartContextServer {
         }
 
         return this.documentSearchEngine.search(String(query), {
+            scope: args?.scope,
             output: args?.output,
             packId: args?.packId,
             maxResults: args?.maxResults ?? args?.limit,
@@ -1282,7 +1286,9 @@ export class SmartContextServer {
             maxChunksEmbeddedPerRequest: args?.maxChunksEmbeddedPerRequest,
             maxEmbeddingTimeMs: args?.maxEmbeddingTimeMs,
             embedding: args?.embedding,
-            includeComments: args?.includeComments === true
+            includeComments: args?.includeComments === true,
+            includeLogs: args?.includeLogs === true,
+            includeMetrics: args?.includeMetrics === true
         });
     }
 

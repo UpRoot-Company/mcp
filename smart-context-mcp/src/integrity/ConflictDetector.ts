@@ -230,8 +230,11 @@ function resolveKind(
   right: IntegrityClaim["sourceType"]
 ): IntegrityFinding["kind"] {
   const pair = new Set([left, right]);
+  const docLike = new Set(["docs", "readme", "logs", "metrics"]);
   if (pair.has("code") && pair.has("comment")) return "comment_vs_code";
   if (pair.has("code") && pair.has("adr")) return "adr_vs_code";
-  if (pair.has("code") && (pair.has("docs") || pair.has("readme"))) return "doc_vs_code";
+  if (pair.has("code") && Array.from(docLike).some(type => pair.has(type as IntegrityClaim["sourceType"]))) {
+    return "doc_vs_code";
+  }
   return "doc_vs_doc";
 }

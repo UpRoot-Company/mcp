@@ -101,68 +101,126 @@ export class IntegrityEngine {
       };
     }
 
-    const scopeUsed: IntegrityScope = "docs";
+    const limits = normalizeLimits(request.limits);
+    const requestedScope = normalizeScope(request.scope, "docs");
     const sources = Array.isArray(request.sources) && request.sources.length > 0
       ? request.sources
       : DEFAULT_SOURCES;
-    const docSources = sources.filter(source => source === "adr" || source === "docs" || source === "readme");
+    const docSources = sources.filter(source => (
+      source === "adr" || source === "docs" || source === "readme" || source === "logs" || source === "metrics"
+    ));
     const includeComments = sources.includes("comment");
     const includeCode = sources.includes("code");
-    const unsupported = sources.filter(source => source === "logs" || source === "metrics");
+    const includeLogs = sources.includes("logs");
+    const includeMetrics = sources.includes("metrics");
+    const unsupported = sources.filter(source => !supportsExtraSource(source));
+    const noteMissingCodeTargets =
+      includeCode && (request.targetPaths ?? []).filter(isCodePath).length === 0;
 
+    const scopesToTry: IntegrityScope[] = requestedScope === "auto" ? ["docs", "project"] : [requestedScope];
+    let scopeUsed: IntegrityScope = scopesToTry[0] ?? "docs";
     let searchResponse: any;
-    try {
-      searchResponse = await runTool("doc_search", {
-        query,
-        output: "compact",
-        includeEvidence: true,
-        maxResults: Math.max(6, request.limits?.maxFindings ?? DEFAULT_MAX_FINDINGS),
-        includeComments
-      });
-    } catch (error) {
-      return {
-        report: {
-          status: "degraded",
-          scopeUsed: "docs",
-          healthScore: 1,
-          summary: {
-            totalFindings: 0,
-            bySeverity: { info: 0, warn: 0, high: 0 }
-          },
-          topFindings: [],
-          degradedReason: "doc_search_failed"
-        }
-      };
+    let packId = "";
+    let claims: IntegrityClaim[] = [];
+    let findings: IntegrityFinding[] = [];
+    let expanded = false;
+    let expansionReason: string | undefined;
+
+    for (const scopeCandidate of scopesToTry) {
+      try {
+        searchResponse = await runTool("doc_search", {
+          query,
+          output: "compact",
+          includeEvidence: true,
+          maxResults: Math.max(6, limits.maxFindings ?? DEFAULT_MAX_FINDINGS),
+          includeComments,
+          scope: scopeCandidate === "project" ? "project" : "docs",
+          includeLogs,
+          includeMetrics
+        });
+      } catch (error) {
+        return {
+          report: {
+            status: "degraded",
+            scopeUsed: "docs",
+            healthScore: 1,
+            summary: {
+              totalFindings: 0,
+              bySeverity: { info: 0, warn: 0, high: 0 }
+            },
+            topFindings: [],
+            degradedReason: "doc_search_failed"
+          }
+        };
+      }
+
+      packId = searchResponse?.pack?.packId ?? computeIntegrityPackId(query, scopeCandidate, docSources, request.targetPaths);
+      const sections = Array.isArray(searchResponse?.evidence) && searchResponse.evidence.length > 0
+        ? searchResponse.evidence
+        : (searchResponse?.results ?? []);
+      claims = extractClaimsFromSections(sections, packId, sources, scopeCandidate);
+      const docFindings = detectNumericConflicts(claims);
+
+      if (requestedScope !== "auto") {
+        scopeUsed = scopeCandidate;
+        break;
+      }
+
+      const docClaims = claims.filter(claim => claim.sourceType === "adr" || claim.sourceType === "docs" || claim.sourceType === "readme");
+      const expansionDecision = scopeCandidate === "docs"
+        ? shouldAutoExpandScope({
+            query,
+            docClaimsCount: docClaims.length,
+            findings: docFindings,
+            limits
+          })
+        : { expand: false };
+      if (expansionDecision.expand) {
+        expanded = true;
+        expansionReason = expansionDecision.reason;
+        continue;
+      } else {
+        scopeUsed = scopeCandidate;
+        break;
+      }
     }
 
-    const packId = searchResponse?.pack?.packId ?? computeIntegrityPackId(query, scopeUsed, docSources, request.targetPaths);
-    const sections = Array.isArray(searchResponse?.evidence) && searchResponse.evidence.length > 0
-      ? searchResponse.evidence
-      : (searchResponse?.results ?? []);
-    const claims = extractClaimsFromSections(sections, packId, sources);
     const codeClaims = includeCode
       ? await extractClaimsFromCodeTargets(runTool, request.targetPaths ?? [], packId)
       : [];
-    const noteMissingCodeTargets =
-      includeCode && (request.targetPaths ?? []).filter(isCodePath).length === 0;
-    const findings = detectNumericConflicts([...claims, ...codeClaims]);
-    const degradedReason = buildDegradedReason(searchResponse, unsupported, request.scope)
+    findings = detectNumericConflicts([...claims, ...codeClaims]);
+
+    const degradedReason = buildDegradedReason(searchResponse, unsupported, requestedScope, scopeUsed)
       ?? (noteMissingCodeTargets ? "missing_code_targets" : undefined)
       ?? ((claims.length + codeClaims.length) === 0 ? "no_claims" : undefined);
 
     const report = buildReport(findings, scopeUsed, {
       degradedReason,
-      maxFindings: request.limits?.maxFindings ?? DEFAULT_MAX_FINDINGS
+      maxFindings: limits.maxFindings ?? DEFAULT_MAX_FINDINGS
     });
 
     report.packId = packId;
+    if (requestedScope === "auto") {
+      report.scopeExpansion = {
+        requested: requestedScope,
+        used: scopeUsed,
+        expanded,
+        reason: expanded ? expansionReason : undefined
+      };
+    } else {
+      report.scopeExpansion = {
+        requested: requestedScope,
+        used: scopeUsed,
+        expanded: false
+      };
+    }
     if (searchResponse?.degraded && searchResponse?.reason) {
       report.degradedReason = report.degradedReason ?? searchResponse.reason;
     }
 
     return {
       report
-      };
+    };
     }
 }
 
@@ -229,7 +287,8 @@ function toFloat(value: string | undefined, fallback: number): number {
 function extractClaimsFromSections(
   sections: any[],
   packId: string,
-  sources: IntegritySourceType[]
+  sources: IntegritySourceType[],
+  scope: IntegrityScope
 ): IntegrityClaim[] {
   const claims: IntegrityClaim[] = [];
   for (const section of sections) {
@@ -239,7 +298,13 @@ function extractClaimsFromSections(
     const isComment = section?.kind === "code_comment";
     const sourceType = isComment ? "comment" : classifySourceType(normalized);
     if (!sources.includes(sourceType)) continue;
-    if (!isComment && !isDocOrReadmePath(normalized)) continue;
+    if (!isComment) {
+      if (sourceType === "logs" || sourceType === "metrics") {
+        // allow explicit extra sources
+      } else if (!isDocPathForScope(normalized, scope)) {
+        continue;
+      }
+    }
     const heading = section?.heading ?? section?.sectionPath?.join(" > ");
     const preview = section?.preview ?? "";
     const text = [heading, preview].filter(Boolean).join("\n");
@@ -265,6 +330,8 @@ function extractClaimsFromSections(
 
 function classifySourceType(filePath: string): IntegritySourceType {
   const normalized = filePath.replace(/\\/g, "/");
+  if (isLogPath(normalized)) return "logs";
+  if (isMetricsPath(normalized)) return "metrics";
   if (normalized.includes("/docs/adr/") || normalized.startsWith("docs/adr/")) return "adr";
   if (isReadmePath(normalized)) return "readme";
   return "docs";
@@ -275,9 +342,30 @@ function isReadmePath(filePath: string): boolean {
   return /^readme(\.|$)/i.test(base);
 }
 
-function isDocOrReadmePath(filePath: string): boolean {
+function isDocPathForScope(filePath: string, scope: IntegrityScope): boolean {
   if (isReadmePath(filePath)) return true;
-  return filePath.startsWith("docs/") || filePath.includes("/docs/");
+  if (!isMarkdownPath(filePath)) return false;
+  if (scope === "docs") {
+    return filePath.startsWith("docs/") || filePath.includes("/docs/");
+  }
+  return true;
+}
+
+function isMarkdownPath(filePath: string): boolean {
+  return /\.(md|mdx)$/i.test(filePath);
+}
+
+function isLogPath(filePath: string): boolean {
+  return /\.log$/i.test(filePath) || /\/logs?\//i.test(filePath);
+}
+
+function isMetricsPath(filePath: string): boolean {
+  if (/\.(csv|json)$/i.test(filePath)) {
+    if (/(^|\/)metrics?\//i.test(filePath)) return true;
+    if (/(^|\/)monitoring\//i.test(filePath)) return true;
+  }
+  const base = filePath.split("/").pop() ?? "";
+  return /metrics?/i.test(base);
 }
 
 function buildReport(
@@ -315,9 +403,10 @@ function buildReport(
 function buildDegradedReason(
   searchResponse: any,
   unsupportedSources: IntegritySourceType[],
-  requestedScope: IntegrityScope | undefined
+  requestedScope: IntegrityScope | undefined,
+  scopeUsed: IntegrityScope
 ): string | undefined {
-  if (requestedScope === "project") return "scope_limited";
+  if (requestedScope === "project" && scopeUsed !== "project") return "scope_limited";
   if (unsupportedSources.length > 0) return "sources_not_supported";
   if (searchResponse?.degraded) return searchResponse?.reason ?? "search_degraded";
   return undefined;
@@ -402,4 +491,42 @@ async function extractClaimsFromCodeTargets(
 
 function isCodePath(filePath: string): boolean {
   return /\.(ts|tsx|js|jsx|mjs|cjs|py|go|rs|java|kt|swift|cpp|cc|c|h|hpp|cs|rb)$/i.test(filePath);
+}
+
+function supportsExtraSource(source: IntegritySourceType): boolean {
+  if (source === "logs") return true;
+  if (source === "metrics") return true;
+  return source === "adr" || source === "docs" || source === "readme" || source === "comment" || source === "code";
+}
+
+function shouldAutoExpandScope(params: {
+  query: string;
+  docClaimsCount: number;
+  findings: IntegrityFinding[];
+  limits: IntegrityLimits;
+}): { expand: boolean; reason?: string } {
+  const minClaims = params.limits.minClaimsForAutoExpand ?? DEFAULT_MIN_CLAIMS;
+  const minFindings = params.limits.minFindingsForAutoExpand ?? DEFAULT_MIN_FINDINGS;
+  const minConfidence = params.limits.minConfidence ?? DEFAULT_MIN_CONFIDENCE;
+  const avgConfidence = averageConfidence(params.findings);
+
+  if (params.docClaimsCount < minClaims) return { expand: true, reason: "insufficient_claims" };
+  if (params.findings.length > 0 && params.findings.length < minFindings) {
+    return { expand: true, reason: "insufficient_findings" };
+  }
+  if (params.findings.length > 0 && avgConfidence < minConfidence) {
+    return { expand: true, reason: "low_confidence" };
+  }
+  if (isSpecQuery(params.query)) return { expand: true, reason: "spec_query" };
+  return { expand: false };
+}
+
+function averageConfidence(findings: Array<{ confidence: number }>): number {
+  if (findings.length === 0) return 1;
+  const total = findings.reduce((acc, finding) => acc + (finding.confidence ?? 0), 0);
+  return total / findings.length;
+}
+
+function isSpecQuery(query: string): boolean {
+  return /(\badr\b|\bspec\b|\bpolicy\b|\brequirement\b|\bcontract\b|\bcompliance\b|\bstandard\b|\bdesign\b|\b규격\b|\b명세\b|\b정책\b|\b요구사항\b|\b계약\b|\b표준\b|\b설계\b)/i.test(query);
 }
