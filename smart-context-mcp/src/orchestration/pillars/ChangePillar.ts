@@ -2,6 +2,8 @@
 import { InternalToolRegistry } from '../InternalToolRegistry.js';
 import { OrchestrationContext } from '../OrchestrationContext.js';
 import { ParsedIntent } from '../IntentRouter.js';
+import { ChangeBudgetManager } from '../ChangeBudgetManager.js';
+import { analyzeQuery } from '../../engine/search/QueryMetrics.js';
 
 
 export class ChangePillar {
@@ -9,7 +11,7 @@ export class ChangePillar {
 
   public async execute(intent: ParsedIntent, context: OrchestrationContext): Promise<any> {
     const { targets, constraints, originalIntent, action } = intent;
-    const { dryRun = true, includeImpact = true } = constraints;
+    const { dryRun = true, includeImpact = false } = constraints;
 
     const rawEdits = Array.isArray(constraints.edits) ? constraints.edits : [];
     let targetPath: string | undefined = constraints.targetPath || targets[0] || this.extractTargetFromEdits(rawEdits);
@@ -54,14 +56,22 @@ export class ChangePillar {
       };
     }
 
-    // 2. Impact Analysis (Parallel)
-    const impactPromise = includeImpact
+    const budget = ChangeBudgetManager.create({
+      intentText: originalIntent,
+      targetSample: edits[0]?.targetString,
+      includeImpact,
+      dryRun
+    });
+    const allowImpactPreview = includeImpact === true;
+
+    // 2. Impact Analysis (Parallel, opt-in)
+    const impactPromise = !dryRun && budget.allowImpact
       ? this.runTool(context, 'impact_analyzer', { target: targetPath, edits })
       : Promise.resolve(null);
-    const dependencyPromise = includeImpact
+    const dependencyPromise = !dryRun && budget.allowImpact
       ? this.runTool(context, 'analyze_relationship', { target: targetPath, mode: 'dependencies', direction: 'both' })
       : Promise.resolve(null);
-    const hotSpotPromise = includeImpact
+    const hotSpotPromise = !dryRun && budget.allowImpact
       ? this.runTool(context, 'hotspot_detector', {})
       : Promise.resolve([]);
 
@@ -69,7 +79,10 @@ export class ChangePillar {
     const editResult = await this.runTool(context, 'edit_coordinator', {
       filePath: targetPath,
       edits,
-      dryRun
+      dryRun,
+      options: {
+        skipImpactPreview: dryRun && !allowImpactPreview
+      }
     });
 
     let finalResult = editResult;
@@ -77,13 +90,21 @@ export class ChangePillar {
     const autoCorrectionAttempts: string[] = [];
 
     if (!editResult.success && edits.length > 0) {
-      const attempts = [
-        { label: 'whitespace', edits: edits.map((edit: any) => ({ ...edit, fuzzyMode: edit.fuzzyMode ?? 'whitespace' })) },
-        { label: 'structural', edits: edits.map((edit: any) => ({ ...edit, normalization: edit.normalization ?? 'structural' })) },
-        { label: 'fuzzy', edits: edits.map((edit: any) => ({ ...edit, fuzzyMode: edit.fuzzyMode ?? 'levenshtein' })) }
-      ];
-      autoCorrectionAttempts.push(...attempts.map(attempt => attempt.label));
-      for (const attempt of attempts) {
+      const attempts: Array<{ label: string; edits: any[] }> = [];
+      if (budget.allowNormalization) {
+        attempts.push({ label: 'whitespace', edits: edits.map((edit: any) => ({ ...edit, fuzzyMode: edit.fuzzyMode ?? 'whitespace' })) });
+        attempts.push({ label: 'structural', edits: edits.map((edit: any) => ({ ...edit, normalization: edit.normalization ?? 'structural' })) });
+      }
+      if (budget.allowLevenshtein) {
+        const eligible = edits.every((edit: any) => (edit?.targetString?.length ?? 0) <= budget.maxLevenshteinTargetLength);
+        if (eligible) {
+          attempts.push({ label: 'fuzzy', edits: edits.map((edit: any) => ({ ...edit, fuzzyMode: edit.fuzzyMode ?? 'levenshtein' })) });
+        }
+      }
+      const maxAttempts = Math.max(0, budget.maxMatchAttempts - 1);
+      const limitedAttempts = attempts.slice(0, maxAttempts);
+      autoCorrectionAttempts.push(...limitedAttempts.map(attempt => attempt.label));
+      for (const attempt of limitedAttempts) {
         const correctedResult = await this.runTool(context, 'edit_coordinator', {
           filePath: targetPath,
           edits: attempt.edits,
@@ -97,7 +118,7 @@ export class ChangePillar {
       }
     }
 
-    const impact = dryRun ? (finalResult.impactPreview ?? null) : await impactPromise;
+    const impact = dryRun ? (allowImpactPreview ? (finalResult.impactPreview ?? null) : null) : await impactPromise;
     const deps = await dependencyPromise;
     const hotSpots = await hotSpotPromise;
     const impactReport = this.toImpactReport(impact, deps, targetPath, hotSpots);
@@ -139,12 +160,20 @@ export class ChangePillar {
         [{ pillar: 'manage', action: 'test' }]
     };
 
+    const truncatedDiff = (typeof finalResult.diff === 'string' && finalResult.diff.length > budget.maxDiffBytes)
+      ? `${finalResult.diff.slice(0, budget.maxDiffBytes)}\n... (diff truncated)`
+      : finalResult.diff;
+
+    const refinementStage = autoCorrectionAttempts.includes('fuzzy')
+      ? 'fuzzy'
+      : (autoCorrectionAttempts.length > 0 ? 'normalized' : 'exact');
+
     return {
       success: finalResult.success,
       message: finalResult.success ? undefined : (finalResult.message ?? finalResult.details?.message),
       operation: dryRun ? 'plan' : 'apply',
       targetFile: targetPath,
-      diff: finalResult.diff,
+      diff: truncatedDiff,
       plan,
       impactReport,
       editResult: dryRun ? undefined : finalResult,
@@ -152,7 +181,18 @@ export class ChangePillar {
       rollbackAvailable: !dryRun && Boolean(finalResult.success),
       autoCorrected,
       autoCorrectionAttempts: autoCorrectionAttempts.length > 0 ? autoCorrectionAttempts : undefined,
-      guidance: failureGuidance ?? successGuidance
+      guidance: failureGuidance ?? successGuidance,
+      degraded: !finalResult.success && autoCorrectionAttempts.length === 0,
+      refinement: {
+        stage: refinementStage,
+        reason: autoCorrected ? 'low_confidence' : undefined
+      },
+      budget: {
+        ...budget,
+        used: {
+          attempts: 1 + autoCorrectionAttempts.length
+        }
+      }
     };
 
 
@@ -272,12 +312,7 @@ export class ChangePillar {
       return { targetPath: explicit, candidates: [{ path: explicit, reason: 'explicit_path' }] };
     }
 
-    const fileSearch = await this.runTool(context, 'search_project', {
-      query: intentText,
-      type: 'file',
-      maxResults: 3
-    });
-    this.collectCandidates(candidates, fileSearch?.results ?? [], 'file_search');
+    const metrics = analyzeQuery(intentText);
 
     const filenameSearch = await this.runTool(context, 'search_project', {
       query: intentText,
@@ -292,6 +327,15 @@ export class ChangePillar {
       maxResults: 3
     });
     this.collectCandidates(candidates, symbolSearch?.results ?? [], 'symbol_search');
+
+    if (metrics.strong) {
+      const fileSearch = await this.runTool(context, 'search_project', {
+        query: intentText,
+        type: 'file',
+        maxResults: 3
+      });
+      this.collectCandidates(candidates, fileSearch?.results ?? [], 'file_search');
+    }
 
     const sorted = this.sortCandidates(candidates);
     const targetPath = sorted[0]?.path;

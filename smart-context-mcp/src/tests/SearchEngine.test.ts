@@ -2,6 +2,7 @@ import * as path from "path";
 import { performance } from "perf_hooks";
 import { MemoryFileSystem } from "../platform/FileSystem.js";
 import { SearchEngine } from "../engine/Search.js";
+import { ResourceBudget, ResourceUsage } from "../types.js";
 import { SymbolInfo, SymbolIndex } from "../types.js";
 import { AstManager } from "../ast/AstManager.js";
 
@@ -126,6 +127,26 @@ describe("SearchEngine trigram index integration", () => {
         expect(results[0]?.filePath).toBe("src/core/needle.ts");
         expect(results[0]?.preview).toContain("UniqueNeedleToken");
         expect(duration).toBeLessThan(750);
+    });
+
+    it("degrades when search budget is exceeded", async () => {
+        const budget: ResourceBudget = {
+            maxCandidates: 1,
+            maxFilesRead: 0,
+            maxBytesRead: 1,
+            maxParseTimeMs: 1,
+            profile: "safe"
+        };
+        const usage: ResourceUsage = { filesRead: 0, bytesRead: 0, parseTimeMs: 0 };
+        const results = await searchEngine.scout({
+            keywords: ["alpha"],
+            basePath: rootPath,
+            budget,
+            usage
+        });
+        expect(results.length).toBeGreaterThanOrEqual(0);
+        expect(usage.degraded).toBe(true);
+        expect(usage.filesRead).toBeLessThanOrEqual(1);
     });
 
     it("prioritizes exported definitions via field weights", async () => {

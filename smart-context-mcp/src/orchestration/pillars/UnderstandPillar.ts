@@ -2,6 +2,8 @@
 import { InternalToolRegistry } from '../InternalToolRegistry.js';
 import { OrchestrationContext } from '../OrchestrationContext.js';
 import { ParsedIntent } from '../IntentRouter.js';
+import { BudgetManager } from '../BudgetManager.js';
+import { analyzeQuery, isStrongQuery } from '../../engine/search/QueryMetrics.js';
 
 
 export class UnderstandPillar {
@@ -75,32 +77,68 @@ export class UnderstandPillar {
 
     this.progressLog(progressEnabled, `Resolved filePath="${filePath}" symbol="${symbolName ?? ''}".`);
 
-    // 2. Parallel Deep Data Collection (Eager Loading)
-    const [skeleton, calls, deps, hotSpots, profile] = await Promise.all([
-      this.runTool(context, 'read_code', { filePath, view: 'skeleton' }, progress),
-      includeCalls && symbolName ?
-        this.runTool(context, 'analyze_relationship', { 
-          target: symbolName,
-          contextPath: filePath,
-          mode: 'calls', 
-          direction: 'both', 
-          maxDepth: depth === 'deep' ? 3 : 1 
-        }, progress) : Promise.resolve(null),
-      includeDependencies ?
-        this.runTool(context, 'analyze_relationship', { 
-          target: filePath, 
-          mode: 'dependencies', 
-          direction: 'both' 
-        }, progress) : Promise.resolve(null),
-      include.hotSpots === true
-        ? this.runTool(context, 'hotspot_detector', {}, progress)
-        : Promise.resolve([]),
-      this.runTool(context, 'file_profiler', { filePath }, progress)
-    ]);
+    const metrics = analyzeQuery(subject);
+    let projectStats: any = undefined;
+    try {
+      projectStats = await this.runTool(context, 'project_stats', {}, progress);
+    } catch {
+      projectStats = undefined;
+    }
+    const budget = BudgetManager.create({
+      category: 'understand',
+      queryLength: metrics.length,
+      tokenCount: metrics.tokenCount,
+      strongQuery: metrics.strong,
+      includeGraph: includeDependencies || includeCalls,
+      includeHotSpots: include.hotSpots,
+      projectStats: { fileCount: projectStats?.fileCount }
+    });
+
+    // 2. Staged Data Collection (Budget-Aware)
+    const skeleton = await this.runTool(context, 'read_code', { filePath, view: 'skeleton' }, progress);
+    const profile = await this.runTool(context, 'file_profiler', { filePath }, progress);
+
+    let calls: any = null;
+    let deps: any = null;
+    let hotSpots: any = [];
+    let degraded = false;
+    let refinementReason: string | undefined = undefined;
+
+    const allowGraphs = isStrongQuery(metrics) && (budget.profile !== 'safe' || includeCalls || includeDependencies || include.hotSpots === true);
+    if (includeCalls && symbolName && allowGraphs) {
+      calls = await this.runTool(context, 'analyze_relationship', {
+        target: symbolName,
+        contextPath: filePath,
+        mode: 'calls',
+        direction: 'both',
+        maxDepth: depth === 'deep' ? 3 : 1
+      }, progress);
+    } else if (includeCalls && symbolName && !allowGraphs) {
+      degraded = true;
+      refinementReason = refinementReason ?? 'budget_exceeded';
+    }
+
+    if (includeDependencies && allowGraphs) {
+      deps = await this.runTool(context, 'analyze_relationship', {
+        target: filePath,
+        mode: 'dependencies',
+        direction: 'both'
+      }, progress);
+    } else if (includeDependencies && !allowGraphs) {
+      degraded = true;
+      refinementReason = refinementReason ?? 'budget_exceeded';
+    }
+
+    if (include.hotSpots === true && allowGraphs) {
+      hotSpots = await this.runTool(context, 'hotspot_detector', {}, progress);
+    } else if (include.hotSpots === true && !allowGraphs) {
+      degraded = true;
+      refinementReason = refinementReason ?? 'budget_exceeded';
+    }
 
 
         // 3. Synthesize Response (Advanced synthesis in Phase 3)
-    const status = includeCalls && !symbolName ? 'partial_success' : 'ok';
+    const status = includeCalls && !symbolName ? 'partial_success' : (degraded ? 'partial_success' : 'ok');
     const elapsedMs = Date.now() - startedAt;
     this.progressLog(progressEnabled, `Completed in ${elapsedMs}ms.`);
     return {
@@ -135,11 +173,17 @@ export class UnderstandPillar {
       guidance: {
         message: includeCalls && !symbolName
           ? 'Code structure analyzed. Call graph skipped (no symbol match).'
-          : 'Code structure analyzed. Enable include.{callGraph,dependencies,hotSpots,pageRank} for deeper analysis.',
+          : (degraded ? 'Partial analysis due to budget limits. Provide a stronger query or reduce scope for deep analysis.' : 'Code structure analyzed. Enable include.{callGraph,dependencies,hotSpots,pageRank} for deeper analysis.'),
         suggestedActions: [
           { pillar: 'read', action: 'view_full', target: filePath },
           { pillar: 'understand', action: 'expand', goal: filePath, include: { callGraph: true, dependencies: true, hotSpots: true, pageRank: true } }
         ]
+      },
+      degraded,
+      budget,
+      refinement: {
+        stage: allowGraphs ? 'graph' : 'skeleton',
+        reason: refinementReason
       }
     };
 

@@ -38,6 +38,7 @@ import { PathNormalizer } from "./utils/PathNormalizer.js";
 import { AstAwareDiff } from "./engine/AstAwareDiff.js";
 import { NodeFileSystem } from "./platform/FileSystem.js";
 import { ErrorEnhancer } from "./errors/ErrorEnhancer.js";
+import { ResourceUsage } from "./types.js";
 import { GhostInterfaceBuilder } from "./resolution/GhostInterfaceBuilder.js";
 import { FallbackResolver } from "./resolution/FallbackResolver.js";
 import { CallSiteAnalyzer } from "./ast/analysis/CallSiteAnalyzer.js";
@@ -207,6 +208,7 @@ export class SmartContextServer {
         this.internalRegistry.register('edit_coordinator', (args) => this.executeEditCoordinator(args));
         this.internalRegistry.register('hotspot_detector', () => this.hotSpotDetector.detectHotSpots());
         this.internalRegistry.register('reference_finder', (args) => this.findReferencesRaw(args));
+        this.internalRegistry.register('project_stats', () => this.projectStatsRaw());
     }
 
     private setupHandlers(): void {
@@ -529,7 +531,15 @@ export class SmartContextServer {
                     properties: {
                         target: { type: 'string' },
                         context: { type: 'string', enum: ['definitions', 'usages', 'tests', 'docs', 'all'] },
-                        limit: { type: 'number' }
+                        limit: { type: 'number' },
+                        include: {
+                            type: 'object',
+                            properties: {
+                                hotSpots: { type: 'boolean' },
+                                pageRank: { type: 'boolean' },
+                                relatedSymbols: { type: 'boolean' }
+                            }
+                        }
                     },
                     required: ['target']
                 }
@@ -860,6 +870,8 @@ export class SmartContextServer {
         if (!query) {
             throw new Error("Missing required parameter: query");
         }
+        const budget = args?.budget;
+        const usage = budget ? ({ filesRead: 0, bytesRead: 0, parseTimeMs: 0 } as ResourceUsage) : undefined;
         const maxResults = typeof args.maxResults === "number"
             ? args.maxResults
             : (typeof args.limit === "number" ? args.limit : 20);
@@ -905,7 +917,9 @@ export class SmartContextServer {
                 groupByFile: args.groupByFile,
                 deduplicateByContent: args.deduplicateByContent,
                 basePath: args.basePath,
-                maxResults
+                maxResults,
+                budget,
+                usage
             });
 
             results = scoutResults.slice(0, maxResults).map(result => ({
@@ -917,6 +931,30 @@ export class SmartContextServer {
                 groupedMatches: result.groupedMatches,
                 matchCount: result.matchCount
             }));
+
+            if (usage?.degraded) {
+                const fallbackResults: any[] = [];
+                try {
+                    const filenameResults = await this.searchEngine.searchFilenames(query, { maxResults });
+                    fallbackResults.push(...filenameResults);
+                } catch {}
+                if (fallbackResults.length < maxResults) {
+                    try {
+                        const symbolMatches = await this.symbolIndex.search(query);
+                        fallbackResults.push(...symbolMatches.slice(0, maxResults - fallbackResults.length).map(match => ({
+                            type: 'symbol',
+                            path: match.filePath,
+                            score: 1,
+                            context: `${match.symbol.type} ${match.symbol.name}`,
+                            line: typeof match.symbol?.range?.startLine === 'number' ? match.symbol.range.startLine : undefined,
+                            symbol: match.symbol
+                        })));
+                    } catch {}
+                }
+                if (fallbackResults.length > 0) {
+                    results = fallbackResults.slice(0, maxResults);
+                }
+            }
         }
 
         if (results.length === 0) {
@@ -926,13 +964,17 @@ export class SmartContextServer {
                 inferredType,
                 message: `No results found for "${query}".`,
                 suggestions: enhanced.toolSuggestions,
-                nextActionHint: enhanced.nextActionHint
+                nextActionHint: enhanced.nextActionHint,
+                degraded: usage?.degraded ?? false,
+                budget: budget ? { ...budget, used: usage } : undefined
             };
         }
 
         return {
             results,
-            inferredType
+            inferredType,
+            degraded: usage?.degraded ?? false,
+            budget: budget ? { ...budget, used: usage } : undefined
         };
     }
 
@@ -1174,17 +1216,25 @@ export class SmartContextServer {
         return this.impactAnalyzer.analyzeImpact(absPath, args?.edits ?? []);
     }
 
+    private async projectStatsRaw() {
+        const files = this.indexDatabase.listFiles();
+        return {
+            fileCount: files.length
+        };
+    }
+
     private async executeEditCoordinator(args: any) {
         const filePath = args?.filePath ? this.resolveRelativePath(args.filePath) : undefined;
         const edits = Array.isArray(args?.edits) ? args.edits : [];
         const dryRun = Boolean(args?.dryRun);
+        const options = args?.options ?? {};
         if (!filePath) {
             return { success: false, message: 'Missing filePath for edit_coordinator.' };
         }
         if (edits.length === 0) {
             return { success: false, message: 'No edits provided for edit_coordinator.' };
         }
-        return this.editCoordinator.applyEdits(this.resolveAbsolutePath(filePath), edits, dryRun);
+        return this.editCoordinator.applyEdits(this.resolveAbsolutePath(filePath), edits, dryRun, options);
     }
 
     private async editCodeRaw(args: any) {
