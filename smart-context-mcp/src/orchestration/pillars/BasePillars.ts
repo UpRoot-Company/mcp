@@ -123,7 +123,7 @@ export class ReadPillar {
   }
 
   private isDocumentPath(target: string): boolean {
-    return /\.(md|mdx|txt|log|docx|xlsx)$/i.test(target);
+    return /\.(md|mdx|txt|log|docx|xlsx|pdf)$/i.test(target);
   }
 
   private normalizeLineRange(raw?: string | [number, number]): string | undefined {

@@ -626,6 +626,7 @@ export class DocumentSearchEngine {
             "**/*.log",
             "**/*.docx",
             "**/*.xlsx",
+            "**/*.pdf",
             "**/*.html",
             "**/*.htm",
             "**/*.css",
