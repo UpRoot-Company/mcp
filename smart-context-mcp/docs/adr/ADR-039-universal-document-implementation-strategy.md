@@ -193,6 +193,7 @@ export interface UniversalExtractedDocument {
 ### Phase 2 — XLSX (table-first)
 - XLSX 파서 추가(시트/테이블 텍스트화)
 - row cap / sampling 정책 적용
+- 파서 미설치/실패 시 `xlsx_parser_missing` / `xlsx_parse_failed` degrade 이유 노출
 - 테스트: 에러코드 테이블 형태 샘플에서 `doc_search` precision 확인
 
 ### Phase 3 — PDF (best-effort text)

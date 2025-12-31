@@ -53,6 +53,7 @@ import { extractHtmlTextPreserveLines } from "./documents/html/HtmlTextExtractor
 import { buildDeterministicPreview, buildDeterministicSummary } from "./documents/summary/DeterministicSummarizer.js";
 import { DocumentSearchEngine } from "./documents/search/DocumentSearchEngine.js";
 import { extractDocxAsHtml, DocxExtractError } from "./documents/extractors/DocxExtractor.js";
+import { extractXlsxAsText, XlsxExtractError } from "./documents/extractors/XlsxExtractor.js";
 import { EmbeddingProviderFactory } from "./embeddings/EmbeddingProviderFactory.js";
 import { resolveEmbeddingConfigFromEnv } from "./embeddings/EmbeddingConfig.js";
 
@@ -1293,6 +1294,19 @@ export class SmartContextServer {
                 return { content: "", kind: "html", reasons: [reason] };
             }
         }
+        if (ext === ".xlsx") {
+            try {
+                const absPath = this.resolveAbsolutePath(filePath);
+                const extracted = await extractXlsxAsText(absPath);
+                const reasons = extracted.warnings.length > 0 ? extracted.warnings : [];
+                return { content: extracted.text ?? "", kind: "text", reasons };
+            } catch (error: any) {
+                const reason = error instanceof XlsxExtractError
+                    ? error.reason
+                    : "xlsx_parse_failed";
+                return { content: "", kind: "text", reasons: [reason] };
+            }
+        }
         const content = await this.fileSystem.readFile(filePath);
         return { content, kind: this.inferDocumentKind(filePath), reasons: [] };
     }
@@ -1312,6 +1326,7 @@ export class SmartContextServer {
         if (ext === ".css") return "css";
         if (ext === ".txt" || ext === ".log") return "text";
         if (ext === ".docx") return "html";
+        if (ext === ".xlsx") return "text";
         return "unknown";
     }
 

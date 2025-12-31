@@ -11,8 +11,9 @@ import { EmbeddingRepository } from "./EmbeddingRepository.js";
 import { EmbeddingProviderFactory } from "../embeddings/EmbeddingProviderFactory.js";
 import { extractHtmlTextPreserveLines } from "../documents/html/HtmlTextExtractor.js";
 import { extractDocxAsHtml, DocxExtractError } from "../documents/extractors/DocxExtractor.js";
+import { extractXlsxAsText, XlsxExtractError } from "../documents/extractors/XlsxExtractor.js";
 
-const SUPPORTED_DOC_EXTENSIONS = new Set<string>([".md", ".mdx", ".txt", ".log", ".html", ".htm", ".css", ".docx"]);
+const SUPPORTED_DOC_EXTENSIONS = new Set<string>([".md", ".mdx", ".txt", ".log", ".html", ".htm", ".css", ".docx", ".xlsx"]);
 const WELL_KNOWN_TEXT_FILES = new Set<string>([
     "README",
     "LICENSE",
@@ -82,7 +83,8 @@ export class DocumentIndexer {
         const stats = await this.fileSystem.stat(relativePath);
         const ext = path.extname(relativePath).toLowerCase();
         const isDocx = ext === ".docx";
-        const kind = isDocx ? "html" : inferKind(relativePath);
+        const isXlsx = ext === ".xlsx";
+        const kind = isDocx ? "html" : (isXlsx ? "text" : inferKind(relativePath));
         let rawContent = "";
         if (isDocx) {
             const absPath = path.resolve(this.rootPath, relativePath);
@@ -92,6 +94,16 @@ export class DocumentIndexer {
             } catch (error: any) {
                 const reason = error instanceof DocxExtractError ? error.reason : "docx_parse_failed";
                 console.warn(`[DocumentIndexer] Failed to extract DOCX (${relativePath}): ${reason}`);
+                return;
+            }
+        } else if (isXlsx) {
+            const absPath = path.resolve(this.rootPath, relativePath);
+            try {
+                const extracted = await extractXlsxAsText(absPath);
+                rawContent = extracted.text ?? "";
+            } catch (error: any) {
+                const reason = error instanceof XlsxExtractError ? error.reason : "xlsx_parse_failed";
+                console.warn(`[DocumentIndexer] Failed to extract XLSX (${relativePath}): ${reason}`);
                 return;
             }
         } else {
@@ -244,6 +256,7 @@ function inferKind(filePath: string): DocumentKind {
     if (ext === ".txt") return "text";
     if (ext === ".log") return "text";
     if (ext === ".docx") return "html";
+    if (ext === ".xlsx") return "text";
     const base = path.basename(filePath);
     if (WELL_KNOWN_TEXT_FILES.has(base)) return "text";
     return "unknown";
