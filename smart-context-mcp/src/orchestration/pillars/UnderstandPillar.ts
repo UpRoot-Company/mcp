@@ -78,6 +78,7 @@ export class UnderstandPillar {
     this.progressLog(progressEnabled, `Resolved filePath="${filePath}" symbol="${symbolName ?? ''}".`);
 
     const metrics = analyzeQuery(subject);
+    const isDocument = this.isDocumentPath(filePath);
     let projectStats: any = undefined;
     try {
       projectStats = await this.runTool(context, 'project_stats', {}, progress);
@@ -95,7 +96,26 @@ export class UnderstandPillar {
     });
 
     // 2. Staged Data Collection (Budget-Aware)
-    const skeleton = await this.runTool(context, 'read_code', { filePath, view: 'skeleton' }, progress);
+    let skeleton: any = '';
+    let docProfile: any = undefined;
+    let docReferences: any = undefined;
+    let relatedCode: any[] | undefined = undefined;
+    let mentionMatches: any[] | undefined = undefined;
+    if (isDocument) {
+      const docAnalysis = await this.runTool(context, 'doc_analyze', { filePath }, progress);
+      skeleton = docAnalysis?.skeleton ?? '';
+      docProfile = docAnalysis?.profile;
+      if (docProfile?.links?.length) {
+        docReferences = this.categorizeDocLinks(docProfile.links);
+        relatedCode = await this.resolveCodeReferences(context, docReferences.code ?? [], progress);
+      }
+      if (Array.isArray(docProfile?.mentions) && docProfile.mentions.length > 0) {
+        mentionMatches = await this.resolveMentionReferences(context, docProfile.mentions, progress);
+        relatedCode = this.mergeRelatedCode(relatedCode, mentionMatches);
+      }
+    } else {
+      skeleton = await this.runTool(context, 'read_code', { filePath, view: 'skeleton' }, progress);
+    }
     const profile = await this.runTool(context, 'file_profiler', { filePath }, progress);
 
     let calls: any = null;
@@ -104,7 +124,11 @@ export class UnderstandPillar {
     let degraded = false;
     let refinementReason: string | undefined = undefined;
 
-    const allowGraphs = isStrongQuery(metrics) && (budget.profile !== 'safe' || includeCalls || includeDependencies || include.hotSpots === true);
+    const allowGraphs = !isDocument && isStrongQuery(metrics) && (budget.profile !== 'safe' || includeCalls || includeDependencies || include.hotSpots === true);
+    if (isDocument && (includeCalls || includeDependencies || include.hotSpots === true)) {
+      degraded = true;
+      refinementReason = refinementReason ?? 'document_file';
+    }
     if (includeCalls && symbolName && allowGraphs) {
       calls = await this.runTool(context, 'analyze_relationship', {
         target: symbolName,
@@ -148,7 +172,17 @@ export class UnderstandPillar {
       primaryFile: filePath,
       structure: skeleton,
       skeleton,
-      symbols: profile?.structure?.symbols ?? [],
+      symbols: isDocument ? [] : (profile?.structure?.symbols ?? []),
+      document: docProfile
+        ? {
+            title: docProfile.title,
+            outline: docProfile.outline ?? [],
+            links: docProfile.links ?? [],
+            mentions: docProfile.mentions ?? [],
+            references: docReferences,
+            relatedCode
+          }
+        : undefined,
       callGraph: calls ?? undefined,
       dependencies: Array.isArray(deps?.edges) ? deps.edges : [],
       relationships: {
@@ -173,7 +207,11 @@ export class UnderstandPillar {
       guidance: {
         message: includeCalls && !symbolName
           ? 'Code structure analyzed. Call graph skipped (no symbol match).'
-          : (degraded ? 'Partial analysis due to budget limits. Provide a stronger query or reduce scope for deep analysis.' : 'Code structure analyzed. Enable include.{callGraph,dependencies,hotSpots,pageRank} for deeper analysis.'),
+          : (degraded
+              ? (refinementReason === 'document_file'
+                  ? 'Document structure analyzed. Graph analysis is not available for documents.'
+                  : 'Partial analysis due to budget limits. Provide a stronger query or reduce scope for deep analysis.')
+              : 'Code structure analyzed. Enable include.{callGraph,dependencies,hotSpots,pageRank} for deeper analysis.'),
         suggestedActions: [
           { pillar: 'read', action: 'view_full', target: filePath },
           { pillar: 'understand', action: 'expand', goal: filePath, include: { callGraph: true, dependencies: true, hotSpots: true, pageRank: true } }
@@ -191,7 +229,7 @@ export class UnderstandPillar {
 
   private extractPath(text: string): string | null {
     if (!text) return null;
-    const pathPattern = /([A-Za-z0-9_./-]+\.(ts|tsx|js|jsx|json|md))/i;
+    const pathPattern = /([A-Za-z0-9_./-]+\.(ts|tsx|js|jsx|json|md|mdx))/i;
     const match = text.match(pathPattern);
     if (match) return match[1];
     if (/\s/.test(text)) {
@@ -213,6 +251,119 @@ export class UnderstandPillar {
       return text.trim();
     }
     return null;
+  }
+
+  private isDocumentPath(filePath: string): boolean {
+    return /\.(md|mdx)$/i.test(filePath);
+  }
+
+  private categorizeDocLinks(links: Array<{ resolvedPath?: string }>) {
+    const docs: typeof links = [];
+    const code: typeof links = [];
+    const assets: typeof links = [];
+    const external: typeof links = [];
+
+    for (const link of links ?? []) {
+      const resolved = link?.resolvedPath;
+      if (!resolved) {
+        external.push(link);
+        continue;
+      }
+      if (this.isDocumentPath(resolved)) {
+        docs.push(link);
+        continue;
+      }
+      if (this.isCodePath(resolved)) {
+        code.push(link);
+        continue;
+      }
+      assets.push(link);
+    }
+
+    return { docs, code, assets, external };
+  }
+
+  private isCodePath(filePath: string): boolean {
+    return /\.(ts|tsx|js|jsx|mjs|cjs|py|go|rs|java|kt|swift|cpp|cc|c|h|hpp|json|yml|yaml)$/i.test(filePath);
+  }
+
+  private async resolveCodeReferences(
+    context: OrchestrationContext,
+    refs: Array<{ resolvedPath?: string; href?: string }>,
+    progress?: { enabled: boolean; label: string }
+  ): Promise<any[]> {
+    const results: any[] = [];
+    const limited = refs.filter(ref => ref?.resolvedPath).slice(0, 5);
+    for (const ref of limited) {
+      const resolvedPath = ref.resolvedPath as string;
+      try {
+        const match = await this.runTool(context, 'search_project', {
+          query: resolvedPath,
+          type: 'filename',
+          maxResults: 1
+        }, progress);
+        const best = match?.results?.find((item: any) => item?.path === resolvedPath) ?? match?.results?.[0];
+        results.push({
+          path: resolvedPath,
+          status: best ? 'verified' : 'unverified',
+          match: best
+        });
+      } catch {
+        results.push({ path: resolvedPath, status: 'unverified' });
+      }
+    }
+    return results;
+  }
+
+  private async resolveMentionReferences(
+    context: OrchestrationContext,
+    mentions: Array<{ text: string; kind: "symbol" | "path"; line: number }>,
+    progress?: { enabled: boolean; label: string }
+  ): Promise<any[]> {
+    const results: any[] = [];
+    const seen = new Set<string>();
+    const limited = mentions.slice(0, 8);
+    for (const mention of limited) {
+      const key = `${mention.kind}:${mention.text}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      try {
+        const searchType = mention.kind === "path" ? "filename" : "symbol";
+        const match = await this.runTool(context, 'search_project', {
+          query: mention.text,
+          type: searchType,
+          maxResults: 3
+        }, progress);
+        const best = match?.results?.[0];
+        results.push({
+          mention: mention.text,
+          kind: mention.kind,
+          line: mention.line,
+          status: best ? 'verified' : 'unverified',
+          match: best
+        });
+      } catch {
+        results.push({
+          mention: mention.text,
+          kind: mention.kind,
+          line: mention.line,
+          status: 'unverified'
+        });
+      }
+    }
+    return results;
+  }
+
+  private mergeRelatedCode(primary?: any[], additional?: any[]): any[] | undefined {
+    const combined = [...(primary ?? []), ...(additional ?? [])];
+    if (combined.length === 0) return undefined;
+    const seen = new Set<string>();
+    return combined.filter((item: any) => {
+      const key = item?.path ?? item?.match?.path ?? item?.mention ?? JSON.stringify(item);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
   }
 
   private extractSymbol(text: string): string | null {

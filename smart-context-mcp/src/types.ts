@@ -329,6 +329,82 @@ export interface Document {
     symbolId?: string;
 }
 
+export type DocumentKind = "markdown" | "mdx" | "text" | "unknown";
+
+export interface DocumentSection {
+    id: string;
+    filePath: string;
+    kind: DocumentKind;
+    title: string;
+    level: number;
+    path: string[];
+    range: { startLine: number; endLine: number; startByte: number; endByte: number };
+    contentHash?: string;
+    summary?: string;
+}
+
+export interface DocumentProfile {
+    filePath: string;
+    kind: DocumentKind;
+    title?: string;
+    frontmatter?: Record<string, unknown>;
+    parser?: {
+        name: "tree-sitter" | "remark" | "regex";
+        degraded: boolean;
+        reason?: string;
+    };
+    outline: DocumentSection[];
+    links?: Array<{
+        text?: string;
+        href: string;
+        resolvedPath?: string;
+        hashFragment?: string;
+        range?: { startLine: number; endLine: number; startByte: number; endByte: number };
+    }>;
+    mentions?: Array<{
+        text: string;
+        kind: "symbol" | "path";
+        line: number;
+    }>;
+    stats: { lineCount: number; charCount: number; headingCount: number };
+}
+
+export interface DocumentOutlineOptions {
+    maxDepth?: number;
+    includeFrontmatter?: boolean;
+    includeCodeBlocks?: boolean;
+    includeLists?: boolean;
+    includeTables?: boolean;
+    minSectionChars?: number;
+    chunkStrategy?: "heading" | "structural" | "fixed";
+    targetChunkChars?: number;
+    maxBlockChars?: number;
+}
+
+export type EmbeddingProvider = "openai" | "local" | "disabled";
+
+export interface EmbeddingVector {
+    provider: EmbeddingProvider;
+    model: string;
+    dims: number;
+    values: Float32Array;
+    norm?: number;
+}
+
+export interface EmbeddingConfig {
+    provider?: "auto" | EmbeddingProvider;
+    normalize?: boolean;
+    batchSize?: number;
+    openai?: {
+        apiKeyEnv?: string;
+        model?: string;
+    };
+    local?: {
+        model?: string;
+        dims?: number;
+    };
+}
+
 export interface FileMatch {
     path: string;
     matches: {

@@ -17,12 +17,36 @@ export class ReadPillar {
     const includeHash = constraints.includeHash === true;
     const resolvedPath = await this.resolveTargetPath(target);
     const lineRange = this.normalizeLineRange(constraints.lineRange);
+    const sectionId = constraints.sectionId;
+    const headingPath = constraints.headingPath;
+    const isDocument = this.isDocumentPath(resolvedPath);
 
-    const content = await this.runTool(context, 'read_code', {
-      filePath: resolvedPath,
-      view,
-      lineRange
-    });
+    let content: string;
+    let documentOutline: any = undefined;
+
+    if (isDocument && (sectionId || headingPath)) {
+      const docSection = await this.runTool(context, 'doc_section', {
+        filePath: resolvedPath,
+        sectionId,
+        headingPath,
+        includeSubsections: constraints.includeSubsections === true
+      });
+      content = docSection?.content ?? '';
+      documentOutline = docSection?.section ? [docSection.section] : undefined;
+    } else if (isDocument && view === 'skeleton') {
+      const docSkeleton = await this.runTool(context, 'doc_skeleton', {
+        filePath: resolvedPath,
+        options: constraints.outlineOptions
+      });
+      content = docSkeleton?.skeleton ?? '';
+      documentOutline = docSkeleton?.outline;
+    } else {
+      content = await this.runTool(context, 'read_code', {
+        filePath: resolvedPath,
+        view,
+        lineRange
+      });
+    }
 
     const needsFullContent = view === 'full' || includeHash;
     const includeSkeleton = view === 'skeleton';
@@ -51,6 +75,7 @@ export class ReadPillar {
       metadata,
       profile: includeProfile ? (profile ?? undefined) : undefined,
       skeleton: typeof skeleton === 'string' ? skeleton : undefined,
+      document: documentOutline ? { outline: documentOutline } : undefined,
       guidance: {
         message: view === 'full'
           ? 'Full content loaded.'
@@ -88,6 +113,10 @@ export class ReadPillar {
 
   private looksLikePath(target: string): boolean {
     return /[\\/]/.test(target) || /\.[a-z0-9]+$/i.test(target);
+  }
+
+  private isDocumentPath(target: string): boolean {
+    return /\.(md|mdx)$/i.test(target);
   }
 
   private normalizeLineRange(raw?: string | [number, number]): string | undefined {

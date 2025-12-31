@@ -17,6 +17,7 @@ All ADRs live in `smart-context-mcp/docs/adr/`. This index is intentionally **cu
 
 - ADR-017 / ADR-018 — clustered search: `../adr/ADR-017-context-aware-clustered-search.md`, `../adr/ADR-018-consolidated-cluster-search.md`
 - ADR-023 — gap remediation (trigram/hash): `../adr/ADR-023-Enhanced-Architectural-Gap-Remediation.md`
+- ADR-036 — universal document support (markdown/mdx-first): `../adr/ADR-036-universal-document-support.md`
 
 ## Editing safety
 
@@ -31,4 +32,3 @@ All ADRs live in `smart-context-mcp/docs/adr/`. This index is intentionally **cu
 ## Notes
 
 - Some older ADRs reference legacy tool names (`search_project`, `read_code`, `edit_code`). The recommended interface is the Six Pillars (ADR-033).
-

@@ -66,7 +66,16 @@ export class IndexDatabase {
         } catch (error) {
             console.error(`[IndexDatabase] Failed to open database:`, error);
             console.error('[IndexDatabase] Falling back to in-memory database. Persistence will be disabled.');
-            this.db = new Database(':memory:');
+            if (this.isNativeModuleFailure(error)) {
+                console.error('[IndexDatabase] better-sqlite3 native module failed to load. Ensure Node.js version matches and rebuild the module (ex: npm rebuild better-sqlite3).');
+                throw error;
+            }
+            try {
+                this.db = new Database(':memory:');
+            } catch (fallbackError) {
+                console.error('[IndexDatabase] Failed to open in-memory database:', fallbackError);
+                throw fallbackError;
+            }
         }
 
         try {
@@ -80,6 +89,10 @@ export class IndexDatabase {
                 try {
                     this.db.close();
                 } catch {}
+                if (this.isNativeModuleFailure(error)) {
+                    console.error('[IndexDatabase] better-sqlite3 native module failed to load. Ensure Node.js version matches and rebuild the module (ex: npm rebuild better-sqlite3).');
+                    throw error;
+                }
                 this.db = new Database(':memory:');
                 this.configure();
                 new MigrationRunner(this.db).run();
@@ -88,6 +101,13 @@ export class IndexDatabase {
                 throw error;
             }
         }
+    }
+
+    private isNativeModuleFailure(error: unknown): boolean {
+        if (!error) return false;
+        const message = String((error as { message?: unknown })?.message ?? error);
+        const code = (error as { code?: unknown })?.code;
+        return code === 'ERR_DLOPEN_FAILED' || message.includes('NODE_MODULE_VERSION');
     }
 
     public getHandle(): Database.Database {

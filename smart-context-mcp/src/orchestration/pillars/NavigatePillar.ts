@@ -22,6 +22,8 @@ export class NavigatePillar {
     this.progressLog(progressEnabled, `Start target="${target}" limit=${limit} context=${contextMode}.`);
 
     const metrics = analyzeQuery(target);
+    const docSearchEnabled = contextMode === 'docs' && !metrics.hasPath;
+    const docDirectEnabled = contextMode === 'docs' && metrics.hasPath;
     let projectStats: any = undefined;
     try {
       projectStats = await this.runTool(context, 'project_stats', {}, progress);
@@ -37,6 +39,74 @@ export class NavigatePillar {
       includeHotSpots: include.hotSpots,
       projectStats: { fileCount: projectStats?.fileCount }
     });
+
+    if (docDirectEnabled) {
+      const resolvedDoc = await this.resolveDocPath(context, target, progress);
+      if (resolvedDoc) {
+        try {
+          const docSkeleton = await this.runTool(context, 'doc_skeleton', { filePath: resolvedDoc }, progress);
+          const docToc = await this.runTool(context, 'doc_toc', { filePath: resolvedDoc }, progress);
+          const docRefs = await this.runTool(context, 'doc_references', { filePath: resolvedDoc }, progress);
+          return {
+            success: true,
+            status: 'success',
+            locations: [
+              {
+                filePath: resolvedDoc,
+                line: 1,
+                snippet: docSkeleton?.skeleton ?? '',
+                relevance: 1,
+                type: 'doc'
+              }
+            ],
+            codePreview: docSkeleton?.skeleton ?? '',
+            document: {
+              outline: docToc?.outline ?? [],
+              references: docRefs?.references ?? [],
+              categorizedReferences: docRefs?.categorized ?? {}
+            },
+            degraded: Boolean(docSkeleton?.degraded || docToc?.degraded || docRefs?.degraded),
+            budget
+          };
+        } catch {
+          // fall back to search
+        }
+      }
+    }
+
+    if (docSearchEnabled) {
+      try {
+        const docResults = await this.runTool(context, 'doc_search', {
+          query: target,
+          maxResults: limit,
+          includeEvidence: false
+        }, progress);
+        const sections = Array.isArray(docResults?.results) ? docResults.results : [];
+        if (sections.length > 0) {
+          const locations = sections.map((section: any) => ({
+            filePath: section.filePath ?? '',
+            line: section.range?.startLine ?? 0,
+            snippet: section.preview ?? '',
+            relevance: section.scores?.final ?? 0,
+            type: 'doc'
+          }));
+          this.progressLog(progressEnabled, `Doc search results: ${locations.length}.`);
+          return {
+            success: true,
+            status: 'success',
+            locations,
+            codePreview: locations[0]?.snippet,
+            document: {
+              results: sections
+            },
+            degraded: docResults?.degraded ?? false,
+            budget
+          };
+        }
+      } catch {
+        // fall back to filename/content search
+      }
+    }
 
     const initialType = metrics.hasPath
       ? 'filename'
@@ -141,9 +211,17 @@ export class NavigatePillar {
       const profile = await this.runTool(context, 'file_profiler', { filePath: primary.path }, progress);
       response.smartProfile = profile;
       if (primary?.path) {
-        const skeleton = await this.runTool(context, 'read_code', { filePath: primary.path, view: 'skeleton' }, progress);
-        if (typeof skeleton === 'string') {
-          response.codePreview = skeleton;
+        if (this.isDocPath(primary.path)) {
+          const docSkeleton = await this.runTool(context, 'doc_skeleton', { filePath: primary.path }, progress);
+          if (typeof docSkeleton?.skeleton === 'string') {
+            response.codePreview = docSkeleton.skeleton;
+            response.document = { outline: docSkeleton.outline ?? [] };
+          }
+        } else {
+          const skeleton = await this.runTool(context, 'read_code', { filePath: primary.path, view: 'skeleton' }, progress);
+          if (typeof skeleton === 'string') {
+            response.codePreview = skeleton;
+          }
         }
       }
     }
@@ -348,12 +426,34 @@ export class NavigatePillar {
       const fallback = await this.runTool(context, 'search_project', {
         query: target,
         maxResults: limit,
-        includeGlobs: ['**/*.md', '**/docs/**']
+        includeGlobs: ['**/*.md', '**/*.mdx', '**/docs/**']
       });
       return fallback?.results ?? [];
     }
 
     return results;
+  }
+
+  private async resolveDocPath(
+    context: OrchestrationContext,
+    target: string,
+    progress?: { enabled: boolean; label: string }
+  ): Promise<string | null> {
+    if (!target) return null;
+    const cleaned = target.replace(/^["'`]+|["'`]+$/g, '');
+    if (this.isDocPath(cleaned)) {
+      return cleaned;
+    }
+    if (!/[\\/]/.test(cleaned)) {
+      const match = await this.runTool(context, 'search_project', {
+        query: cleaned,
+        type: 'filename',
+        maxResults: 1,
+        includeGlobs: ['**/*.md', '**/*.mdx', '**/docs/**']
+      }, progress);
+      return match?.results?.[0]?.path ?? null;
+    }
+    return cleaned;
   }
 
   private shouldLogProgress(constraints: any): boolean {
@@ -371,7 +471,7 @@ export class NavigatePillar {
   }
 
   private isDocPath(filePath: string): boolean {
-    return /\.md$/i.test(filePath) || /\/docs\//i.test(filePath);
+    return /\.(md|mdx)$/i.test(filePath) || /\/docs\//i.test(filePath);
   }
 
   private isDefinitionSymbol(item: any): boolean {

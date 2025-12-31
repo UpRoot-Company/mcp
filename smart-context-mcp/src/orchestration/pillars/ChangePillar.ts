@@ -4,6 +4,7 @@ import { OrchestrationContext } from '../OrchestrationContext.js';
 import { ParsedIntent } from '../IntentRouter.js';
 import { ChangeBudgetManager } from '../ChangeBudgetManager.js';
 import { analyzeQuery } from '../../engine/search/QueryMetrics.js';
+import * as path from 'path';
 
 
 export class ChangePillar {
@@ -146,7 +147,7 @@ export class ChangePillar {
         })
       : undefined;
 
-    const successGuidance = {
+    const successGuidance: any = {
       message: dryRun ? 'Change plan generated. Review the diff before applying.' : 'Changes successfully applied.',
       suggestedActions: dryRun ?
         [{
@@ -168,6 +169,20 @@ export class ChangePillar {
       ? 'fuzzy'
       : (autoCorrectionAttempts.length > 0 ? 'normalized' : 'exact');
 
+    const relatedDocs = await this.suggestDocUpdates(context, targetPath, edits, originalIntent);
+    if (relatedDocs && successGuidance?.suggestedActions && relatedDocs.length > 0) {
+      const top = relatedDocs[0];
+      if (top?.filePath) {
+        successGuidance.suggestedActions.push({
+          pillar: 'doc_section',
+          action: 'preview',
+          target: top.filePath,
+          headingPath: top.sectionPath
+        });
+        successGuidance.message = `${successGuidance.message} Related docs may need updates: ${top.filePath}.`;
+      }
+    }
+
     return {
       success: finalResult.success,
       message: finalResult.success ? undefined : (finalResult.message ?? finalResult.details?.message),
@@ -182,6 +197,7 @@ export class ChangePillar {
       autoCorrected,
       autoCorrectionAttempts: autoCorrectionAttempts.length > 0 ? autoCorrectionAttempts : undefined,
       guidance: failureGuidance ?? successGuidance,
+      relatedDocs,
       degraded: !finalResult.success && autoCorrectionAttempts.length === 0,
       refinement: {
         stage: refinementStage,
@@ -354,6 +370,101 @@ export class ChangePillar {
       }
     }
     return undefined;
+  }
+
+  private async suggestDocUpdates(
+    context: OrchestrationContext,
+    targetPath: string,
+    edits: any[],
+    intentText: string
+  ): Promise<Array<{ filePath: string; sectionPath?: string[]; score?: number; preview?: string; section?: { content: string; resolvedHeadingPath?: string[] } }> | undefined> {
+    const queries = new Set<string>();
+    const basename = path.basename(targetPath);
+    const ext = path.extname(basename);
+    const stem = ext ? basename.slice(0, -ext.length) : basename;
+
+    queries.add(targetPath);
+    if (basename) queries.add(basename);
+    if (stem && stem.length >= 3) queries.add(stem);
+
+    const editTokens = edits
+      .map(edit => edit?.targetString ?? edit?.search ?? edit?.from)
+      .filter((value: any) => typeof value === 'string' && value.length > 0) as string[];
+    for (const token of editTokens.slice(0, 2)) {
+      const trimmed = token.trim();
+      if (trimmed.length >= 3 && trimmed.length <= 80) {
+        queries.add(trimmed);
+      }
+    }
+
+    const queryList = Array.from(queries).filter(q => q.length >= 3);
+    if (queryList.length === 0) return undefined;
+
+    const aggregated: Array<{ filePath: string; sectionPath?: string[]; score?: number; preview?: string; section?: { content: string; resolvedHeadingPath?: string[] } }> = [];
+    for (const query of queryList.slice(0, 3)) {
+      try {
+        const result = await this.runTool(context, 'doc_search', {
+          query,
+          maxResults: 8,
+          includeEvidence: false
+        });
+        const sections = Array.isArray(result?.results) ? result.results : [];
+        for (const section of sections) {
+          if (!section?.filePath) continue;
+          aggregated.push({
+            filePath: section.filePath,
+            sectionPath: section.sectionPath,
+            score: section.scores?.final,
+            preview: section.preview
+          });
+        }
+      } catch {
+        // ignore doc search failures
+      }
+    }
+
+    if (aggregated.length === 0) return undefined;
+    const seen = new Set<string>();
+    const deduped = aggregated.filter(item => {
+      const key = `${item.filePath}::${(item.sectionPath ?? []).join('/')}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    }).slice(0, 8);
+
+    return this.attachDocSections(context, deduped);
+  }
+
+  private async attachDocSections(
+    context: OrchestrationContext,
+    docs: Array<{ filePath: string; sectionPath?: string[]; score?: number; preview?: string; section?: { content: string; resolvedHeadingPath?: string[] } }>
+  ) {
+    const output: Array<{ filePath: string; sectionPath?: string[]; score?: number; preview?: string; section?: { content: string; resolvedHeadingPath?: string[] } }> = [];
+    const sectionLimit = 3;
+    let attached = 0;
+    for (const doc of docs) {
+      const next = { ...doc };
+      if (attached < sectionLimit && Array.isArray(doc.sectionPath) && doc.sectionPath.length > 0) {
+        try {
+          const section = await this.runTool(context, 'doc_section', {
+            filePath: doc.filePath,
+            headingPath: doc.sectionPath,
+            includeSubsections: false
+          });
+          if (section?.success && typeof section?.content === 'string') {
+            next.section = {
+              content: section.content.slice(0, 2000),
+              resolvedHeadingPath: section.resolvedHeadingPath
+            };
+            attached += 1;
+          }
+        } catch {
+          // ignore
+        }
+      }
+      output.push(next);
+    }
+    return output;
   }
 
   private normalizeEdits(

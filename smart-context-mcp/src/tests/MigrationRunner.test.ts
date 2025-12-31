@@ -11,10 +11,15 @@ describe("MigrationRunner", () => {
         runner.run();
 
         const versionRow = db.prepare(`SELECT value FROM metadata WHERE key='schema_version'`).get() as any;
-        expect(versionRow.value).toBe("2");
+        expect(versionRow.value).toBe("3");
 
         const table = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='transaction_log'`).get();
         expect(table).toBeTruthy();
+
+        const docChunks = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='document_chunks'`).get();
+        expect(docChunks).toBeTruthy();
+
+        const chunkEmbeddings = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='chunk_embeddings'`).get();
+        expect(chunkEmbeddings).toBeTruthy();
     });
 });
-

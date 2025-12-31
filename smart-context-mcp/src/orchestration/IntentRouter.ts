@@ -1,4 +1,6 @@
 
+import { DocumentOutlineOptions } from "../types.js";
+
 export type IntentCategory = 'understand' | 'change' | 'navigate' | 'read' | 'write' | 'manage';
 
 export interface IntentConstraints {
@@ -11,6 +13,10 @@ export interface IntentConstraints {
   edits?: any[];
   view?: 'full' | 'skeleton' | 'fragment';
   lineRange?: string | [number, number];
+  sectionId?: string;
+  headingPath?: string[];
+  includeSubsections?: boolean;
+  outlineOptions?: DocumentOutlineOptions;
   includeProfile?: boolean;
   includeHash?: boolean;
   targetPath?: string;
@@ -91,7 +97,7 @@ export class IntentRouter {
       .trim();
 
     // 3. Extract filenames, paths, or PascalCase/camelCase symbols
-    const commonPattern = /\b([a-zA-Z0-9_\-\.\/]+\.(ts|js|json|md|tsx|jsx)|[A-Z][a-zA-Z0-9]+|[a-z][a-zA-Z0-9]+)\b/g;
+    const commonPattern = /\b([a-zA-Z0-9_\-\.\/]+\.(ts|js|json|md|mdx|tsx|jsx)|[A-Z][a-zA-Z0-9]+|[a-z][a-zA-Z0-9]+)\b/g;
     const matches = cleanedIntent.match(commonPattern);
     
     if (matches && matches.length > 0) {

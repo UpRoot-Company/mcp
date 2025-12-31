@@ -30,6 +30,9 @@ import { DataFlowTracer } from "./ast/DataFlowTracer.js";
 import { ClusterSearchEngine } from "./engine/ClusterSearch/index.js";
 import { IndexDatabase } from "./indexing/IndexDatabase.js";
 import { IncrementalIndexer } from "./indexing/IncrementalIndexer.js";
+import { DocumentIndexer } from "./indexing/DocumentIndexer.js";
+import { EmbeddingRepository } from "./indexing/EmbeddingRepository.js";
+import { DocumentChunkRepository } from "./indexing/DocumentChunkRepository.js";
 import { TransactionLog } from "./engine/TransactionLog.js";
 import { ConfigurationManager } from "./config/ConfigurationManager.js";
 import { PathManager } from "./utils/PathManager.js";
@@ -44,6 +47,10 @@ import { FallbackResolver } from "./resolution/FallbackResolver.js";
 import { CallSiteAnalyzer } from "./ast/analysis/CallSiteAnalyzer.js";
 import { HotSpotDetector } from "./engine/ClusterSearch/HotSpotDetector.js";
 import { ReferenceFinder } from "./ast/ReferenceFinder.js";
+import { DocumentProfiler } from "./documents/DocumentProfiler.js";
+import { DocumentSearchEngine } from "./documents/search/DocumentSearchEngine.js";
+import { EmbeddingProviderFactory } from "./embeddings/EmbeddingProviderFactory.js";
+import { resolveEmbeddingConfigFromEnv } from "./embeddings/EmbeddingConfig.js";
 
 // Orchestration Imports
 import { OrchestrationEngine } from "./orchestration/OrchestrationEngine.js";
@@ -79,6 +86,11 @@ export class SmartContextServer {
     private fileVersionManager: FileVersionManager;
     private pathNormalizer: PathNormalizer;
     private hotSpotDetector: HotSpotDetector;
+    private documentProfiler: DocumentProfiler;
+    private documentIndexer?: DocumentIndexer;
+    private embeddingRepository: EmbeddingRepository;
+    private embeddingProviderFactory: EmbeddingProviderFactory;
+    private documentSearchEngine: DocumentSearchEngine;
     private ghostInterfaceBuilder: GhostInterfaceBuilder;
     private fallbackResolver: FallbackResolver;
     private clusterSearchEngine: ClusterSearchEngine;
@@ -96,6 +108,8 @@ export class SmartContextServer {
     private reindexInProgress = false;
     private reindexLastResult?: { success: boolean; output: string; startedAt: string; finishedAt?: string };
     private heartbeatTimer?: NodeJS.Timeout;
+    private shutdownRequested = false;
+    private shutdownTimer?: NodeJS.Timeout;
 
     constructor(rootPath: string) {
         this.server = new Server({
@@ -121,6 +135,13 @@ export class SmartContextServer {
         this.skeletonGenerator = new SkeletonGenerator();
         this.skeletonCache = new SkeletonCache(this.rootPath);
         this.indexDatabase = new IndexDatabase(this.rootPath);
+        this.embeddingRepository = new EmbeddingRepository(this.indexDatabase);
+        this.embeddingProviderFactory = new EmbeddingProviderFactory(resolveEmbeddingConfigFromEnv());
+        this.documentProfiler = new DocumentProfiler(this.rootPath);
+        this.documentIndexer = new DocumentIndexer(this.rootPath, this.fileSystem, this.indexDatabase, {
+            embeddingRepository: this.embeddingRepository,
+            embeddingProviderFactory: this.embeddingProviderFactory
+        });
         this.symbolIndex = new SymbolIndex(this.rootPath, this.skeletonGenerator, initialIgnorePatterns, this.indexDatabase);
         this.moduleResolver = new ModuleResolver(this.rootPath);
         this.dependencyGraph = new DependencyGraph(this.rootPath, this.symbolIndex, this.moduleResolver, this.indexDatabase);
@@ -142,6 +163,13 @@ export class SmartContextServer {
             callGraphBuilder: this.callGraphBuilder,
             dependencyGraph: this.dependencyGraph
         });
+        this.documentSearchEngine = new DocumentSearchEngine(
+            this.searchEngine,
+            this.documentIndexer,
+            new DocumentChunkRepository(this.indexDatabase),
+            this.embeddingRepository,
+            this.embeddingProviderFactory
+        );
         this.clusterSearchEngine = new ClusterSearchEngine({
             rootPath: this.rootPath,
             symbolIndex: this.symbolIndex,
@@ -189,6 +217,7 @@ export class SmartContextServer {
 
         this.registerInternalTools();
         this.setupHandlers();
+        this.setupShutdownHooks();
         this.startHeartbeat();
     }
 
@@ -209,6 +238,12 @@ export class SmartContextServer {
         this.internalRegistry.register('hotspot_detector', () => this.hotSpotDetector.detectHotSpots());
         this.internalRegistry.register('reference_finder', (args) => this.findReferencesRaw(args));
         this.internalRegistry.register('project_stats', () => this.projectStatsRaw());
+        this.internalRegistry.register('doc_toc', (args) => this.docTocRaw(args));
+        this.internalRegistry.register('doc_skeleton', (args) => this.docSkeletonRaw(args));
+        this.internalRegistry.register('doc_section', (args) => this.docSectionRaw(args));
+        this.internalRegistry.register('doc_analyze', (args) => this.docAnalyzeRaw(args));
+        this.internalRegistry.register('doc_search', (args) => this.docSearchRaw(args));
+        this.internalRegistry.register('doc_references', (args) => this.docReferencesRaw(args));
     }
 
     private setupHandlers(): void {
@@ -328,10 +363,16 @@ export class SmartContextServer {
         process.on("uncaughtException", (err) => {
             console.error("[Process] uncaughtException", err);
             logMemory("uncaughtException");
+            if (!this.isTestEnv()) {
+                process.exit(1);
+            }
         });
         process.on("unhandledRejection", (reason) => {
             console.error("[Process] unhandledRejection", reason);
             logMemory("unhandledRejection");
+            if (!this.isTestEnv()) {
+                process.exit(1);
+            }
         });
         process.on("warning", (warning) => {
             console.warn("[Process] warning", warning);
@@ -373,6 +414,45 @@ export class SmartContextServer {
         this.heartbeatTimer = undefined;
     }
 
+    private setupShutdownHooks(): void {
+        if (this.isTestEnv()) return;
+        const handle = (reason: string, error?: unknown) => {
+            if (this.shutdownRequested) return;
+            this.shutdownRequested = true;
+            const timeoutMs = Number(process.env.SMART_CONTEXT_SHUTDOWN_TIMEOUT_MS ?? 5000);
+            if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
+                this.shutdownTimer = setTimeout(() => {
+                    console.warn(`[Process] shutdown timeout exceeded (${timeoutMs}ms); forcing exit`);
+                    process.exit(1);
+                }, timeoutMs);
+                this.shutdownTimer.unref?.();
+            }
+            if (error) {
+                console.warn(`[Process] shutdown requested (${reason})`, error);
+            } else {
+                console.warn(`[Process] shutdown requested (${reason})`);
+            }
+            void this.shutdown().finally(() => {
+                if (this.shutdownTimer) {
+                    clearTimeout(this.shutdownTimer);
+                    this.shutdownTimer = undefined;
+                }
+                if (!this.isTestEnv()) {
+                    process.exit(0);
+                }
+            });
+        };
+
+        process.on("SIGTERM", () => handle("SIGTERM"));
+        process.on("SIGINT", () => handle("SIGINT"));
+        process.on("SIGHUP", () => handle("SIGHUP"));
+
+        process.stdin.on("end", () => handle("stdin_end"));
+        process.stdin.on("close", () => handle("stdin_close"));
+        process.stdin.on("error", (err) => handle("stdin_error", err));
+        process.stdin.resume();
+    }
+
     private createIgnoreFilter(patterns: string[]): any {
         const ig = (ignore as unknown as () => any)();
         if (Array.isArray(patterns) && patterns.length > 0) {
@@ -386,6 +466,7 @@ export class SmartContextServer {
         this.symbolIndex.updateIgnorePatterns(normalized);
         this.contextEngine.updateIgnoreFilter(this.createIgnoreFilter(normalized));
         void this.searchEngine.updateExcludeGlobs(normalized);
+        this.documentIndexer?.updateIgnorePatterns(normalized);
     }
 
     private listIntentTools(): any[] {
@@ -414,6 +495,64 @@ export class SmartContextServer {
                         maxResults: { type: 'number' }
                     },
                     required: ['query']
+                }
+            },
+            {
+                name: 'doc_search',
+                description: 'Search markdown/MDX sections with hybrid ranking (BM25 + vector).',
+                inputSchema: {
+                    type: 'object',
+                    properties: {
+                        query: { type: 'string' },
+                        maxResults: { type: 'number' },
+                        maxCandidates: { type: 'number' },
+                        maxChunkCandidates: { type: 'number' },
+                        maxVectorCandidates: { type: 'number' },
+                        maxEvidenceSections: { type: 'number' },
+                        maxEvidenceChars: { type: 'number' },
+                        includeEvidence: { type: 'boolean' },
+                        snippetLength: { type: 'number' },
+                        rrfK: { type: 'number' },
+                        rrfDepth: { type: 'number' },
+                        useMmr: { type: 'boolean' },
+                        mmrLambda: { type: 'number' },
+                        maxChunksEmbeddedPerRequest: { type: 'number' },
+                        maxEmbeddingTimeMs: { type: 'number' },
+                        embedding: {
+                            type: 'object',
+                            properties: {
+                                provider: { type: 'string', enum: ['auto', 'openai', 'local', 'disabled'] },
+                                normalize: { type: 'boolean' },
+                                batchSize: { type: 'number' },
+                                openai: {
+                                    type: 'object',
+                                    properties: {
+                                        apiKeyEnv: { type: 'string' },
+                                        model: { type: 'string' }
+                                    }
+                                },
+                                local: {
+                                    type: 'object',
+                                    properties: {
+                                        model: { type: 'string' },
+                                        dims: { type: 'number' }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    required: ['query']
+                }
+            },
+            {
+                name: 'doc_references',
+                description: 'List resolved references (links) found in a markdown/MDX document.',
+                inputSchema: {
+                    type: 'object',
+                    properties: {
+                        filePath: { type: 'string' }
+                    },
+                    required: ['filePath']
                 }
             },
             {
@@ -563,6 +702,10 @@ export class SmartContextServer {
                                 }
                             ]
                         },
+                        sectionId: { type: 'string' },
+                        headingPath: { type: 'array', items: { type: 'string' } },
+                        includeSubsections: { type: 'boolean' },
+                        outlineOptions: { type: 'object' },
                         includeProfile: { type: 'boolean' },
                         includeHash: { type: 'boolean' }
                     },
@@ -863,6 +1006,204 @@ export class SmartContextServer {
             const content = await this.fileSystem.readFile(filePath);
             return this.buildSkeletonFallback(content, error?.message);
         }
+    }
+
+    private async docTocRaw(args: any) {
+        const filePath = this.resolveRelativePath(args.filePath);
+        const content = await this.fileSystem.readFile(filePath);
+        const profile = this.documentProfiler.profile({
+            filePath,
+            content,
+            kind: this.inferDocumentKind(filePath),
+            options: args?.options
+        });
+        const degradation = buildDegradation(profile.parser?.reason ? [profile.parser.reason] : []);
+        return {
+            filePath,
+            kind: profile.kind,
+            outline: profile.outline,
+            ...degradation
+        };
+    }
+
+    private async docSkeletonRaw(args: any) {
+        const filePath = this.resolveRelativePath(args.filePath);
+        const content = await this.fileSystem.readFile(filePath);
+        const profile = this.documentProfiler.profile({
+            filePath,
+            content,
+            kind: this.inferDocumentKind(filePath),
+            options: args?.options
+        });
+        const degradation = buildDegradation(profile.parser?.reason ? [profile.parser.reason] : []);
+        return {
+            filePath,
+            kind: profile.kind,
+            skeleton: this.documentProfiler.buildSkeleton(profile),
+            outline: profile.outline,
+            ...degradation
+        };
+    }
+
+    private async docAnalyzeRaw(args: any) {
+        const filePath = this.resolveRelativePath(args.filePath);
+        const content = await this.fileSystem.readFile(filePath);
+        const profile = this.documentProfiler.profile({
+            filePath,
+            content,
+            kind: this.inferDocumentKind(filePath),
+            options: args?.options
+        });
+        const degradation = buildDegradation(profile.parser?.reason ? [profile.parser.reason] : []);
+        return {
+            filePath,
+            profile,
+            skeleton: this.documentProfiler.buildSkeleton(profile),
+            ...degradation
+        };
+    }
+
+    private async docReferencesRaw(args: any) {
+        const filePath = this.resolveRelativePath(args.filePath);
+        const content = await this.fileSystem.readFile(filePath);
+        const profile = this.documentProfiler.profile({
+            filePath,
+            content,
+            kind: this.inferDocumentKind(filePath),
+            options: args?.options
+        });
+        const links = profile.links ?? [];
+        const categorized = categorizeDocumentLinks(links);
+        const degradation = buildDegradation(profile.parser?.reason ? [profile.parser.reason] : []);
+        return {
+            filePath,
+            kind: profile.kind,
+            references: links,
+            categorized,
+            ...degradation
+        };
+    }
+
+    private async docSectionRaw(args: any) {
+        const filePath = this.resolveRelativePath(args.filePath);
+        const content = await this.fileSystem.readFile(filePath);
+        const profile = this.documentProfiler.profile({
+            filePath,
+            content,
+            kind: this.inferDocumentKind(filePath),
+            options: args?.options
+        });
+        const outline = profile.outline;
+        const sectionId = args?.sectionId as string | undefined;
+        const headingPath = normalizeHeadingPath(args?.headingPath);
+        const includeSubsections = args?.includeSubsections === true;
+        const reasons: string[] = [];
+        if (profile.parser?.reason) {
+            reasons.push(profile.parser.reason);
+        }
+
+        let sectionIndex = -1;
+        if (sectionId) {
+            sectionIndex = outline.findIndex(section => section.id === sectionId);
+        } else if (headingPath && headingPath.length > 0) {
+            sectionIndex = outline.findIndex(section =>
+                matchesHeadingPath(section.path, headingPath)
+            );
+        }
+
+        if (sectionIndex === -1) {
+            let suggestions = outline.slice(0, 5).map(section => section.path);
+            if (headingPath && headingPath.length > 0) {
+                const ranked = rankSectionsByHeadingPath(outline, headingPath, 5);
+                suggestions = ranked.map(entry => outline[entry.index].path);
+                const best = ranked[0];
+                if (best && best.score >= 2) {
+                    sectionIndex = best.index;
+                    reasons.push("closest_match");
+                } else {
+                    return {
+                        success: false,
+                        status: 'no_results',
+                        message: 'Section not found.',
+                        suggestions,
+                        ...buildDegradation(reasons)
+                    };
+                }
+            } else {
+                return {
+                    success: false,
+                    status: 'no_results',
+                    message: 'Section not found.',
+                    suggestions,
+                    ...buildDegradation(reasons)
+                };
+            }
+        }
+
+        const section = outline[sectionIndex];
+        const range = computeSectionRange(outline, sectionIndex, includeSubsections);
+        const lines = content.split(/\r?\n/);
+        const sectionContent = lines.slice(range.startLine - 1, range.endLine).join("\n");
+        const status = reasons.includes("closest_match") ? "closest_match" : "success";
+
+        return {
+            success: true,
+            status,
+            filePath,
+            kind: profile.kind,
+            section: {
+                ...section,
+                range: { ...section.range, startLine: range.startLine, endLine: range.endLine }
+            },
+            content: sectionContent,
+            resolvedHeadingPath: section.path,
+            requestedHeadingPath: headingPath ?? undefined,
+            ...buildDegradation(reasons)
+        };
+    }
+
+    private async docSearchRaw(args: any) {
+        const query = args?.query ?? args?.text ?? args?.keywords?.join?.(" ") ?? "";
+        if (!query || !String(query).trim()) {
+            return {
+                query: String(query ?? ""),
+                results: [],
+                evidence: [],
+                degraded: false,
+                provider: null,
+                stats: {
+                    candidateFiles: 0,
+                    candidateChunks: 0,
+                    vectorEnabled: false,
+                    mmrApplied: false
+                }
+            };
+        }
+
+        return this.documentSearchEngine.search(String(query), {
+            maxResults: args?.maxResults ?? args?.limit,
+            maxCandidates: args?.maxCandidates,
+            maxChunkCandidates: args?.maxChunkCandidates,
+            maxVectorCandidates: args?.maxVectorCandidates,
+            maxEvidenceSections: args?.maxEvidenceSections,
+            maxEvidenceChars: args?.maxEvidenceChars,
+            includeEvidence: args?.includeEvidence,
+            snippetLength: args?.snippetLength,
+            rrfK: args?.rrfK,
+            rrfDepth: args?.rrfDepth,
+            useMmr: args?.useMmr,
+            mmrLambda: args?.mmrLambda,
+            maxChunksEmbeddedPerRequest: args?.maxChunksEmbeddedPerRequest,
+            maxEmbeddingTimeMs: args?.maxEmbeddingTimeMs,
+            embedding: args?.embedding
+        });
+    }
+
+    private inferDocumentKind(filePath: string): "markdown" | "mdx" | "text" | "unknown" {
+        const ext = path.extname(filePath).toLowerCase();
+        if (ext === ".mdx") return "mdx";
+        if (ext === ".md") return "markdown";
+        return "unknown";
     }
 
     private async searchProjectRaw(args: any) {
@@ -1492,6 +1833,9 @@ export class SmartContextServer {
                                 const progressLogger = suppressLogs ? undefined : (message: string) => console.info(message);
                                 await this.searchEngine.rebuild({ logEvery: 500, logger: progressLogger, logTotals: true });
                                 await this.dependencyGraph.build({ logEvery: 200 });
+                                if (this.documentIndexer) {
+                                    await this.documentIndexer.rebuildAll();
+                                }
                                 const finishedAt = new Date();
                                 this.reindexLastResult = {
                                     success: true,
@@ -1674,18 +2018,40 @@ export class SmartContextServer {
         const content = await this.fileSystem.readFile(filePath);
         const stats = await this.fileSystem.stat(filePath);
         const metadata = FileProfiler.analyzeMetadata(content, absPath);
-        await this.dependencyGraph.ensureBuilt();
-        const outgoing = await this.dependencyGraph.getDependencies(filePath, 'downstream');
-        const incoming = await this.dependencyGraph.getDependencies(filePath, 'upstream');
+        const docKind = this.inferDocumentKind(filePath);
+        const isDocument = docKind !== "unknown";
+        let outgoing: any[] = [];
+        let incoming: any[] = [];
         let skeleton = '';
         let symbols: any[] = [];
-        try {
-            skeleton = await this.skeletonGenerator.generateSkeleton(absPath, content);
-            symbols = await this.symbolIndex.getSymbolsForFile(absPath);
-        } catch (error: any) {
-            const fallback = this.buildSkeletonFallback(content, error?.message);
-            skeleton = fallback;
-            symbols = [];
+        let document: any = undefined;
+
+        if (isDocument) {
+            try {
+                const profile = this.documentProfiler.profile({
+                    filePath,
+                    content,
+                    kind: docKind,
+                    options: args?.outlineOptions
+                });
+                skeleton = this.documentProfiler.buildSkeleton(profile);
+                document = profile;
+            } catch (error: any) {
+                skeleton = this.buildSkeletonFallback(content, error?.message);
+                document = undefined;
+            }
+        } else {
+            await this.dependencyGraph.ensureBuilt();
+            outgoing = await this.dependencyGraph.getDependencies(filePath, 'downstream');
+            incoming = await this.dependencyGraph.getDependencies(filePath, 'upstream');
+            try {
+                skeleton = await this.skeletonGenerator.generateSkeleton(absPath, content);
+                symbols = await this.symbolIndex.getSymbolsForFile(absPath);
+            } catch (error: any) {
+                const fallback = this.buildSkeletonFallback(content, error?.message);
+                skeleton = fallback;
+                symbols = [];
+            }
         }
 
         return {
@@ -1707,7 +2073,13 @@ export class SmartContextServer {
             },
             structure: {
                 skeleton,
-                symbols
+                symbols,
+                document: document ? {
+                    kind: document.kind,
+                    title: document.title,
+                    outline: document.outline,
+                    links: document.links
+                } : undefined
             },
             usage: {
                 incomingCount: incoming.length,
@@ -1812,6 +2184,152 @@ export class SmartContextServer {
         await this.server.connect(transport);
         console.error(`Smart Context MCP Server running on stdio (cwd=${process.cwd()})`);
     }
+}
+
+function normalizeHeadingPath(raw: any): string[] | null {
+    if (!raw) return null;
+    if (Array.isArray(raw)) {
+        return raw.map(value => String(value));
+    }
+    if (typeof raw === "string") {
+        return raw.split(">").map(part => part.trim()).filter(Boolean);
+    }
+    return null;
+}
+
+function buildDegradation(reasons: string[]): { degraded: boolean; reason?: string; reasons?: string[] } {
+    const filtered = Array.from(new Set(reasons.filter(Boolean)));
+    if (filtered.length === 0) {
+        return { degraded: false };
+    }
+    return {
+        degraded: true,
+        reason: filtered[0],
+        reasons: filtered.length > 1 ? filtered : undefined
+    };
+}
+
+function categorizeDocumentLinks(
+    links: Array<{ resolvedPath?: string; href: string }>
+): { docs: typeof links; code: typeof links; assets: typeof links; external: typeof links } {
+    const docs: typeof links = [];
+    const code: typeof links = [];
+    const assets: typeof links = [];
+    const external: typeof links = [];
+
+    for (const link of links) {
+        if (!link?.resolvedPath) {
+            external.push(link);
+            continue;
+        }
+        if (isDocPath(link.resolvedPath)) {
+            docs.push(link);
+            continue;
+        }
+        if (isCodePath(link.resolvedPath)) {
+            code.push(link);
+            continue;
+        }
+        assets.push(link);
+    }
+
+    return { docs, code, assets, external };
+}
+
+function matchesHeadingPath(candidate: string[], target: string[]): boolean {
+    if (candidate.length !== target.length) return false;
+    return candidate.every((value, idx) => normalizeHeading(value) === normalizeHeading(target[idx]));
+}
+
+function normalizeHeading(value: string): string {
+    return value
+        .toLowerCase()
+        .replace(/\s+/g, " ")
+        .replace(/[#:*_`~]+/g, "")
+        .trim();
+}
+
+function isDocPath(filePath: string): boolean {
+    return /\.(md|mdx)$/i.test(filePath);
+}
+
+function isCodePath(filePath: string): boolean {
+    return /\.(ts|tsx|js|jsx|mjs|cjs|py|go|rs|java|kt|swift|cpp|cc|c|h|hpp|json|yml|yaml)$/i.test(filePath);
+}
+
+function rankSectionsByHeadingPath(
+    outline: Array<{ path: string[] }>,
+    target: string[],
+    limit = 5
+): Array<{ index: number; score: number }> {
+    const scored = outline.map((section, index) => ({
+        index,
+        score: scoreHeadingPath(section.path, target)
+    }));
+    scored.sort((a, b) => b.score - a.score);
+    return scored.slice(0, Math.max(1, limit));
+}
+
+function scoreHeadingPath(candidate: string[], target: string[]): number {
+    const normalizedCandidate = candidate.map(normalizeHeading).filter(Boolean);
+    const normalizedTarget = target.map(normalizeHeading).filter(Boolean);
+    if (normalizedCandidate.length === 0 || normalizedTarget.length === 0) return 0;
+
+    const minLen = Math.min(normalizedCandidate.length, normalizedTarget.length);
+    const maxLen = Math.max(normalizedCandidate.length, normalizedTarget.length);
+    let prefixMatches = 0;
+    let exactMatches = 0;
+    for (let idx = 0; idx < minLen; idx += 1) {
+        if (normalizedCandidate[idx] === normalizedTarget[idx]) {
+            prefixMatches += 1;
+            exactMatches += 1;
+        } else {
+            break;
+        }
+    }
+    for (let idx = prefixMatches; idx < minLen; idx += 1) {
+        if (normalizedCandidate[idx] === normalizedTarget[idx]) {
+            exactMatches += 1;
+        }
+    }
+
+    const candidateSet = new Set(normalizedCandidate);
+    const targetSet = new Set(normalizedTarget);
+    let intersection = 0;
+    for (const value of targetSet) {
+        if (candidateSet.has(value)) intersection += 1;
+    }
+    const union = candidateSet.size + targetSet.size - intersection;
+    const jaccard = union > 0 ? intersection / union : 0;
+
+    const prefixScore = (prefixMatches / maxLen) * 4;
+    const exactScore = exactMatches * 1.5;
+    const overlapScore = jaccard * 3;
+    const tailScore = normalizedCandidate[normalizedCandidate.length - 1] === normalizedTarget[normalizedTarget.length - 1] ? 2 : 0;
+    const lengthPenalty = Math.abs(normalizedCandidate.length - normalizedTarget.length) * 0.5;
+
+    return Math.max(0, prefixScore + exactScore + overlapScore + tailScore - lengthPenalty);
+}
+
+function computeSectionRange(
+    outline: Array<{ level: number; range: { startLine: number; endLine: number } }>,
+    index: number,
+    includeSubsections: boolean
+): { startLine: number; endLine: number } {
+    const startLine = outline[index].range.startLine;
+    if (!includeSubsections) {
+        return outline[index].range;
+    }
+    const level = outline[index].level;
+    let endLine = outline[index].range.endLine;
+    for (let idx = index + 1; idx < outline.length; idx += 1) {
+        if (outline[idx].level <= level) {
+            endLine = outline[idx].range.startLine - 1;
+            break;
+        }
+        endLine = outline[idx].range.endLine;
+    }
+    return { startLine, endLine };
 }
 
 const isDirectRun = (() => {

@@ -22,5 +22,22 @@ Legacy tool names (e.g. `search_project`, `read_code`, `edit_code`) are opt-in; 
 - `smart-context-mcp/docs/agent/TOOL_REFERENCE.md` — pillar reference
 - `smart-context-mcp/docs/guides/getting-started.md` — setup + first flows
 
-**Last Updated:** 2025-12-23
+## Markdown WASM (tree-sitter)
 
+The Markdown parser can use a custom `tree-sitter-markdown.wasm`. A helper CLI builds and installs it from a local grammar repo:
+
+```bash
+npm run build
+node dist/cli/build-markdown-wasm.js --source /path/to/tree-sitter-markdown
+```
+
+Or via npm script:
+
+```bash
+npm run build:markdown-wasm -- --source /path/to/tree-sitter-markdown
+```
+
+Default output is `smart-context-mcp/wasm/tree-sitter-markdown.wasm`. Override with `--out` or `SMART_CONTEXT_WASM_DIR`.  
+If you install the package globally or use `npm link`, the `smart-context-build-markdown-wasm` command will also be available.
+
+**Last Updated:** 2025-12-30
