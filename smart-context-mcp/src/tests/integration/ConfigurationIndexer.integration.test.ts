@@ -72,9 +72,7 @@ describe("ConfigurationManager ↔ IncrementalIndexer integration", () => {
         const manager = new ConfigurationManager(tempDir);
         const { indexer, dependencyGraph, moduleResolver } = createIndexerWithManager(tempDir, manager);
 
-        indexer.start();
-        // chokidar가 초기화될 시간을 조금 준다.
-        await new Promise(resolve => setTimeout(resolve, 200));
+        await indexer.start();
 
         fs.writeFileSync(tsconfigPath, JSON.stringify({ compilerOptions: { strict: false } }, null, 2));
         manager.emit("tsconfigChanged", { filePath: tsconfigPath });

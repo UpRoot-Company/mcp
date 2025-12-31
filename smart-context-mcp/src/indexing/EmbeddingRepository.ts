@@ -22,9 +22,7 @@ export class EmbeddingRepository {
         this.upsertStmt = this.db.prepare(`
             INSERT INTO chunk_embeddings (chunk_id, provider, model, dims, vector_blob, norm, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(chunk_id) DO UPDATE SET
-                provider = excluded.provider,
-                model = excluded.model,
+            ON CONFLICT(chunk_id, provider, model) DO UPDATE SET
                 dims = excluded.dims,
                 vector_blob = excluded.vector_blob,
                 norm = excluded.norm,
