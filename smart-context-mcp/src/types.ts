@@ -395,6 +395,10 @@ export interface EmbeddingConfig {
     provider?: "auto" | EmbeddingProvider;
     normalize?: boolean;
     batchSize?: number;
+    timeoutMs?: number;
+    concurrency?: number;
+    maxQueueSize?: number;
+    modelCacheDir?: string;
     openai?: {
         apiKeyEnv?: string;
         model?: string;

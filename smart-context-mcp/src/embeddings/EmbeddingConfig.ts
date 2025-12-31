@@ -3,12 +3,18 @@ import { EmbeddingConfig, EmbeddingProvider } from "../types.js";
 const DEFAULT_OPENAI_MODEL = "text-embedding-3-small";
 const DEFAULT_LOCAL_MODEL = "Xenova/all-MiniLM-L6-v2";
 const DEFAULT_LOCAL_DIMS = 384;
+const DEFAULT_TIMEOUT_MS = 15_000;
+const DEFAULT_CONCURRENCY = 1;
 
 export function resolveEmbeddingConfigFromEnv(): EmbeddingConfig {
     const providerRaw = process.env.SMART_CONTEXT_EMBEDDING_PROVIDER;
     const provider = normalizeProvider(providerRaw);
     const normalize = process.env.SMART_CONTEXT_EMBEDDING_NORMALIZE !== "false";
     const batchSize = parseOptionalInt(process.env.SMART_CONTEXT_EMBEDDING_BATCH_SIZE);
+    const timeoutMs = parseOptionalInt(process.env.SMART_CONTEXT_EMBEDDING_TIMEOUT_MS) ?? DEFAULT_TIMEOUT_MS;
+    const concurrency = parseOptionalInt(process.env.SMART_CONTEXT_EMBEDDING_CONCURRENCY) ?? DEFAULT_CONCURRENCY;
+    const maxQueueSize = parseOptionalInt(process.env.SMART_CONTEXT_EMBEDDING_MAX_QUEUE_SIZE);
+    const modelCacheDir = process.env.SMART_CONTEXT_MODEL_CACHE_DIR?.trim() || undefined;
     const openaiApiKeyEnv = process.env.SMART_CONTEXT_OPENAI_KEY_ENV ?? "OPENAI_API_KEY";
     const openaiModel = process.env.SMART_CONTEXT_OPENAI_MODEL ?? DEFAULT_OPENAI_MODEL;
     const localModel = process.env.SMART_CONTEXT_LOCAL_EMBEDDING_MODEL ?? DEFAULT_LOCAL_MODEL;
@@ -18,6 +24,10 @@ export function resolveEmbeddingConfigFromEnv(): EmbeddingConfig {
         provider,
         normalize,
         batchSize,
+        timeoutMs,
+        concurrency,
+        maxQueueSize,
+        modelCacheDir,
         openai: {
             apiKeyEnv: openaiApiKeyEnv,
             model: openaiModel

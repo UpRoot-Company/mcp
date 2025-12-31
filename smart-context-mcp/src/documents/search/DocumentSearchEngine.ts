@@ -6,6 +6,7 @@ import { DocumentIndexer } from "../../indexing/DocumentIndexer.js";
 import { EmbeddingConfig, DocumentKind } from "../../types.js";
 import { EmbeddingProviderFactory } from "../../embeddings/EmbeddingProviderFactory.js";
 import * as path from "path";
+import { EmbeddingTimeoutError } from "../../embeddings/EmbeddingQueue.js";
 
 export interface DocumentSearchOptions {
     maxResults?: number;
@@ -183,9 +184,13 @@ export class DocumentSearchEngine {
                     .sort((a, b) => b[1] - a[1])
                     .slice(0, rrfDepth);
                 vectorRankMap = buildRankMap(vectorRanked.map(([id]) => id));
-            } catch {
+            } catch (err: any) {
                 degraded = true;
-                degradationReasons.push("vector_disabled");
+                if (err instanceof EmbeddingTimeoutError) {
+                    degradationReasons.push("embedding_timeout");
+                } else {
+                    degradationReasons.push("vector_disabled");
+                }
                 vectorEnabled = false;
                 vectorScores = new Map();
                 vectorRankMap = new Map();
@@ -346,7 +351,15 @@ export class DocumentSearchEngine {
         limits: { maxChunks: number; maxTimeMs: number }
     ): Promise<{ scores: Map<string, number>; degraded: boolean; reasons: string[] }> {
         const reasons: string[] = [];
-        const [queryVector] = await provider.embed([query]);
+        let queryVector: Float32Array | undefined;
+        try {
+            [queryVector] = await provider.embed([query]);
+        } catch (err: any) {
+            if (err instanceof EmbeddingTimeoutError) {
+                return { scores: new Map(), degraded: true, reasons: ["embedding_timeout"] };
+            }
+            return { scores: new Map(), degraded: true, reasons: ["vector_disabled"] };
+        }
         if (!queryVector) {
             return { scores: new Map(), degraded: true, reasons: ["vector_disabled"] };
         }
@@ -386,7 +399,18 @@ export class DocumentSearchEngine {
                 break;
             }
             const batch = limited.slice(i, i + batchSize);
-            const vectors = await provider.embed(batch.map(chunk => chunk.text));
+            let vectors: Float32Array[];
+            try {
+                vectors = await provider.embed(batch.map(chunk => chunk.text));
+            } catch (err: any) {
+                degraded = true;
+                if (err instanceof EmbeddingTimeoutError) {
+                    reasons.push("embedding_timeout");
+                } else {
+                    reasons.push("vector_disabled");
+                }
+                break;
+            }
             for (let idx = 0; idx < batch.length; idx += 1) {
                 const chunk = batch[idx];
                 const vector = vectors[idx];
