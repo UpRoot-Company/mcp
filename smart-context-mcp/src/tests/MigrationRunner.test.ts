@@ -11,7 +11,7 @@ describe("MigrationRunner", () => {
         runner.run();
 
         const versionRow = db.prepare(`SELECT value FROM metadata WHERE key='schema_version'`).get() as any;
-        expect(versionRow.value).toBe("4");
+        expect(versionRow.value).toBe("5");
 
         const table = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='transaction_log'`).get();
         expect(table).toBeTruthy();
@@ -21,5 +21,14 @@ describe("MigrationRunner", () => {
 
         const chunkEmbeddings = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='chunk_embeddings'`).get();
         expect(chunkEmbeddings).toBeTruthy();
+
+        const evidencePacks = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='evidence_packs'`).get();
+        expect(evidencePacks).toBeTruthy();
+
+        const evidencePackItems = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='evidence_pack_items'`).get();
+        expect(evidencePackItems).toBeTruthy();
+
+        const chunkSummaries = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='chunk_summaries'`).get();
+        expect(chunkSummaries).toBeTruthy();
     });
 });

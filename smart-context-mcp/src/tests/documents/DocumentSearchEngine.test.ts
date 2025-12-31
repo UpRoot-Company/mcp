@@ -13,6 +13,7 @@ import { DocumentSearchEngine } from "../../documents/search/DocumentSearchEngin
 import { PathManager } from "../../utils/PathManager.js";
 import { SymbolIndex } from "../../ast/SymbolIndex.js";
 import { SkeletonGenerator } from "../../ast/SkeletonGenerator.js";
+import { EvidencePackRepository } from "../../indexing/EvidencePackRepository.js";
 
 let tempDir: string;
 
@@ -350,6 +351,72 @@ describe("DocumentSearchEngine", () => {
             includeEvidence: false,
             packId: first.pack!.packId
         });
+        expect(second.pack?.hit).toBe(true);
+        expect(second.results).toEqual(first.results);
+
+        indexDatabase.close();
+        await searchEngine.dispose();
+        fs.rmSync(rootDir, { recursive: true, force: true });
+    });
+
+    it("reuses persisted results via packId across engine instances (SQLite evidence pack)", async () => {
+        const rootDir = setupWorkspace();
+        const fileSystem = new NodeFileSystem(rootDir);
+        const indexDatabase = new IndexDatabase(rootDir);
+        const embeddingRepository = new EmbeddingRepository(indexDatabase);
+        const documentIndexer = new DocumentIndexer(rootDir, fileSystem, indexDatabase, {
+            embeddingRepository
+        });
+        await documentIndexer.indexFile("docs/guide.md");
+        await documentIndexer.indexFile("docs/faq.md");
+
+        const packs = new EvidencePackRepository(indexDatabase);
+        const searchEngine = new SearchEngine(rootDir, fileSystem);
+
+        const engineA = new DocumentSearchEngine(
+            searchEngine,
+            documentIndexer,
+            new DocumentChunkRepository(indexDatabase),
+            embeddingRepository,
+            new EmbeddingProviderFactory({
+                provider: "local",
+                normalize: true,
+                local: { model: "hash-test", dims: 64 }
+            }),
+            rootDir,
+            undefined,
+            packs
+        );
+
+        const first = await engineA.search("install", {
+            output: "compact",
+            includeEvidence: false
+        });
+        expect(first.pack?.packId).toBeTruthy();
+        expect(first.pack?.hit).toBe(false);
+
+        // New engine instance (empty in-memory cache), same DB.
+        const engineB = new DocumentSearchEngine(
+            searchEngine,
+            documentIndexer,
+            new DocumentChunkRepository(indexDatabase),
+            embeddingRepository,
+            new EmbeddingProviderFactory({
+                provider: "local",
+                normalize: true,
+                local: { model: "hash-test", dims: 64 }
+            }),
+            rootDir,
+            undefined,
+            packs
+        );
+
+        const second = await engineB.search("install", {
+            output: "compact",
+            includeEvidence: false,
+            packId: first.pack!.packId
+        });
+
         expect(second.pack?.hit).toBe(true);
         expect(second.results).toEqual(first.results);
 

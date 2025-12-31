@@ -33,6 +33,7 @@ import { IncrementalIndexer } from "./indexing/IncrementalIndexer.js";
 import { DocumentIndexer } from "./indexing/DocumentIndexer.js";
 import { EmbeddingRepository } from "./indexing/EmbeddingRepository.js";
 import { DocumentChunkRepository } from "./indexing/DocumentChunkRepository.js";
+import { EvidencePackRepository } from "./indexing/EvidencePackRepository.js";
 import { TransactionLog } from "./engine/TransactionLog.js";
 import { ConfigurationManager } from "./config/ConfigurationManager.js";
 import { PathManager } from "./utils/PathManager.js";
@@ -171,7 +172,8 @@ export class SmartContextServer {
             this.embeddingRepository,
             this.embeddingProviderFactory,
             this.rootPath,
-            this.symbolIndex
+            this.symbolIndex,
+            new EvidencePackRepository(this.indexDatabase)
         );
         this.clusterSearchEngine = new ClusterSearchEngine({
             rootPath: this.rootPath,

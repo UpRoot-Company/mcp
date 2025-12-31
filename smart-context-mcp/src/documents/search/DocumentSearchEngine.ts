@@ -9,6 +9,7 @@ import * as path from "path";
 import { EmbeddingTimeoutError } from "../../embeddings/EmbeddingQueue.js";
 import { LRUCache } from "lru-cache";
 import * as crypto from "crypto";
+import { EvidencePackRepository, computeRootFingerprint, type StoredEvidencePack } from "../../indexing/EvidencePackRepository.js";
 
 export interface DocumentSearchOptions {
     output?: "full" | "compact" | "pack_only";
@@ -79,7 +80,8 @@ export class DocumentSearchEngine {
         private readonly embeddingRepository: EmbeddingRepository,
         private readonly embeddingFactory: EmbeddingProviderFactory,
         private readonly rootPath: string,
-        private readonly symbolIndex?: { getSymbolsForFile(filePath: string): Promise<unknown> }
+        private readonly symbolIndex?: { getSymbolsForFile(filePath: string): Promise<unknown> },
+        private readonly evidencePacks?: EvidencePackRepository
     ) {
         const max = Number.parseInt(process.env.SMART_CONTEXT_EVIDENCE_PACK_CACHE_SIZE ?? "50", 10);
         this.packCache = new LRUCache({ max: Number.isFinite(max) && max > 0 ? max : 50 });
@@ -163,6 +165,24 @@ export class DocumentSearchEngine {
             this.packCache.delete(effectivePackId);
         }
 
+        // Persistent pack lookup (Phase 2): enables reuse across engine instances.
+        if (this.evidencePacks) {
+            const stored = this.evidencePacks.getPack(effectivePackId);
+            if (stored && stored.rootFingerprint === computeRootFingerprint(this.rootPath)) {
+                const stale = await this.isPackStale(stored.items);
+                if (!stale) {
+                const responseFromDb = this.hydrateResponseFromPack(stored, output, includeEvidence);
+                const createdAt = stored.createdAt;
+                const expiresAt = stored.expiresAt;
+                this.packCache.set(effectivePackId, { response: responseFromDb, createdAt, expiresAt });
+                return {
+                    ...responseFromDb,
+                    pack: { packId: effectivePackId, hit: true, createdAt, expiresAt }
+                };
+            }
+        }
+        }
+
         const candidateFiles = await this.collectCandidateFiles(query, maxCandidates, options.includeComments === true);
         let chunks = await this.collectChunks(candidateFiles, options.includeComments === true);
         const initialChunkCount = chunks.length;
@@ -202,6 +222,22 @@ export class DocumentSearchEngine {
             const createdAt = Date.now();
             const expiresAt = Number.isFinite(packTtlMs) && packTtlMs > 0 ? createdAt + packTtlMs : undefined;
             this.packCache.set(effectivePackId, { response, createdAt, expiresAt });
+            if (this.evidencePacks) {
+                try {
+                    this.evidencePacks.upsertPack({
+                        packId: effectivePackId,
+                        query,
+                        createdAt,
+                        expiresAt,
+                        rootFingerprint: computeRootFingerprint(this.rootPath),
+                        options: { ...options, output, includeEvidence, snippetLength, maxEvidenceChars, maxEvidenceSections, maxResults },
+                        meta: { degraded: response.degraded, reason: response.reason, reasons: response.reasons, provider: response.provider, stats: response.stats as any },
+                        items: []
+                    });
+                } catch {
+                    // best-effort
+                }
+            }
             return {
                 ...response,
                 pack: { packId: effectivePackId, hit: false, createdAt, expiresAt }
@@ -352,10 +388,164 @@ export class DocumentSearchEngine {
         const createdAt = Date.now();
         const expiresAt = Number.isFinite(packTtlMs) && packTtlMs > 0 ? createdAt + packTtlMs : undefined;
         this.packCache.set(effectivePackId, { response, createdAt, expiresAt });
+        if (this.evidencePacks) {
+            try {
+                const storedItems = this.toStoredItems(results, evidence, includeEvidence, chunks, bm25ScoreMap, vectorScores, vectorEnabled);
+                this.evidencePacks.upsertPack({
+                    packId: effectivePackId,
+                    query,
+                    createdAt,
+                    expiresAt,
+                    rootFingerprint: computeRootFingerprint(this.rootPath),
+                    options: { ...options, output, includeEvidence, snippetLength, maxEvidenceChars, maxEvidenceSections, maxResults },
+                    meta: { degraded: response.degraded, reason: response.reason, reasons: response.reasons, provider: response.provider, stats: response.stats as any },
+                    items: storedItems
+                });
+            } catch {
+                // best-effort
+            }
+        }
         return {
             ...response,
             pack: { packId: effectivePackId, hit: false, createdAt, expiresAt }
         };
+    }
+
+    private hydrateResponseFromPack(
+        pack: StoredEvidencePack,
+        output: "full" | "compact" | "pack_only",
+        includeEvidence: boolean
+    ): DocumentSearchResponse {
+        const items = pack.items ?? [];
+        const results = items.filter(i => i.role === "result").map(i => ({
+            id: i.chunkId,
+            filePath: i.filePath,
+            kind: i.kind,
+            sectionPath: i.sectionPath,
+            heading: i.heading,
+            headingLevel: i.headingLevel,
+            range: i.range,
+            preview: output === "pack_only" ? "" : i.preview,
+            scores: i.scores ?? { bm25: 0, final: 0 }
+        }));
+        const evidence = includeEvidence
+            ? items.filter(i => i.role === "evidence").map(i => ({
+                id: i.chunkId,
+                filePath: i.filePath,
+                kind: i.kind,
+                sectionPath: i.sectionPath,
+                heading: i.heading,
+                headingLevel: i.headingLevel,
+                range: i.range,
+                preview: output === "pack_only" ? "" : i.preview,
+                scores: i.scores ?? { bm25: 0, final: 0 }
+            }))
+            : undefined;
+
+        const meta = pack.meta ?? {};
+        const fallbackStats: DocumentSearchResponse["stats"] = {
+            candidateFiles: 0,
+            candidateChunks: 0,
+            vectorEnabled: false,
+            mmrApplied: false,
+            evidenceSections: evidence?.length ?? 0,
+            evidenceChars: (evidence ?? []).reduce((sum: number, s: any) => sum + (s.preview?.length ?? 0), 0),
+            evidenceTruncated: false
+        };
+        const stats = {
+            ...fallbackStats,
+            ...(meta.stats as any)
+        } as DocumentSearchResponse["stats"];
+
+        return {
+            query: pack.query,
+            results,
+            evidence,
+            degraded: meta.degraded ?? false,
+            reason: meta.reason,
+            reasons: meta.reasons,
+            provider: meta.provider ?? null,
+            stats
+        };
+    }
+
+    private toStoredItems(
+        results: DocumentSearchSection[],
+        evidence: DocumentSearchSection[] | undefined,
+        includeEvidence: boolean,
+        chunks: StoredDocumentChunk[],
+        bm25ScoreMap: Map<string, number>,
+        vectorScores: Map<string, number>,
+        vectorEnabled: boolean
+    ) {
+        const byId = new Map(chunks.map(c => [c.id, c]));
+        const out: any[] = [];
+        let rank = 0;
+        for (const r of results) {
+            rank += 1;
+            const chunk = byId.get(r.id);
+            out.push({
+                role: "result",
+                rank,
+                chunkId: r.id,
+                filePath: r.filePath,
+                kind: r.kind,
+                sectionPath: r.sectionPath,
+                heading: r.heading,
+                headingLevel: r.headingLevel,
+                range: r.range,
+                preview: r.preview ?? "",
+                scores: {
+                    bm25: bm25ScoreMap.get(r.id) ?? 0,
+                    vector: vectorEnabled ? vectorScores.get(r.id) : undefined,
+                    final: r.scores?.final ?? 0
+                },
+                snapshot: { contentHash: chunk?.contentHash, updatedAt: chunk?.updatedAt }
+            });
+        }
+        if (includeEvidence && Array.isArray(evidence)) {
+            let eRank = 0;
+            for (const e of evidence) {
+                eRank += 1;
+                const chunk = byId.get(e.id);
+                out.push({
+                    role: "evidence",
+                    rank: eRank,
+                    chunkId: e.id,
+                    filePath: e.filePath,
+                    kind: e.kind,
+                    sectionPath: e.sectionPath,
+                    heading: e.heading,
+                    headingLevel: e.headingLevel,
+                    range: e.range,
+                    preview: e.preview ?? "",
+                    scores: {
+                        bm25: bm25ScoreMap.get(e.id) ?? 0,
+                        vector: vectorEnabled ? vectorScores.get(e.id) : undefined,
+                        final: e.scores?.final ?? 0
+                    },
+                    snapshot: { contentHash: chunk?.contentHash, updatedAt: chunk?.updatedAt }
+                });
+            }
+        }
+        return out;
+    }
+
+    private async isPackStale(items: Array<{ chunkId: string; snapshot?: { contentHash?: string } }>): Promise<boolean> {
+        const pairs = items
+            .map(item => ({ id: item.chunkId, hash: item.snapshot?.contentHash }))
+            .filter(p => Boolean(p.id) && Boolean(p.hash)) as Array<{ id: string; hash: string }>;
+        if (pairs.length === 0) return false;
+        // Fast path: if the chunk still has the same content_hash, pack is fresh.
+        for (const { id, hash } of pairs) {
+            try {
+                const current = this.chunkRepository.getContentHashByChunkId(id);
+                if (current && current !== hash) return true;
+            } catch {
+                // ignore
+            }
+        }
+        return false;
     }
 
     private async collectCandidateFiles(query: string, maxCandidates: number, includeComments: boolean): Promise<string[]> {
