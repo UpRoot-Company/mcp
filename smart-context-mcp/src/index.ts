@@ -48,6 +48,7 @@ import { CallSiteAnalyzer } from "./ast/analysis/CallSiteAnalyzer.js";
 import { HotSpotDetector } from "./engine/ClusterSearch/HotSpotDetector.js";
 import { ReferenceFinder } from "./ast/ReferenceFinder.js";
 import { DocumentProfiler } from "./documents/DocumentProfiler.js";
+import { extractHtmlTextPreserveLines } from "./documents/html/HtmlTextExtractor.js";
 import { DocumentSearchEngine } from "./documents/search/DocumentSearchEngine.js";
 import { EmbeddingProviderFactory } from "./embeddings/EmbeddingProviderFactory.js";
 import { resolveEmbeddingConfigFromEnv } from "./embeddings/EmbeddingConfig.js";
@@ -168,7 +169,9 @@ export class SmartContextServer {
             this.documentIndexer,
             new DocumentChunkRepository(this.indexDatabase),
             this.embeddingRepository,
-            this.embeddingProviderFactory
+            this.embeddingProviderFactory,
+            this.rootPath,
+            this.symbolIndex
         );
         this.clusterSearchEngine = new ClusterSearchEngine({
             rootPath: this.rootPath,
@@ -1143,7 +1146,10 @@ export class SmartContextServer {
         const section = outline[sectionIndex];
         const range = computeSectionRange(outline, sectionIndex, includeSubsections);
         const lines = content.split(/\r?\n/);
-        const sectionContent = lines.slice(range.startLine - 1, range.endLine).join("\n");
+        const rawSectionContent = lines.slice(range.startLine - 1, range.endLine).join("\n");
+        const sectionContent = profile.kind === "html"
+            ? extractHtmlTextPreserveLines(rawSectionContent)
+            : rawSectionContent;
         const status = reasons.includes("closest_match") ? "closest_match" : "success";
 
         return {
@@ -1156,6 +1162,7 @@ export class SmartContextServer {
                 range: { ...section.range, startLine: range.startLine, endLine: range.endLine }
             },
             content: sectionContent,
+            rawContent: args?.includeRaw === true ? rawSectionContent : undefined,
             resolvedHeadingPath: section.path,
             requestedHeadingPath: headingPath ?? undefined,
             ...buildDegradation(reasons)
@@ -1195,14 +1202,25 @@ export class SmartContextServer {
             mmrLambda: args?.mmrLambda,
             maxChunksEmbeddedPerRequest: args?.maxChunksEmbeddedPerRequest,
             maxEmbeddingTimeMs: args?.maxEmbeddingTimeMs,
-            embedding: args?.embedding
+            embedding: args?.embedding,
+            includeComments: args?.includeComments === true
         });
     }
 
-    private inferDocumentKind(filePath: string): "markdown" | "mdx" | "text" | "unknown" {
+    private inferDocumentKind(filePath: string): "markdown" | "mdx" | "html" | "css" | "text" | "unknown" {
+        const base = path.basename(filePath);
+        if (base === "README" || base === "LICENSE" || base === "NOTICE" || base === "CHANGELOG" || base === "CODEOWNERS") {
+            return "text";
+        }
+        if (base === ".gitignore" || base === ".mcpignore" || base === ".editorconfig") {
+            return "text";
+        }
         const ext = path.extname(filePath).toLowerCase();
         if (ext === ".mdx") return "mdx";
         if (ext === ".md") return "markdown";
+        if (ext === ".html" || ext === ".htm") return "html";
+        if (ext === ".css") return "css";
+        if (ext === ".txt") return "text";
         return "unknown";
     }
 

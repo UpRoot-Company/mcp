@@ -329,7 +329,7 @@ export interface Document {
     symbolId?: string;
 }
 
-export type DocumentKind = "markdown" | "mdx" | "text" | "unknown";
+export type DocumentKind = "markdown" | "mdx" | "html" | "css" | "text" | "code_comment" | "unknown";
 
 export interface DocumentSection {
     id: string;

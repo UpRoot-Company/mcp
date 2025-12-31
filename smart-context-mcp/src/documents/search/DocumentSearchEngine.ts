@@ -5,6 +5,7 @@ import { EmbeddingRepository } from "../../indexing/EmbeddingRepository.js";
 import { DocumentIndexer } from "../../indexing/DocumentIndexer.js";
 import { EmbeddingConfig, DocumentKind } from "../../types.js";
 import { EmbeddingProviderFactory } from "../../embeddings/EmbeddingProviderFactory.js";
+import * as path from "path";
 
 export interface DocumentSearchOptions {
     maxResults?: number;
@@ -22,6 +23,7 @@ export interface DocumentSearchOptions {
     maxChunksEmbeddedPerRequest?: number;
     maxEmbeddingTimeMs?: number;
     embedding?: EmbeddingConfig;
+    includeComments?: boolean;
 }
 
 export interface DocumentSearchSection {
@@ -58,7 +60,9 @@ export class DocumentSearchEngine {
         private readonly documentIndexer: DocumentIndexer,
         private readonly chunkRepository: DocumentChunkRepository,
         private readonly embeddingRepository: EmbeddingRepository,
-        private readonly embeddingFactory: EmbeddingProviderFactory
+        private readonly embeddingFactory: EmbeddingProviderFactory,
+        private readonly rootPath: string,
+        private readonly symbolIndex?: { getSymbolsForFile(filePath: string): Promise<unknown> }
     ) {}
 
     public async search(query: string, options: DocumentSearchOptions = {}): Promise<DocumentSearchResponse> {
@@ -93,8 +97,8 @@ export class DocumentSearchEngine {
         const maxChunksEmbeddedPerRequest = options.maxChunksEmbeddedPerRequest ?? 32;
         const maxEmbeddingTimeMs = options.maxEmbeddingTimeMs ?? 2500;
 
-        const candidateFiles = await this.collectCandidateFiles(query, maxCandidates);
-        let chunks = await this.collectChunks(candidateFiles);
+        const candidateFiles = await this.collectCandidateFiles(query, maxCandidates, options.includeComments === true);
+        let chunks = await this.collectChunks(candidateFiles, options.includeComments === true);
         const initialChunkCount = chunks.length;
 
         if (chunks.length > maxChunkCandidates) {
@@ -236,10 +240,30 @@ export class DocumentSearchEngine {
         };
     }
 
-    private async collectCandidateFiles(query: string, maxCandidates: number): Promise<string[]> {
+    private async collectCandidateFiles(query: string, maxCandidates: number, includeComments: boolean): Promise<string[]> {
+        const includeGlobs = [
+            "**/*.md",
+            "**/*.mdx",
+            "**/*.txt",
+            "**/*.html",
+            "**/*.htm",
+            "**/*.css",
+            "**/README",
+            "**/LICENSE",
+            "**/NOTICE",
+            "**/CHANGELOG",
+            "**/CODEOWNERS",
+            "**/.gitignore",
+            "**/.mcpignore",
+            "**/.editorconfig"
+        ];
+        if (includeComments) {
+            includeGlobs.push("**/*.ts", "**/*.tsx", "**/*.js", "**/*.jsx", "**/*.py");
+        }
+
         const scoutResults = await this.searchEngine.scout({
             query,
-            includeGlobs: ["**/*.md", "**/*.mdx"],
+            includeGlobs,
             maxResults: maxCandidates,
             groupByFile: true,
             deduplicateByContent: true
@@ -253,13 +277,18 @@ export class DocumentSearchEngine {
         return Array.from(new Set(filenameFallback.map(result => result.path)));
     }
 
-    private async collectChunks(filePaths: string[]): Promise<StoredDocumentChunk[]> {
+    private async collectChunks(filePaths: string[], includeComments: boolean): Promise<StoredDocumentChunk[]> {
         const chunks: StoredDocumentChunk[] = [];
         for (const filePath of filePaths) {
             let stored = this.chunkRepository.listChunksForFile(filePath);
             if (stored.length === 0) {
                 try {
-                    await this.documentIndexer.indexFile(filePath);
+                    if (includeComments && this.symbolIndex && isCodeFile(filePath)) {
+                        const abs = path.resolve(this.rootPath, filePath);
+                        await this.symbolIndex.getSymbolsForFile(abs);
+                    } else {
+                        await this.documentIndexer.indexFile(filePath);
+                    }
                     stored = this.chunkRepository.listChunksForFile(filePath);
                 } catch {
                     stored = [];
@@ -460,6 +489,11 @@ function cosineSimilarity(a: Float32Array, b: Float32Array): number {
     }
     if (normA === 0 || normB === 0) return 0;
     return dot / (Math.sqrt(normA) * Math.sqrt(normB));
+}
+
+function isCodeFile(filePath: string): boolean {
+    const ext = path.extname(filePath).toLowerCase();
+    return ext === ".ts" || ext === ".tsx" || ext === ".js" || ext === ".jsx" || ext === ".py";
 }
 
 function l2Norm(vector: Float32Array): number {

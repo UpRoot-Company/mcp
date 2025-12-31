@@ -96,7 +96,7 @@ export class HeadingChunker {
         return {
             id: hash(`${args.filePath}\n${args.sectionPath.join(" > ")}\n${args.startLine}:${args.endLine}\n${args.ordinal}`),
             filePath: args.filePath,
-            kind: args.kind === "mdx" ? "mdx" : "markdown",
+            kind: args.kind,
             sectionPath: args.sectionPath,
             heading: args.heading,
             headingLevel: args.headingLevel,

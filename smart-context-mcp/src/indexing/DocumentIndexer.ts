@@ -1,4 +1,5 @@
 import * as path from "path";
+import * as fs from "fs";
 import ignore from "ignore";
 import { IFileSystem } from "../platform/FileSystem.js";
 import { IndexDatabase } from "./IndexDatabase.js";
@@ -8,8 +9,23 @@ import { HeadingChunker } from "../documents/chunking/HeadingChunker.js";
 import { DocumentKind, DocumentOutlineOptions } from "../types.js";
 import { EmbeddingRepository } from "./EmbeddingRepository.js";
 import { EmbeddingProviderFactory } from "../embeddings/EmbeddingProviderFactory.js";
+import { extractHtmlTextPreserveLines } from "../documents/html/HtmlTextExtractor.js";
 
-const SUPPORTED_DOC_EXTENSIONS = new Set<string>([".md", ".mdx"]);
+const SUPPORTED_DOC_EXTENSIONS = new Set<string>([".md", ".mdx", ".txt", ".html", ".htm", ".css"]);
+const WELL_KNOWN_TEXT_FILES = new Set<string>([
+    "README",
+    "LICENSE",
+    "NOTICE",
+    "CHANGELOG",
+    "CODEOWNERS",
+    ".gitignore",
+    ".mcpignore",
+    ".editorconfig"
+]);
+
+const DEFAULT_MAX_FILE_BYTES = 2_000_000; // 2MB
+const DEFAULT_SAMPLE_HEAD_BYTES = 600_000;
+const DEFAULT_SAMPLE_TAIL_BYTES = 300_000;
 
 export class DocumentIndexer {
     private ignoreFilter: ReturnType<typeof ignore.default> = (ignore as unknown as () => any)();
@@ -44,6 +60,8 @@ export class DocumentIndexer {
     }
 
     public isSupported(filePath: string): boolean {
+        const base = path.basename(filePath);
+        if (WELL_KNOWN_TEXT_FILES.has(base)) return true;
         const ext = path.extname(filePath).toLowerCase();
         return SUPPORTED_DOC_EXTENSIONS.has(ext);
     }
@@ -61,20 +79,21 @@ export class DocumentIndexer {
         if (this.shouldIgnore(relativePath)) return;
 
         const stats = await this.fileSystem.stat(relativePath);
-        const content = await this.fileSystem.readFile(relativePath);
         const kind = inferKind(relativePath);
+        const rawContent = await this.readDocumentContent(relativePath, stats.size);
+        const contentForChunking = kind === "html" ? extractHtmlTextPreserveLines(rawContent) : rawContent;
 
         const fileRecord = this.indexDatabase.getOrCreateFile(relativePath, stats.mtime, kind);
         this.embeddingRepository?.deleteEmbeddingsForFileId(fileRecord.id);
 
         const profile = this.profiler.profile({
             filePath: relativePath,
-            content,
+            content: rawContent,
             kind,
             options: this.outlineOptions
         });
 
-        const chunks = this.chunker.chunk(relativePath, kind, profile.outline, content, this.outlineOptions);
+        const chunks = this.chunker.chunk(relativePath, kind, profile.outline, contentForChunking, this.outlineOptions);
         const stored = chunks.map(chunk => ({
             ...chunk,
             filePath: relativePath
@@ -117,6 +136,56 @@ export class DocumentIndexer {
         return relative || ".";
     }
 
+    private async readDocumentContent(relativePath: string, sizeBytes: number): Promise<string> {
+        const maxBytes = Number(process.env.SMART_CONTEXT_DOC_MAX_FILE_BYTES ?? DEFAULT_MAX_FILE_BYTES);
+        const headBytes = Number(process.env.SMART_CONTEXT_DOC_SAMPLE_HEAD_BYTES ?? DEFAULT_SAMPLE_HEAD_BYTES);
+        const tailBytes = Number(process.env.SMART_CONTEXT_DOC_SAMPLE_TAIL_BYTES ?? DEFAULT_SAMPLE_TAIL_BYTES);
+
+        let content: string;
+        if (Number.isFinite(maxBytes) && maxBytes > 0 && sizeBytes > maxBytes) {
+            content = await this.readSampledUtf8(relativePath, Math.max(1, headBytes), Math.max(0, tailBytes));
+        } else {
+            content = await this.fileSystem.readFile(relativePath);
+        }
+        return content;
+    }
+
+    private async readSampledUtf8(relativePath: string, headBytes: number, tailBytes: number): Promise<string> {
+        // Best-effort sampling: use fs when possible (NodeFileSystem), fall back to full read otherwise.
+        try {
+            const absPath = path.resolve(this.rootPath, relativePath);
+            const handle = await fs.promises.open(absPath, "r");
+            try {
+                const stat = await handle.stat();
+                const size = stat.size;
+                const headLen = Math.min(headBytes, size);
+                const tailLen = Math.min(tailBytes, Math.max(0, size - headLen));
+
+                const head = Buffer.alloc(headLen);
+                await handle.read(head, 0, headLen, 0);
+
+                let tailText = "";
+                if (tailLen > 0) {
+                    const tail = Buffer.alloc(tailLen);
+                    await handle.read(tail, 0, tailLen, size - tailLen);
+                    tailText = tail.toString("utf8");
+                }
+
+                const marker = `\n[[sampling_applied bytes=${size} head=${headLen} tail=${tailLen}]]\n`;
+                return `${head.toString("utf8")}${marker}${tailText}`;
+            } finally {
+                await handle.close();
+            }
+        } catch {
+            const full = await this.fileSystem.readFile(relativePath);
+            const marker = `\n[[sampling_applied]]\n`;
+            if (full.length <= headBytes + tailBytes) return full;
+            const head = full.slice(0, headBytes);
+            const tail = tailBytes > 0 ? full.slice(-tailBytes) : "";
+            return `${head}${marker}${tail}`;
+        }
+    }
+
     private shouldEagerEmbed(): boolean {
         return process.env.SMART_CONTEXT_DOCS_EMBEDDINGS_EAGER === "true";
     }
@@ -152,8 +221,13 @@ export class DocumentIndexer {
 
 function inferKind(filePath: string): DocumentKind {
     const ext = path.extname(filePath).toLowerCase();
+    if (ext === ".html" || ext === ".htm") return "html";
+    if (ext === ".css") return "css";
     if (ext === ".mdx") return "mdx";
     if (ext === ".md") return "markdown";
+    if (ext === ".txt") return "text";
+    const base = path.basename(filePath);
+    if (WELL_KNOWN_TEXT_FILES.has(base)) return "text";
     return "unknown";
 }
 
