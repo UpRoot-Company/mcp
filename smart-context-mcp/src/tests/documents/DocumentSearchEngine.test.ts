@@ -728,12 +728,16 @@ describe("DocumentSearchEngine", () => {
         const embeddingRepository = new EmbeddingRepository(indexDatabase);
         const documentIndexer = new DocumentIndexer(rootDir, fileSystem, indexDatabase, { embeddingRepository });
         await documentIndexer.indexFile("logs/app.log");
+        const chunkRepo = new DocumentChunkRepository(indexDatabase);
+        const logChunks = chunkRepo.listChunksForFile("logs/app.log");
+        expect(logChunks.length).toBeGreaterThan(1);
+        expect(logChunks.some(chunk => chunk.text.includes("install failed"))).toBe(true);
 
         const searchEngine = new SearchEngine(rootDir, fileSystem);
         const engine = new DocumentSearchEngine(
             searchEngine,
             documentIndexer,
-            new DocumentChunkRepository(indexDatabase),
+            chunkRepo,
             embeddingRepository,
             new EmbeddingProviderFactory({
                 provider: "local",

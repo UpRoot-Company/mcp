@@ -1,5 +1,6 @@
 import * as path from "path";
 import * as fs from "fs";
+import * as crypto from "crypto";
 import ignore from "ignore";
 import { IFileSystem } from "../platform/FileSystem.js";
 import { IndexDatabase } from "./IndexDatabase.js";
@@ -86,6 +87,7 @@ export class DocumentIndexer {
         const isDocx = ext === ".docx";
         const isXlsx = ext === ".xlsx";
         const isPdf = ext === ".pdf";
+        const isLog = ext === ".log";
         const kind = isDocx ? "html" : (isXlsx || isPdf ? "text" : inferKind(relativePath));
         let rawContent = "";
         if (isDocx) {
@@ -125,19 +127,23 @@ export class DocumentIndexer {
 
         const fileRecord = this.indexDatabase.getOrCreateFile(relativePath, stats.mtime, kind);
         this.embeddingRepository?.deleteEmbeddingsForFileId(fileRecord.id);
+        let stored: StoredDocumentChunk[];
+        if (isLog) {
+            stored = this.buildLogChunks(relativePath, contentForChunking);
+        } else {
+            const profile = this.profiler.profile({
+                filePath: relativePath,
+                content: rawContent,
+                kind,
+                options: this.outlineOptions
+            });
 
-        const profile = this.profiler.profile({
-            filePath: relativePath,
-            content: rawContent,
-            kind,
-            options: this.outlineOptions
-        });
-
-        const chunks = this.chunker.chunk(relativePath, kind, profile.outline, contentForChunking, this.outlineOptions);
-        const stored = chunks.map(chunk => ({
-            ...chunk,
-            filePath: relativePath
-        })) as StoredDocumentChunk[];
+            const chunks = this.chunker.chunk(relativePath, kind, profile.outline, contentForChunking, this.outlineOptions);
+            stored = chunks.map(chunk => ({
+                ...chunk,
+                filePath: relativePath
+            })) as StoredDocumentChunk[];
+        }
 
         this.chunkRepo.upsertChunksForFile(relativePath, stored);
         if (this.shouldEagerEmbed()) {
@@ -228,6 +234,52 @@ export class DocumentIndexer {
 
     private shouldEagerEmbed(): boolean {
         return process.env.SMART_CONTEXT_DOCS_EMBEDDINGS_EAGER === "true";
+    }
+
+    private buildLogChunks(filePath: string, content: string): StoredDocumentChunk[] {
+        const lines = content.split(/\r?\n/);
+        const lineOffsets: number[] = [];
+        let offset = 0;
+        for (const line of lines) {
+            lineOffsets.push(offset);
+            offset += line.length + 1;
+        }
+
+        const chunks: StoredDocumentChunk[] = [];
+        const sectionPath = [path.basename(filePath)];
+        const now = Date.now();
+
+        for (let index = 0; index < lines.length; index += 1) {
+            const line = lines[index] ?? "";
+            if (!line.trim()) continue;
+            const startLine = index + 1;
+            const startByte = lineOffsets[index] ?? 0;
+            const endByte = startByte + line.length;
+            const text = line;
+            chunks.push({
+                id: this.hash(`${filePath}\nlog\n${startLine}:${startLine}`),
+                filePath,
+                kind: "text",
+                sectionPath,
+                heading: null,
+                headingLevel: null,
+                range: {
+                    startLine,
+                    endLine: startLine,
+                    startByte,
+                    endByte
+                },
+                text,
+                contentHash: this.hash(text),
+                updatedAt: now
+            });
+        }
+
+        return chunks;
+    }
+
+    private hash(value: string): string {
+        return crypto.createHash("sha256").update(value).digest("hex");
     }
 
     private async embedChunks(chunks: StoredDocumentChunk[]): Promise<void> {
