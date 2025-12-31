@@ -63,6 +63,8 @@ export class EvidencePackRepository {
     private readonly insertItemStmt: Database.Statement;
     private readonly selectPackStmt: Database.Statement;
     private readonly selectItemsStmt: Database.Statement;
+    private readonly upsertSummaryStmt: Database.Statement;
+    private readonly selectSummaryStmt: Database.Statement;
 
     constructor(private readonly indexDb: IndexDatabase) {
         this.db = indexDb.getHandle();
@@ -122,6 +124,19 @@ export class EvidencePackRepository {
             FROM evidence_pack_items
             WHERE pack_id = ?
             ORDER BY role ASC, rank ASC
+        `);
+
+        this.upsertSummaryStmt = this.db.prepare(`
+            INSERT INTO chunk_summaries (chunk_id, style, summary, created_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(chunk_id, style) DO UPDATE SET
+                summary = excluded.summary,
+                created_at = excluded.created_at
+        `);
+        this.selectSummaryStmt = this.db.prepare(`
+            SELECT summary
+            FROM chunk_summaries
+            WHERE chunk_id = ? AND style = ?
         `);
     }
 
@@ -238,6 +253,20 @@ export class EvidencePackRepository {
             items
         };
     }
+
+    public getSummary(chunkId: string, style: "preview" | "summary" = "preview"): string | null {
+        if (!chunkId) return null;
+        const row = this.selectSummaryStmt.get(chunkId, style) as { summary?: string } | undefined;
+        const value = row?.summary;
+        return typeof value === "string" && value.trim().length > 0 ? value : null;
+    }
+
+    public upsertSummary(chunkId: string, style: "preview" | "summary", summary: string): void {
+        if (!chunkId) return;
+        const normalized = String(summary ?? "").trim();
+        if (!normalized) return;
+        this.upsertSummaryStmt.run(chunkId, style, normalized, Date.now());
+    }
 }
 
 export function computeRootFingerprint(rootPath: string): string {
@@ -252,4 +281,3 @@ function safeParseJson<T>(value: string, fallback: T): T {
         return fallback;
     }
 }
-

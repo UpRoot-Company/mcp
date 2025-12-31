@@ -424,4 +424,45 @@ describe("DocumentSearchEngine", () => {
         await searchEngine.dispose();
         fs.rmSync(rootDir, { recursive: true, force: true });
     });
+
+    it("stores and reuses chunk preview summaries (chunk_summaries)", async () => {
+        const rootDir = setupWorkspace();
+        const fileSystem = new NodeFileSystem(rootDir);
+        const indexDatabase = new IndexDatabase(rootDir);
+        const embeddingRepository = new EmbeddingRepository(indexDatabase);
+        const documentIndexer = new DocumentIndexer(rootDir, fileSystem, indexDatabase, { embeddingRepository });
+        await documentIndexer.indexFile("docs/guide.md");
+
+        const packs = new EvidencePackRepository(indexDatabase);
+        const searchEngine = new SearchEngine(rootDir, fileSystem);
+        const engine = new DocumentSearchEngine(
+            searchEngine,
+            documentIndexer,
+            new DocumentChunkRepository(indexDatabase),
+            embeddingRepository,
+            new EmbeddingProviderFactory({
+                provider: "local",
+                normalize: true,
+                local: { model: "hash-test", dims: 64 }
+            }),
+            rootDir,
+            undefined,
+            packs
+        );
+
+        const first = await engine.search("install", { output: "compact", includeEvidence: false });
+        const firstChunkId = first.results[0]?.id;
+        expect(firstChunkId).toBeTruthy();
+
+        const stored = packs.getSummary(firstChunkId!, "preview");
+        expect(stored).toBeTruthy();
+
+        // Second query should reuse the stored preview (not assert exact content, just non-empty).
+        const second = await engine.search("install", { output: "compact", includeEvidence: false });
+        expect(second.results[0]?.preview).toBeTruthy();
+
+        indexDatabase.close();
+        await searchEngine.dispose();
+        fs.rmSync(rootDir, { recursive: true, force: true });
+    });
 });

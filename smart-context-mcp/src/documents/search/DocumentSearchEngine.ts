@@ -10,6 +10,7 @@ import { EmbeddingTimeoutError } from "../../embeddings/EmbeddingQueue.js";
 import { LRUCache } from "lru-cache";
 import * as crypto from "crypto";
 import { EvidencePackRepository, computeRootFingerprint, type StoredEvidencePack } from "../../indexing/EvidencePackRepository.js";
+import { buildDeterministicPreview } from "../summary/DeterministicSummarizer.js";
 
 export interface DocumentSearchOptions {
     output?: "full" | "compact" | "pack_only";
@@ -351,6 +352,15 @@ export class DocumentSearchEngine {
             ? limitEvidence(evidenceCandidates, maxEvidenceSections, maxEvidenceChars)
             : undefined;
 
+        // Phase 3: store/reuse deterministic previews in chunk_summaries to reduce repeated payload work.
+        if (this.evidencePacks) {
+            const byId = new Map(chunks.map(c => [c.id, c]));
+            this.fillPreviewsFromSummaries(results, byId, query, snippetLength);
+            if (Array.isArray(evidence)) {
+                this.fillPreviewsFromSummaries(evidence, byId, query, snippetLength);
+            }
+        }
+
         const evidenceChars = (evidence ?? []).reduce((sum, section) => sum + (section.preview?.length ?? 0), 0);
         const evidenceTruncated = includeEvidence && evidence != null && evidence.length < evidenceCandidates.length;
         if (evidenceTruncated) {
@@ -529,6 +539,35 @@ export class DocumentSearchEngine {
             }
         }
         return out;
+    }
+
+    private fillPreviewsFromSummaries(
+        sections: DocumentSearchSection[],
+        chunkById: Map<string, StoredDocumentChunk>,
+        query: string,
+        maxChars: number
+    ): void {
+        for (const section of sections) {
+            const chunk = chunkById.get(section.id);
+            if (!chunk) continue;
+            const cached = this.evidencePacks?.getSummary(section.id, "preview");
+            if (cached) {
+                section.preview = cached.length > maxChars ? `${cached.slice(0, Math.max(1, maxChars - 1))}…` : cached;
+                continue;
+            }
+            const built = buildDeterministicPreview({
+                text: chunk.text,
+                query,
+                kind: chunk.kind,
+                maxChars
+            });
+            section.preview = built.preview;
+            try {
+                this.evidencePacks?.upsertSummary(section.id, "preview", built.preview);
+            } catch {
+                // best-effort
+            }
+        }
     }
 
     private async isPackStale(items: Array<{ chunkId: string; snapshot?: { contentHash?: string } }>): Promise<boolean> {
