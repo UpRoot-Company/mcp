@@ -1,4 +1,6 @@
 import path from "path";
+import crypto from "crypto";
+import { LRUCache } from "lru-cache";
 import { InternalToolRegistry } from "../InternalToolRegistry.js";
 import { OrchestrationContext } from "../OrchestrationContext.js";
 import { ParsedIntent } from "../IntentRouter.js";
@@ -34,10 +36,14 @@ const DEFAULT_MAX_FULL_CHARS = 20000;
 const DEFAULT_MAX_FILES = 200;
 const DEFAULT_DEPTH = 5;
 const DEFAULT_SOFT_PRIORITY_RATIO = 0.2;
+const DEFAULT_PACK_RESULTS = Number.parseInt(process.env.SMART_CONTEXT_MAX_RESULTS ?? "25", 10) || 25;
+const DEFAULT_PACK_TTL_MS = Number.parseInt(process.env.SMART_CONTEXT_EXPLORE_PACK_TTL_MS ?? "600000", 10) || 600000;
+const DEFAULT_PACK_CACHE_SIZE = Number.parseInt(process.env.SMART_CONTEXT_EXPLORE_PACK_CACHE_SIZE ?? "100", 10) || 100;
 
 const DOC_EXTENSIONS = new Set([
     ".md", ".mdx", ".txt", ".log", ".docx", ".xlsx", ".pdf", ".html", ".htm", ".css"
 ]);
+const LOG_EXTENSIONS = new Set([".log"]);
 
 const SENSITIVE_FILENAMES = new Set([
     ".env",
@@ -77,7 +83,22 @@ const BINARY_EXTENSIONS = new Set([
     ".jar"
 ]);
 
+type ExplorePack = {
+    packId: string;
+    query: string;
+    createdAt: number;
+    expiresAt?: number;
+    include: { docs: boolean; code: boolean; comments: boolean; logs: boolean };
+    docs: ExploreItem[];
+    code: ExploreItem[];
+};
+
 export class ExplorePillar {
+    private static packCache = new LRUCache<string, ExplorePack>({
+        max: DEFAULT_PACK_CACHE_SIZE,
+        ttl: DEFAULT_PACK_TTL_MS
+    });
+
     constructor(private readonly registry: InternalToolRegistry) {}
 
     public async execute(intent: ParsedIntent, context: OrchestrationContext): Promise<ExploreResponse> {
@@ -123,6 +144,15 @@ export class ExplorePillar {
         const includeDocs = include.docs !== false;
         const includeCode = include.code !== false;
         const includeComments = include.comments === true;
+        const includeLogs = include.logs === true;
+
+        const effectivePackId = query
+            ? (packId ?? computeExplorePackId(query, {
+                include: { docs: includeDocs, code: includeCode, comments: includeComments, logs: includeLogs },
+                intent: constraints.intent,
+                paths
+            }))
+            : undefined;
 
         const response: ExploreResponse = {
             success: true,
@@ -136,59 +166,120 @@ export class ExplorePillar {
         let totalChars = 0;
 
         if (query) {
-            if (includeDocs || includeComments) {
-                const docResults = await this.runTool(context, "doc_search", {
-                    query,
-                    output: "compact",
-                    maxResults,
-                    includeEvidence: false,
-                    packId,
-                    includeComments
-                });
-                const sections = Array.isArray(docResults?.results) ? docResults.results : [];
-                const filtered = includeDocs
-                    ? sections
-                    : sections.filter((section: any) => section?.kind === "code_comment");
-                response.data.docs = filtered.map((section: any) => ({
-                    kind: "document_section",
-                    filePath: section.filePath ?? "",
-                    title: section.heading ?? section.sectionPath?.slice?.(-1)?.[0],
-                    score: section.scores?.final,
-                    range: { startLine: section.range?.startLine, endLine: section.range?.endLine },
-                    preview: truncate(section.preview ?? "", maxItemChars),
-                    metadata: section.kind ? { kind: section.kind } : undefined,
-                    why: ["doc_search"]
-                }));
-                if (docResults?.pack) {
-                    response.pack = docResults.pack;
-                }
-                if (docResults?.degraded) {
-                    degraded = true;
-                    if (Array.isArray(docResults?.reasons)) {
-                        reasons.push(...docResults.reasons);
+            const cursorState = parseItemsCursor(constraints.cursor?.items);
+            const contentCursorState = parseItemsCursor(constraints.cursor?.content);
+            const cachedPack = effectivePackId ? ExplorePillar.packCache.get(effectivePackId) : undefined;
+            if (cachedPack) {
+                if (constraints.cursor?.content) {
+                    const sliced = slicePack(cachedPack, contentCursorState, maxResults, includeDocs, includeCode, includeComments, includeLogs);
+                    const expandedDocs = await Promise.all(sliced.docs.map((item) => this.expandDocContent(item, maxChars, context)));
+                    const expandedCode = await Promise.all(sliced.code.map((item) => this.expandCodeContent(item, maxChars, context)));
+                    response.data.docs = expandedDocs;
+                    response.data.code = expandedCode;
+                    if (sliced.nextCursor) {
+                        response.next = { contentCursor: sliced.nextCursor };
+                    }
+                } else {
+                    const sliced = slicePack(cachedPack, cursorState, maxResults, includeDocs, includeCode, includeComments, includeLogs);
+                    response.data.docs = sliced.docs;
+                    response.data.code = sliced.code;
+                    if (sliced.nextCursor) {
+                        response.next = { itemsCursor: sliced.nextCursor };
                     }
                 }
-            }
+                response.pack = {
+                    packId: cachedPack.packId,
+                    hit: true,
+                    createdAt: cachedPack.createdAt,
+                    expiresAt: cachedPack.expiresAt
+                };
+            } else {
+                const packMaxResults = Math.max(maxResults, DEFAULT_PACK_RESULTS);
+                let docsForPack: ExploreItem[] = [];
+                let codeForPack: ExploreItem[] = [];
 
-            if (includeCode) {
-                const codeResults = await this.runTool(context, "search_project", {
-                    query,
-                    maxResults,
-                    type: "file"
-                });
-                const results = Array.isArray(codeResults?.results) ? codeResults.results : [];
-                response.data.code = results.map((item: any) => ({
-                    kind: "file_preview",
-                    filePath: item.path ?? "",
-                    preview: truncate(item.context ?? "", maxItemChars),
-                    range: item.line ? { startLine: item.line, endLine: item.line } : undefined,
-                    score: item.score,
-                    why: [item.type ?? "search_project"]
-                }));
-                if (codeResults?.degraded) {
-                    degraded = true;
-                    if (codeResults?.reason) {
-                        reasons.push(codeResults.reason);
+                if (includeDocs || includeComments) {
+                    const docResults = await this.runTool(context, "doc_search", {
+                        query,
+                        output: "compact",
+                        maxResults: packMaxResults,
+                        includeEvidence: false,
+                        packId: undefined,
+                        includeComments
+                    });
+                    const sections = Array.isArray(docResults?.results) ? docResults.results : [];
+                    const filtered = sections.filter((section: any) => {
+                        if (section?.kind === "code_comment") return includeComments;
+                        if (isLogPath(section?.filePath)) {
+                            return includeLogs || includeDocs;
+                        }
+                        return includeDocs;
+                    });
+                    const docs = filtered.map((section: any) => ({
+                        kind: "document_section",
+                        filePath: section.filePath ?? "",
+                        title: section.heading ?? section.sectionPath?.slice?.(-1)?.[0],
+                        score: section.scores?.final,
+                        range: { startLine: section.range?.startLine, endLine: section.range?.endLine },
+                        preview: truncate(section.preview ?? "", maxItemChars),
+                        metadata: {
+                            ...(section.kind ? { kind: section.kind } : {}),
+                            ...(Array.isArray(section.sectionPath) ? { headingPath: section.sectionPath } : {})
+                        },
+                        why: ["doc_search"]
+                    }));
+                    docsForPack = docs;
+                    response.data.docs = docs.slice(0, maxResults);
+                    if (docResults?.degraded) {
+                        degraded = true;
+                        if (Array.isArray(docResults?.reasons)) {
+                            reasons.push(...docResults.reasons);
+                        }
+                    }
+                }
+
+                if (includeCode) {
+                    const codeResults = await this.runTool(context, "search_project", {
+                        query,
+                        maxResults: packMaxResults,
+                        type: "file"
+                    });
+                    const results = Array.isArray(codeResults?.results) ? codeResults.results : [];
+                    const codeItems = results.map((item: any) => ({
+                        kind: "file_preview",
+                        filePath: item.path ?? "",
+                        preview: truncate(item.context ?? "", maxItemChars),
+                        range: item.line ? { startLine: item.line, endLine: item.line } : undefined,
+                        score: item.score,
+                        why: [item.type ?? "search_project"]
+                    }));
+                    codeForPack = codeItems;
+                    response.data.code = codeItems.slice(0, maxResults);
+                    if (codeResults?.degraded) {
+                        degraded = true;
+                        if (codeResults?.reason) {
+                            reasons.push(codeResults.reason);
+                        }
+                    }
+                }
+
+                if (effectivePackId) {
+                    const createdAt = Date.now();
+                    const expiresAt = createdAt + DEFAULT_PACK_TTL_MS;
+                    const pack: ExplorePack = {
+                        packId: effectivePackId,
+                        query,
+                        createdAt,
+                        expiresAt,
+                        include: { docs: includeDocs, code: includeCode, comments: includeComments, logs: includeLogs },
+                        docs: docsForPack,
+                        code: codeForPack
+                    };
+                    ExplorePillar.packCache.set(effectivePackId, pack);
+                    response.pack = { packId: effectivePackId, hit: false, createdAt, expiresAt };
+                    const nextCursor = computeNextCursor(pack, cursorState, maxResults, includeDocs, includeCode, includeComments, includeLogs);
+                    if (nextCursor) {
+                        response.next = { itemsCursor: nextCursor };
                     }
                 }
             }
@@ -410,6 +501,37 @@ export class ExplorePillar {
         };
     }
 
+    private async expandDocContent(item: ExploreItem, maxChars: number, context: OrchestrationContext): Promise<ExploreItem> {
+        const headingPath = Array.isArray(item.metadata?.headingPath) ? item.metadata?.headingPath : undefined;
+        const result = await this.runTool(context, "doc_section", {
+            filePath: item.filePath,
+            headingPath,
+            includeSubsections: false,
+            mode: "raw",
+            maxChars
+        });
+        return {
+            ...item,
+            content: typeof result?.content === "string" ? result.content : item.preview
+        };
+    }
+
+    private async expandCodeContent(item: ExploreItem, maxChars: number, context: OrchestrationContext): Promise<ExploreItem> {
+        const startLine = item.range?.startLine;
+        const endLine = item.range?.endLine;
+        const lineRange = startLine ? `${startLine}-${endLine ?? startLine}` : undefined;
+        const result = await this.runTool(context, "read_code", {
+            filePath: item.filePath,
+            view: lineRange ? "fragment" : "skeleton",
+            lineRange
+        });
+        const content = typeof result === "string" ? result : "";
+        return {
+            ...item,
+            content: truncate(content, maxChars)
+        };
+    }
+
     private async expandPaths(
         paths: string[],
         options: { allowGlobs: boolean; maxFiles: number; includeDocs: boolean; includeCode: boolean }
@@ -491,6 +613,11 @@ function isDocPath(filePath: string): boolean {
     return DOC_EXTENSIONS.has(path.extname(filePath).toLowerCase());
 }
 
+function isLogPath(filePath?: string): boolean {
+    if (!filePath) return false;
+    return LOG_EXTENSIONS.has(path.extname(filePath).toLowerCase());
+}
+
 function isSensitivePath(filePath: string): boolean {
     const normalized = filePath.replace(/\\/g, "/");
     const segments = normalized.split("/");
@@ -553,4 +680,90 @@ function truncate(text: string, maxChars: number): string {
     const value = String(text ?? "");
     if (value.length <= limit) return value;
     return `${value.slice(0, Math.max(1, limit - 1))}…`;
+}
+
+function computeExplorePackId(query: string, options: Record<string, unknown>): string {
+    const normalized = stableStringify({ query: String(query ?? ""), options });
+    return crypto.createHash("sha256").update(normalized).digest("hex");
+}
+
+function stableStringify(value: any): string {
+    if (value === null || value === undefined) return String(value);
+    if (typeof value === "string") return JSON.stringify(value);
+    if (typeof value === "number" || typeof value === "boolean") return JSON.stringify(value);
+    if (Array.isArray(value)) {
+        return `[${value.map(v => stableStringify(v)).join(",")}]`;
+    }
+    if (typeof value === "object") {
+        const keys = Object.keys(value).sort();
+        const parts = keys.map(k => `${JSON.stringify(k)}:${stableStringify(value[k])}`);
+        return `{${parts.join(",")}}`;
+    }
+    return JSON.stringify(String(value));
+}
+
+function parseItemsCursor(raw?: string): { docs: number; code: number } {
+    if (!raw || typeof raw !== "string") return { docs: 0, code: 0 };
+    try {
+        const parsed = JSON.parse(raw);
+        const docs = Number.isFinite(parsed?.docs) ? Math.max(0, parsed.docs) : 0;
+        const code = Number.isFinite(parsed?.code) ? Math.max(0, parsed.code) : 0;
+        return { docs, code };
+    } catch {
+        return { docs: 0, code: 0 };
+    }
+}
+
+function encodeItemsCursor(cursor: { docs: number; code: number }): string {
+    return JSON.stringify({ docs: Math.max(0, cursor.docs), code: Math.max(0, cursor.code) });
+}
+
+function filterDocsByInclude(
+    docs: ExploreItem[],
+    includeDocs: boolean,
+    includeComments: boolean,
+    includeLogs: boolean
+): ExploreItem[] {
+    if (!includeDocs && !includeComments && !includeLogs) return [];
+    return docs.filter(item => {
+        if (item.metadata?.kind === "code_comment") return includeComments;
+        if (isLogPath(item.filePath)) return includeLogs || includeDocs;
+        return includeDocs;
+    });
+}
+
+function slicePack(
+    pack: ExplorePack,
+    cursor: { docs: number; code: number },
+    maxResults: number,
+    includeDocs: boolean,
+    includeCode: boolean,
+    includeComments: boolean,
+    includeLogs: boolean
+): { docs: ExploreItem[]; code: ExploreItem[]; nextCursor?: string } {
+    const docsFiltered = filterDocsByInclude(pack.docs, includeDocs, includeComments, includeLogs);
+    const codeFiltered = includeCode ? pack.code : [];
+    const docs = docsFiltered.slice(cursor.docs, cursor.docs + maxResults);
+    const code = codeFiltered.slice(cursor.code, cursor.code + maxResults);
+    const nextDocs = cursor.docs + docs.length;
+    const nextCode = cursor.code + code.length;
+    const hasMore = nextDocs < docsFiltered.length || nextCode < codeFiltered.length;
+    return {
+        docs,
+        code,
+        nextCursor: hasMore ? encodeItemsCursor({ docs: nextDocs, code: nextCode }) : undefined
+    };
+}
+
+function computeNextCursor(
+    pack: ExplorePack,
+    cursor: { docs: number; code: number },
+    maxResults: number,
+    includeDocs: boolean,
+    includeCode: boolean,
+    includeComments: boolean,
+    includeLogs: boolean
+): string | undefined {
+    const sliced = slicePack(pack, cursor, maxResults, includeDocs, includeCode, includeComments, includeLogs);
+    return sliced.nextCursor;
 }

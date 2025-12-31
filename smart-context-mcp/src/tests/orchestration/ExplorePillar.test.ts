@@ -52,7 +52,7 @@ describe("ExplorePillar", () => {
     expect(response.data.code).toHaveLength(1);
     expect(response.data.docs[0]?.kind).toBe("document_section");
     expect(response.data.code[0]?.kind).toBe("file_preview");
-    expect(response.pack?.packId).toBe("pack-1");
+    expect(typeof response.pack?.packId).toBe("string");
   });
 
   it("reads full content for explicit paths when view=full", async () => {
@@ -158,5 +158,102 @@ describe("ExplorePillar", () => {
     expect(response.degraded).toBe(true);
     expect(response.reasons).toContain("budget_exceeded");
     expect(response.data.code.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("reuses pack results and paginates via cursor", async () => {
+    const registry = new InternalToolRegistry();
+    let docCalls = 0;
+    let codeCalls = 0;
+    registry.register("doc_search", async () => {
+      docCalls += 1;
+      return {
+        results: [
+          { filePath: "docs/one.md", preview: "One", scores: { final: 0.9 } },
+          { filePath: "docs/two.md", preview: "Two", scores: { final: 0.8 } },
+          { filePath: "docs/three.md", preview: "Three", scores: { final: 0.7 } }
+        ]
+      };
+    });
+    registry.register("search_project", async () => {
+      codeCalls += 1;
+      return {
+        results: [
+          { path: "src/one.ts", context: "One", score: 0.9 },
+          { path: "src/two.ts", context: "Two", score: 0.8 },
+          { path: "src/three.ts", context: "Three", score: 0.7 }
+        ]
+      };
+    });
+
+    const pillar = new ExplorePillar(registry);
+    const first = await pillar.execute(
+      makeIntent({ query: "auth", limits: { maxResults: 1 } }) as any,
+      new OrchestrationContext()
+    );
+
+    expect(first.pack?.packId).toBeTruthy();
+    expect(first.data.docs).toHaveLength(1);
+    expect(first.data.code).toHaveLength(1);
+    expect(first.next?.itemsCursor).toBeTruthy();
+
+    const second = await pillar.execute(
+      makeIntent({
+        query: "auth",
+        packId: first.pack?.packId,
+        cursor: { items: first.next?.itemsCursor },
+        limits: { maxResults: 1 }
+      }) as any,
+      new OrchestrationContext()
+    );
+
+    expect(docCalls).toBe(1);
+    expect(codeCalls).toBe(1);
+    expect(second.pack?.hit).toBe(true);
+    expect(second.data.docs[0]?.filePath).toBe("docs/two.md");
+    expect(second.data.code[0]?.filePath).toBe("src/two.ts");
+  });
+
+  it("expands content using contentCursor without re-running searches", async () => {
+    const registry = new InternalToolRegistry();
+    let docCalls = 0;
+    let sectionCalls = 0;
+    registry.register("doc_search", async () => {
+      docCalls += 1;
+      return {
+        results: [
+          {
+            filePath: "docs/guide.md",
+            preview: "Guide preview",
+            sectionPath: ["Guide"],
+            scores: { final: 0.9 }
+          }
+        ]
+      };
+    });
+    registry.register("search_project", async () => ({ results: [] }));
+    registry.register("doc_section", async () => {
+      sectionCalls += 1;
+      return { content: "Expanded content" };
+    });
+
+    const pillar = new ExplorePillar(registry);
+    const first = await pillar.execute(
+      makeIntent({ query: "guide", limits: { maxResults: 1 } }) as any,
+      new OrchestrationContext()
+    );
+
+    const second = await pillar.execute(
+      makeIntent({
+        query: "guide",
+        packId: first.pack?.packId,
+        cursor: { content: JSON.stringify({ docs: 0, code: 0 }) },
+        limits: { maxResults: 1 }
+      }) as any,
+      new OrchestrationContext()
+    );
+
+    expect(docCalls).toBe(1);
+    expect(sectionCalls).toBe(1);
+    expect(second.data.docs[0]?.content).toContain("Expanded content");
   });
 });
