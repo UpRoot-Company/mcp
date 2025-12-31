@@ -312,4 +312,49 @@ describe("DocumentSearchEngine", () => {
         await searchEngine.dispose();
         fs.rmSync(rootDir, { recursive: true, force: true });
     });
+
+    it("reuses cached results via packId (in-memory evidence pack)", async () => {
+        const rootDir = setupWorkspace();
+        const fileSystem = new NodeFileSystem(rootDir);
+        const indexDatabase = new IndexDatabase(rootDir);
+        const embeddingRepository = new EmbeddingRepository(indexDatabase);
+        const documentIndexer = new DocumentIndexer(rootDir, fileSystem, indexDatabase, {
+            embeddingRepository
+        });
+        await documentIndexer.indexFile("docs/guide.md");
+        await documentIndexer.indexFile("docs/faq.md");
+
+        const searchEngine = new SearchEngine(rootDir, fileSystem);
+        const documentSearchEngine = new DocumentSearchEngine(
+            searchEngine,
+            documentIndexer,
+            new DocumentChunkRepository(indexDatabase),
+            embeddingRepository,
+            new EmbeddingProviderFactory({
+                provider: "local",
+                normalize: true,
+                local: { model: "hash-test", dims: 64 }
+            }),
+            rootDir
+        );
+
+        const first = await documentSearchEngine.search("install", {
+            output: "compact",
+            includeEvidence: false
+        });
+        expect(first.pack?.packId).toBeTruthy();
+        expect(first.pack?.hit).toBe(false);
+
+        const second = await documentSearchEngine.search("install", {
+            output: "compact",
+            includeEvidence: false,
+            packId: first.pack!.packId
+        });
+        expect(second.pack?.hit).toBe(true);
+        expect(second.results).toEqual(first.results);
+
+        indexDatabase.close();
+        await searchEngine.dispose();
+        fs.rmSync(rootDir, { recursive: true, force: true });
+    });
 });

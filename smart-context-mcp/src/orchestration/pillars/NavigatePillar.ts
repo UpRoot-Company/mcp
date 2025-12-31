@@ -78,6 +78,7 @@ export class NavigatePillar {
       try {
         const docResults = await this.runTool(context, 'doc_search', {
           query: target,
+          output: "compact",
           maxResults: limit,
           includeEvidence: false
         }, progress);

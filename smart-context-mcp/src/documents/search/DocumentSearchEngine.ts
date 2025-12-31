@@ -7,8 +7,12 @@ import { EmbeddingConfig, DocumentKind } from "../../types.js";
 import { EmbeddingProviderFactory } from "../../embeddings/EmbeddingProviderFactory.js";
 import * as path from "path";
 import { EmbeddingTimeoutError } from "../../embeddings/EmbeddingQueue.js";
+import { LRUCache } from "lru-cache";
+import * as crypto from "crypto";
 
 export interface DocumentSearchOptions {
+    output?: "full" | "compact" | "pack_only";
+    packId?: string;
     maxResults?: number;
     maxCandidates?: number;
     maxChunkCandidates?: number;
@@ -43,6 +47,12 @@ export interface DocumentSearchResponse {
     query: string;
     results: DocumentSearchSection[];
     evidence?: DocumentSearchSection[];
+    pack?: {
+        packId: string;
+        hit: boolean;
+        createdAt: number;
+        expiresAt?: number;
+    };
     degraded?: boolean;
     reason?: string;
     reasons?: string[];
@@ -60,6 +70,7 @@ export interface DocumentSearchResponse {
 
 export class DocumentSearchEngine {
     private readonly bm25 = new BM25FRanking();
+    private readonly packCache: LRUCache<string, { response: DocumentSearchResponse; createdAt: number; expiresAt?: number }>;
 
     constructor(
         private readonly searchEngine: SearchEngine,
@@ -69,9 +80,15 @@ export class DocumentSearchEngine {
         private readonly embeddingFactory: EmbeddingProviderFactory,
         private readonly rootPath: string,
         private readonly symbolIndex?: { getSymbolsForFile(filePath: string): Promise<unknown> }
-    ) {}
+    ) {
+        const max = Number.parseInt(process.env.SMART_CONTEXT_EVIDENCE_PACK_CACHE_SIZE ?? "50", 10);
+        this.packCache = new LRUCache({ max: Number.isFinite(max) && max > 0 ? max : 50 });
+    }
 
     public async search(query: string, options: DocumentSearchOptions = {}): Promise<DocumentSearchResponse> {
+        const output = options.output ?? "full";
+        const packTtlMs = Number.parseInt(process.env.SMART_CONTEXT_EVIDENCE_PACK_TTL_MS ?? "3600000", 10); // 1h
+
         if (!query || !query.trim()) {
             return {
                 query,
@@ -93,14 +110,14 @@ export class DocumentSearchEngine {
             };
         }
 
-        const maxResults = options.maxResults ?? 8;
+        const maxResults = options.maxResults ?? (output === "compact" ? 6 : 8);
         const maxCandidates = options.maxCandidates ?? 60;
         const maxChunkCandidates = options.maxChunkCandidates ?? 400;
         const maxVectorCandidates = options.maxVectorCandidates ?? 60;
-        const maxEvidenceSections = options.maxEvidenceSections ?? Math.max(maxResults * 3, 12);
-        const maxEvidenceChars = options.maxEvidenceChars ?? 8000;
-        const includeEvidence = options.includeEvidence ?? true;
-        const snippetLength = options.snippetLength ?? 240;
+        const maxEvidenceSections = options.maxEvidenceSections ?? (output === "compact" ? Math.max(maxResults * 2, 8) : Math.max(maxResults * 3, 12));
+        const maxEvidenceChars = options.maxEvidenceChars ?? (output === "compact" ? 2200 : 8000);
+        const includeEvidence = options.includeEvidence ?? (output === "full");
+        const snippetLength = options.snippetLength ?? (output === "compact" ? 120 : 240);
         const rrfK = options.rrfK ?? 60;
         const rrfDepth = options.rrfDepth ?? 200;
         const useMmr = options.useMmr !== false;
@@ -108,6 +125,43 @@ export class DocumentSearchEngine {
         const maxChunksEmbeddedPerRequest = options.maxChunksEmbeddedPerRequest ?? 32;
         const maxEmbeddingTimeMs = options.maxEmbeddingTimeMs ?? 2500;
         const degradationReasons: string[] = [];
+
+        const effectivePackId = options.packId ?? computePackId(query, {
+            output,
+            maxResults,
+            maxCandidates,
+            maxChunkCandidates,
+            maxVectorCandidates,
+            maxEvidenceSections,
+            maxEvidenceChars,
+            includeEvidence,
+            snippetLength,
+            rrfK,
+            rrfDepth,
+            useMmr,
+            mmrLambda,
+            maxChunksEmbeddedPerRequest,
+            maxEmbeddingTimeMs,
+            includeComments: options.includeComments === true,
+            embedding: options.embedding ?? null
+        });
+
+        const cached = this.packCache.get(effectivePackId);
+        if (cached) {
+            const now = Date.now();
+            if (!cached.expiresAt || cached.expiresAt > now) {
+                return {
+                    ...cached.response,
+                    pack: {
+                        packId: effectivePackId,
+                        hit: true,
+                        createdAt: cached.createdAt,
+                        expiresAt: cached.expiresAt
+                    }
+                };
+            }
+            this.packCache.delete(effectivePackId);
+        }
 
         const candidateFiles = await this.collectCandidateFiles(query, maxCandidates, options.includeComments === true);
         let chunks = await this.collectChunks(candidateFiles, options.includeComments === true);
@@ -127,7 +181,7 @@ export class DocumentSearchEngine {
         }
 
         if (chunks.length === 0) {
-            return {
+            const response: DocumentSearchResponse = {
                 query,
                 results: [],
                 evidence: includeEvidence ? [] : undefined,
@@ -144,6 +198,13 @@ export class DocumentSearchEngine {
                     evidenceChars: 0,
                     evidenceTruncated: false
                 }
+            };
+            const createdAt = Date.now();
+            const expiresAt = Number.isFinite(packTtlMs) && packTtlMs > 0 ? createdAt + packTtlMs : undefined;
+            this.packCache.set(effectivePackId, { response, createdAt, expiresAt });
+            return {
+                ...response,
+                pack: { packId: effectivePackId, hit: false, createdAt, expiresAt }
             };
         }
 
@@ -265,10 +326,14 @@ export class DocumentSearchEngine {
         const reason = uniqueReasons.length > 0 ? uniqueReasons[0] : undefined;
         const reasons = uniqueReasons.length > 1 ? uniqueReasons : undefined;
 
-        return {
+        const response: DocumentSearchResponse = {
             query,
-            results,
-            evidence,
+            results: output === "pack_only" ? results.map(r => ({ ...r, preview: "" })) : results,
+            evidence: includeEvidence
+                ? (output === "pack_only"
+                    ? (evidence ?? []).map(e => ({ ...e, preview: "" }))
+                    : evidence)
+                : undefined,
             degraded: degradedAny,
             reason,
             reasons,
@@ -282,6 +347,14 @@ export class DocumentSearchEngine {
                 evidenceChars,
                 evidenceTruncated
             }
+        };
+
+        const createdAt = Date.now();
+        const expiresAt = Number.isFinite(packTtlMs) && packTtlMs > 0 ? createdAt + packTtlMs : undefined;
+        this.packCache.set(effectivePackId, { response, createdAt, expiresAt });
+        return {
+            ...response,
+            pack: { packId: effectivePackId, hit: false, createdAt, expiresAt }
         };
     }
 
@@ -561,6 +634,26 @@ function cosineSimilarity(a: Float32Array, b: Float32Array): number {
 function isCodeFile(filePath: string): boolean {
     const ext = path.extname(filePath).toLowerCase();
     return ext === ".ts" || ext === ".tsx" || ext === ".js" || ext === ".jsx" || ext === ".py";
+}
+
+function computePackId(query: string, options: unknown): string {
+    const normalized = stableStringify({ query: String(query ?? ""), options });
+    return crypto.createHash("sha256").update(normalized).digest("hex");
+}
+
+function stableStringify(value: any): string {
+    if (value === null || value === undefined) return String(value);
+    if (typeof value === "string") return JSON.stringify(value);
+    if (typeof value === "number" || typeof value === "boolean") return JSON.stringify(value);
+    if (Array.isArray(value)) {
+        return `[${value.map(v => stableStringify(v)).join(",")}]`;
+    }
+    if (typeof value === "object") {
+        const keys = Object.keys(value).sort();
+        const parts = keys.map(k => `${JSON.stringify(k)}:${stableStringify(value[k])}`);
+        return `{${parts.join(",")}}`;
+    }
+    return JSON.stringify(String(value));
 }
 
 function l2Norm(vector: Float32Array): number {

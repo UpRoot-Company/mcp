@@ -507,6 +507,8 @@ export class SmartContextServer {
                     type: 'object',
                     properties: {
                         query: { type: 'string' },
+                        output: { type: 'string', enum: ['full', 'compact', 'pack_only'] },
+                        packId: { type: 'string' },
                         maxResults: { type: 'number' },
                         maxCandidates: { type: 'number' },
                         maxChunkCandidates: { type: 'number' },
@@ -1194,6 +1196,8 @@ export class SmartContextServer {
         }
 
         return this.documentSearchEngine.search(String(query), {
+            output: args?.output,
+            packId: args?.packId,
             maxResults: args?.maxResults ?? args?.limit,
             maxCandidates: args?.maxCandidates,
             maxChunkCandidates: args?.maxChunkCandidates,

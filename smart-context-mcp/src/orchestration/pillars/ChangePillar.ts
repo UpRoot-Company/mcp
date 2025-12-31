@@ -405,6 +405,7 @@ export class ChangePillar {
       try {
         const result = await this.runTool(context, 'doc_search', {
           query,
+          output: "compact",
           maxResults: 8,
           includeEvidence: false
         });
