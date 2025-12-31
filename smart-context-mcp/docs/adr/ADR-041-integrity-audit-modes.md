@@ -257,6 +257,7 @@ export interface IntegrityFinding {
 ### 8.1 Finding 타입
 
 - `adr_vs_code`: ADR 제약과 코드가 충돌
+- `doc_vs_doc`: 문서 내 상호 충돌(서로 다른 문서/섹션 간 불일치)
 - `doc_vs_code`: 일반 문서 제약과 코드가 충돌
 - `comment_vs_code`: 주석/문서화와 구현이 불일치(스테일)
 - `missing_in_code`: 문서/ADR에 있는데 코드에 없음(공백)

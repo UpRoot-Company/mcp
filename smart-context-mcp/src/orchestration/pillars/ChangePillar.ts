@@ -15,9 +15,6 @@ export class ChangePillar {
     const { targets, constraints, originalIntent, action } = intent;
     const { dryRun = true, includeImpact = false } = constraints;
     const integrityOptions = IntegrityEngine.resolveOptions(constraints.integrity, "change");
-    const integrityReport = integrityOptions && integrityOptions.mode !== "off"
-      ? IntegrityEngine.buildPlaceholderReport(integrityOptions).report
-      : undefined;
 
     const rawEdits = Array.isArray(constraints.edits) ? constraints.edits : [];
     let targetPath: string | undefined = constraints.targetPath || targets[0] || this.extractTargetFromEdits(rawEdits);
@@ -187,6 +184,20 @@ export class ChangePillar {
         successGuidance.message = `${successGuidance.message} Related docs may need updates: ${top.filePath}.`;
       }
     }
+
+    const integrityReport = integrityOptions && integrityOptions.mode !== "off"
+      ? (await IntegrityEngine.run(
+          {
+            query: originalIntent,
+            targetPaths: targetPath ? [targetPath] : undefined,
+            scope: integrityOptions.scope ?? "auto",
+            sources: integrityOptions.sources ?? [],
+            limits: integrityOptions.limits ?? {},
+            mode: integrityOptions.mode ?? "preflight"
+          },
+          (tool, args) => this.runTool(context, tool, args)
+        )).report
+      : undefined;
 
     return {
       success: finalResult.success,

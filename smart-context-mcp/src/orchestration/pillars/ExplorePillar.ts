@@ -165,7 +165,19 @@ export class ExplorePillar {
             data: { docs: [], code: [] }
         };
         if (integrityOptions && integrityOptions.mode !== "off") {
-            response.integrity = IntegrityEngine.buildPlaceholderReport(integrityOptions).report;
+            const integrityQuery = query ?? (paths.length > 0 ? path.basename(paths[0]) : undefined);
+            const integrityResult = await IntegrityEngine.run(
+                {
+                    query: integrityQuery,
+                    targetPaths: paths,
+                    scope: integrityOptions.scope ?? "auto",
+                    sources: integrityOptions.sources ?? [],
+                    limits: integrityOptions.limits ?? {},
+                    mode: integrityOptions.mode ?? "warn"
+                },
+                (tool, args) => this.runTool(context, tool, args)
+            );
+            response.integrity = integrityResult.report;
         }
 
         const reasons: string[] = [];

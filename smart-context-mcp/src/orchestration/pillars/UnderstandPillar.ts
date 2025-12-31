@@ -168,7 +168,17 @@ export class UnderstandPillar {
     const elapsedMs = Date.now() - startedAt;
     this.progressLog(progressEnabled, `Completed in ${elapsedMs}ms.`);
     const integrityReport = integrityOptions && integrityOptions.mode !== "off"
-      ? IntegrityEngine.buildPlaceholderReport(integrityOptions).report
+      ? (await IntegrityEngine.run(
+          {
+            query: subject,
+            targetPaths: filePath ? [filePath] : undefined,
+            scope: integrityOptions.scope ?? "auto",
+            sources: integrityOptions.sources ?? [],
+            limits: integrityOptions.limits ?? {},
+            mode: integrityOptions.mode ?? "warn"
+          },
+          (tool, args) => this.runTool(context, tool, args, progress)
+        )).report
       : undefined;
     return {
       success: true,

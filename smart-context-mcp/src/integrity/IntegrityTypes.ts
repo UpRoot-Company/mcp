@@ -51,6 +51,7 @@ export interface IntegrityFinding {
   id: string;
   kind:
     | "adr_vs_code"
+    | "doc_vs_doc"
     | "doc_vs_code"
     | "comment_vs_code"
     | "missing_in_code"
