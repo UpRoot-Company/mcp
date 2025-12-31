@@ -1,7 +1,7 @@
 
 import { DocumentOutlineOptions } from "../types.js";
 
-export type IntentCategory = 'understand' | 'change' | 'navigate' | 'read' | 'write' | 'manage';
+export type IntentCategory = 'explore' | 'understand' | 'change' | 'navigate' | 'read' | 'write' | 'manage';
 
 export interface IntentConstraints {
   goal?: string;
@@ -11,7 +11,7 @@ export interface IntentConstraints {
   dryRun?: boolean;
   limit?: number;
   edits?: any[];
-  view?: 'full' | 'skeleton' | 'fragment';
+  view?: 'auto' | 'preview' | 'section' | 'full' | 'skeleton' | 'fragment';
   lineRange?: string | [number, number];
   sectionId?: string;
   headingPath?: string[];
@@ -31,6 +31,28 @@ export interface IntentConstraints {
     pageRank?: boolean;
     dependencies?: boolean;
   };
+  query?: string;
+  paths?: string[];
+  intent?: string;
+  section?: {
+    sectionId?: string;
+    headingPath?: string[];
+    includeSubsections?: boolean;
+  };
+  packId?: string;
+  cursor?: { items?: string; content?: string };
+  limits?: {
+    maxResults?: number;
+    maxChars?: number;
+    maxItemChars?: number;
+    maxBytes?: number;
+    maxFiles?: number;
+    timeoutMs?: number;
+  };
+  fullPaths?: string[];
+  allowSensitive?: boolean;
+  allowBinary?: boolean;
+  allowGlobs?: boolean;
 }
 
 
@@ -70,9 +92,9 @@ export class IntentRouter {
     const patterns: [RegExp, IntentCategory][] = [
       // 1. Specific action intent priority
       [/\b(modify|change|add|remove|refactor|fix|bug|patch|update|implement|write|edit|수정|변경|추가|삭제|리팩토링|버그|패치)\b/i, 'change'],
-      [/\b(find|search|where|location|definition|usage|call|trace|look for|locate|찾|검색|어디|정의|사용|호출|추적|탐색)\b/i, 'navigate'],
+      [/\b(find|search|where|location|definition|usage|call|trace|look for|locate|찾|검색|어디|정의|사용|호출|추적|탐색)\b/i, 'explore'],
       [/\b(create|make|scaffold|generate|template|new file|생성|만들|작성|스캐폴드|템플릿)\b/i, 'write'],
-      [/\b(read|view|preview|content|code|diff|compare|open|show|읽|보기|미리보기|내용|코드|비교)\b/i, 'read'],
+      [/\b(read|view|preview|content|code|diff|compare|open|show|읽|보기|미리보기|내용|코드|비교)\b/i, 'explore'],
       [/\b(status|undo|redo|rebuild|index|history|manage|rollback|상태|되돌리|재실행|인덱스|관리)\b/i, 'manage'],
       // 2. Broad understanding intent at the end
       [/\b(understand|comprehend|analyze|explain|structure|architecture|logic|summary|report|diagram|이해|분석|설명|구조|아키텍처|요약)\b/i, 'understand'],
