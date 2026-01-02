@@ -17,6 +17,7 @@ import { CommentParser } from '../utils/CommentParser.js';
 import { DependencyGraph } from "../ast/DependencyGraph.js";
 import { QueryIntentDetector } from './search/QueryIntent.js';
 import { createLogger } from "../utils/StructuredLogger.js";
+import { metrics } from "../utils/MetricsCollector.js";
 
 const execAsync = promisify(exec);
 
@@ -221,14 +222,16 @@ export class SearchEngine {
     }
 
     public async scout(args: ScoutArgs): Promise<FileSearchResult[]> {
+        const stopTotal = metrics.startTimer("search.scout.total_ms");
         const { query, includeGlobs, excludeGlobs, basePath, patterns } = args;
         const budget = args.budget;
         const usage = args.usage ?? (budget ? { filesRead: 0, bytesRead: 0, parseTimeMs: 0 } : undefined);
         const startedAt = Date.now();
 
-        if (!query && (!args.keywords || args.keywords.length === 0) && (!patterns || patterns.length === 0)) {
-            throw new Error("A query string, keyword, or pattern is required.");
-        }
+        try {
+            if (!query && (!args.keywords || args.keywords.length === 0) && (!patterns || patterns.length === 0)) {
+                throw new Error("A query string, keyword, or pattern is required.");
+            }
 
         const smartCase = args.smartCase ?? true;
         const caseSensitive = Boolean(args.caseSensitive);
@@ -257,6 +260,7 @@ export class SearchEngine {
         const previewLength = this.normalizeSnippetLength(args.snippetLength);
         const matchesPerFileLimit = args.matchesPerFile ?? this.maxMatchesPerFile;
 
+        const stopCollectCandidates = metrics.startTimer("search.scout.collect_candidates_ms");
         let candidates = await this.candidateCollector.collectHybridCandidates(normalizedKeywords);
 
         if (candidates.size === 0) {
@@ -269,6 +273,7 @@ export class SearchEngine {
                 this.logger.debug(`[Search] Added ${fallbackCandidates.size} fallback candidates via filesystem scan, total: ${candidates.size}`);
             }
         }
+        stopCollectCandidates();
 
         if (patterns && patterns.length > 0 && candidates.size < 1000) {
             const allFiles = this.trigramIndex.listFiles();
@@ -295,103 +300,130 @@ export class SearchEngine {
         const CHUNK_SIZE = 50;
         let stop = false;
         
-        for (let i = 0; i < candidateList.length; i += CHUNK_SIZE) {
-            if (budget && usage) {
-                const elapsed = Date.now() - startedAt;
-                if (usage.filesRead >= budget.maxFilesRead || usage.bytesRead >= budget.maxBytesRead || elapsed >= budget.maxParseTimeMs) {
-                    usage.degraded = true;
-                    usage.reason = usage.reason ?? 'budget_exceeded';
-                    stop = true;
-                }
-            }
-            if (stop) break;
-            const chunk = candidateList.slice(i, i + CHUNK_SIZE);
-            const chunkResults = await Promise.all(chunk.map(async (candidatePath) => {
-                const absPath = path.isAbsolute(candidatePath)
-                    ? candidatePath
-                    : path.join(this.rootPath, candidatePath);
-
-                const relativeToBase = this.normalizeRelativePath(absPath, basePath ? path.resolve(basePath) : this.rootPath);
-                if (!relativeToBase || !this.shouldInclude(relativeToBase, includeRegexes, excludeRegexes)) {
-                    return null;
-                }
-
-                try {
-                    const content = await this.fileSystem.readFile(absPath);
-                    if (usage) {
-                        usage.filesRead += 1;
-                        usage.bytesRead += Buffer.byteLength(content, 'utf8');
+        const stopReadFiles = metrics.startTimer("search.scout.read_files_ms");
+        try {
+            for (let i = 0; i < candidateList.length; i += CHUNK_SIZE) {
+                if (budget && usage) {
+                    const elapsed = Date.now() - startedAt;
+                    if (usage.filesRead >= budget.maxFilesRead || usage.bytesRead >= budget.maxBytesRead || elapsed >= budget.maxParseTimeMs) {
+                        usage.degraded = true;
+                        usage.reason = usage.reason ?? 'budget_exceeded';
+                        stop = true;
                     }
-                    return { absPath, relativeToBase, content };
-                } catch {
-                    return null;
                 }
-            }));
+                if (stop) break;
+                const chunk = candidateList.slice(i, i + CHUNK_SIZE);
+                const chunkResults = await Promise.all(chunk.map(async (candidatePath) => {
+                    const absPath = path.isAbsolute(candidatePath)
+                        ? candidatePath
+                        : path.join(this.rootPath, candidatePath);
 
-            for (const res of chunkResults) {
-                if (res) {
-                    documents.push({ id: res.absPath, text: res.content, filePath: res.relativeToBase, score: 0 });
-                    candidateEntries.push({ absPath: res.absPath, relativeToBase: res.relativeToBase });
+                    const relativeToBase = this.normalizeRelativePath(absPath, basePath ? path.resolve(basePath) : this.rootPath);
+                    if (!relativeToBase || !this.shouldInclude(relativeToBase, includeRegexes, excludeRegexes)) {
+                        return null;
+                    }
+
+                    try {
+                        const content = await this.fileSystem.readFile(absPath);
+                        if (usage) {
+                            usage.filesRead += 1;
+                            usage.bytesRead += Buffer.byteLength(content, 'utf8');
+                        }
+                        return { absPath, relativeToBase, content };
+                    } catch {
+                        return null;
+                    }
+                }));
+
+                for (const res of chunkResults) {
+                    if (res) {
+                        documents.push({ id: res.absPath, text: res.content, filePath: res.relativeToBase, score: 0 });
+                        candidateEntries.push({ absPath: res.absPath, relativeToBase: res.relativeToBase });
+                    }
                 }
             }
+        } finally {
+            stopReadFiles();
         }
 
+        const stopRank = metrics.startTimer("search.scout.rank_bm25_ms");
         const bm25Results = this.bm25Ranking.rank(documents, effectiveQuery);
+        stopRank();
         const bm25ScoreMap = new Map(bm25Results.map(d => [d.id, d.scoreDetails?.contentScore ?? 0]));
         const contentMap = new Map(documents.map(d => [d.id, d.text]));
 
         const fileSearchResults: FileSearchResult[] = [];
 
         // 3. Combine BM25 with other signals using HybridScorer in parallel batches
-        for (let i = 0; i < candidateEntries.length; i += CHUNK_SIZE) {
-            if (budget && usage) {
-                const elapsed = Date.now() - startedAt;
-                if (elapsed >= budget.maxParseTimeMs) {
-                    usage.degraded = true;
-                    usage.reason = usage.reason ?? 'budget_exceeded';
-                    break;
+        const stopHybrid = metrics.startTimer("search.scout.hybrid_score_ms");
+        try {
+            for (let i = 0; i < candidateEntries.length; i += CHUNK_SIZE) {
+                if (budget && usage) {
+                    const elapsed = Date.now() - startedAt;
+                    if (elapsed >= budget.maxParseTimeMs) {
+                        usage.degraded = true;
+                        usage.reason = usage.reason ?? 'budget_exceeded';
+                        break;
+                    }
                 }
-            }
-            const chunk = candidateEntries.slice(i, i + CHUNK_SIZE);
-            const chunkScores = await Promise.all(chunk.map(async ({ absPath, relativeToBase }) => {
-                const content = contentMap.get(absPath) || "";
-                const contentScoreRaw = bm25ScoreMap.get(absPath) || 0;
+                const chunk = candidateEntries.slice(i, i + CHUNK_SIZE);
+                const chunkScores = await Promise.all(chunk.map(async ({ absPath, relativeToBase }) => {
+                    const content = contentMap.get(absPath) || "";
+                    const contentScoreRaw = bm25ScoreMap.get(absPath) || 0;
 
-                try {
-                    const hybridScore = await this.hybridScorer.scoreFile(
-                        absPath,
-                        content,
-                        normalizedKeywords,
-                        normalizedQuery,
-                        contentScoreRaw,
-                        intent,
-                        patterns,
-                        { wordBoundary, caseSensitive }
-                    );
-                    return { relativeToBase, hybridScore };
-                } catch {
-                    return null;
-                }
-            }));
+                    try {
+                        const hybridScore = await this.hybridScorer.scoreFile(
+                            absPath,
+                            content,
+                            normalizedKeywords,
+                            normalizedQuery,
+                            contentScoreRaw,
+                            intent,
+                            patterns,
+                            { wordBoundary, caseSensitive }
+                        );
+                        return { relativeToBase, hybridScore };
+                    } catch {
+                        return null;
+                    }
+                }));
 
-            for (const res of chunkScores) {
-                if (!res) continue;
-                const { relativeToBase, hybridScore } = res;
+                for (const res of chunkScores) {
+                    if (!res) continue;
+                    const { relativeToBase, hybridScore } = res;
 
-                const CORE_SIGNALS = ['content', 'filename', 'symbol', 'comment', 'pattern'];
-                const hasCoreSignal = hybridScore.signals.some(s => CORE_SIGNALS.includes(s));
-                const hasExplicitMatch = hybridScore.matches.length > 0 || 
-                                       hybridScore.breakdown.filename > 0 || 
-                                       hybridScore.breakdown.symbol > 0;
+                    const CORE_SIGNALS = ['content', 'filename', 'symbol', 'comment', 'pattern'];
+                    const hasCoreSignal = hybridScore.signals.some(s => CORE_SIGNALS.includes(s));
+                    const hasExplicitMatch = hybridScore.matches.length > 0 || 
+                                           hybridScore.breakdown.filename > 0 || 
+                                           hybridScore.breakdown.symbol > 0;
 
-                if (hybridScore.total > 0 && hasCoreSignal && hasExplicitMatch) {
-                    if (hybridScore.matches.length > 0) {
-                        const limitedMatches = hybridScore.matches.slice(0, matchesPerFileLimit);
-                        for (const match of limitedMatches) {
+                    if (hybridScore.total > 0 && hasCoreSignal && hasExplicitMatch) {
+                        if (hybridScore.matches.length > 0) {
+                            const limitedMatches = hybridScore.matches.slice(0, matchesPerFileLimit);
+                            for (const match of limitedMatches) {
+                                fileSearchResults.push({
+                                    filePath: relativeToBase,
+                                    lineNumber: match.line,
+                                    preview: match.content.trim().slice(0, previewLength),
+                                    score: hybridScore.total,
+                                    scoreDetails: {
+                                        type: hybridScore.signals.join('+'),
+                                        details: Object.entries(hybridScore.breakdown).map(([type, score]) => ({ type, score: score as number })),
+                                        totalScore: hybridScore.total,
+                                        contentScore: hybridScore.breakdown.content,
+                                        filenameMultiplier: hybridScore.breakdown.filenameMatchType === 'exact' ? 10 : (hybridScore.breakdown.filenameMatchType === 'partial' ? 5 : 1),
+                                        depthMultiplier: 1,
+                                        fieldWeight: 1,
+                                        filenameMatchType: hybridScore.breakdown.filenameMatchType
+                                    }
+                                });
+                            }
+                        } else {
                             fileSearchResults.push({
                                 filePath: relativeToBase,
-                                lineNumber: match.line,
-                                preview: match.content.trim().slice(0, previewLength),
+                                lineNumber: 0,
+                                preview: "",
                                 score: hybridScore.total,
                                 scoreDetails: {
                                     type: hybridScore.signals.join('+'),
@@ -405,30 +437,16 @@ export class SearchEngine {
                                 }
                             });
                         }
-                    } else {
-                        fileSearchResults.push({
-                            filePath: relativeToBase,
-                            lineNumber: 0,
-                            preview: "",
-                            score: hybridScore.total,
-                            scoreDetails: {
-                                type: hybridScore.signals.join('+'),
-                                details: Object.entries(hybridScore.breakdown).map(([type, score]) => ({ type, score: score as number })),
-                                totalScore: hybridScore.total,
-                                contentScore: hybridScore.breakdown.content,
-                                filenameMultiplier: hybridScore.breakdown.filenameMatchType === 'exact' ? 10 : (hybridScore.breakdown.filenameMatchType === 'partial' ? 5 : 1),
-                                depthMultiplier: 1,
-                                fieldWeight: 1,
-                                filenameMatchType: hybridScore.breakdown.filenameMatchType
-                            }
-                        });
                     }
                 }
             }
+        } finally {
+            stopHybrid();
         }
 
         fileSearchResults.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
         this.logger.debug(`[Search] Returning ${fileSearchResults.length} results`);
+        metrics.gauge("search.scout.results_count", fileSearchResults.length);
         if (usage) {
             usage.parseTimeMs = Date.now() - startedAt;
         }
@@ -439,6 +457,9 @@ export class SearchEngine {
             groupByFile: args.groupByFile,
             deduplicateByContent: args.deduplicateByContent
         });
+        } finally {
+            stopTotal();
+        }
     }
 
     private normalizeSnippetLength(requested?: number): number {

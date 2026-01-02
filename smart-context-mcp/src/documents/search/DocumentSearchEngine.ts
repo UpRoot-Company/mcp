@@ -11,6 +11,7 @@ import { LRUCache } from "lru-cache";
 import * as crypto from "crypto";
 import { EvidencePackRepository, computeRootFingerprint, type StoredEvidencePack } from "../../indexing/EvidencePackRepository.js";
 import { buildDeterministicPreview } from "../summary/DeterministicSummarizer.js";
+import { metrics } from "../../utils/MetricsCollector.js";
 
 export interface DocumentSearchOptions {
     scope?: "docs" | "project" | "all";
@@ -92,32 +93,34 @@ export class DocumentSearchEngine {
     }
 
     public async search(query: string, options: DocumentSearchOptions = {}): Promise<DocumentSearchResponse> {
+        const stopTotal = metrics.startTimer("docs.search.total_ms");
         const output = options.output ?? "full";
         const packTtlMs = Number.parseInt(process.env.SMART_CONTEXT_EVIDENCE_PACK_TTL_MS ?? "86400000", 10); // 24h
         const scope = options.scope ?? "all";
         const includeLogs = options.includeLogs === true;
         const includeMetrics = options.includeMetrics === true;
 
-        if (!query || !query.trim()) {
-            return {
-                query,
-                results: [],
-                evidence: [],
-                degraded: false,
-                reason: undefined,
-                reasons: undefined,
-                provider: null,
-                stats: {
-                    candidateFiles: 0,
-                    candidateChunks: 0,
-                    vectorEnabled: false,
-                    mmrApplied: false,
-                    evidenceSections: 0,
-                    evidenceChars: 0,
-                    evidenceTruncated: false
-                }
-            };
-        }
+        try {
+            if (!query || !query.trim()) {
+                return {
+                    query,
+                    results: [],
+                    evidence: [],
+                    degraded: false,
+                    reason: undefined,
+                    reasons: undefined,
+                    provider: null,
+                    stats: {
+                        candidateFiles: 0,
+                        candidateChunks: 0,
+                        vectorEnabled: false,
+                        mmrApplied: false,
+                        evidenceSections: 0,
+                        evidenceChars: 0,
+                        evidenceTruncated: false
+                    }
+                };
+            }
 
         const maxResults = options.maxResults ?? (output === "compact" ? 6 : 8);
         const maxCandidates = options.maxCandidates ?? 60;
@@ -208,8 +211,10 @@ export class DocumentSearchEngine {
             includeLogs,
             includeMetrics
         );
+        metrics.gauge("docs.search.candidate_files", candidateFiles.length);
         let chunks = await this.collectChunks(candidateFiles, options.includeComments === true);
         const initialChunkCount = chunks.length;
+        metrics.gauge("docs.search.candidate_chunks", initialChunkCount);
 
         if (chunks.length > maxChunkCandidates) {
             degradationReasons.push("budget_exceeded");
@@ -423,6 +428,9 @@ export class DocumentSearchEngine {
                 evidenceTruncated
             }
         };
+        if (degradedAny) {
+            metrics.inc("docs.search.degraded_total");
+        }
 
         const createdAt = Date.now();
         const expiresAt = Number.isFinite(packTtlMs) && packTtlMs > 0 ? createdAt + packTtlMs : undefined;
@@ -449,6 +457,9 @@ export class DocumentSearchEngine {
             ...response,
             pack: { packId: effectivePackId, hit: false, createdAt, expiresAt }
         };
+        } finally {
+            stopTotal();
+        }
     }
 
     private buildStaleCheckItems(
@@ -721,6 +732,7 @@ export class DocumentSearchEngine {
     ): Promise<{ scores: Map<string, number>; degraded: boolean; reasons: string[] }> {
         const reasons: string[] = [];
         let queryVector: Float32Array | undefined;
+        const stopQueryEmbed = metrics.startTimer("docs.search.embedding_query_ms");
         try {
             [queryVector] = await provider.embed([query]);
         } catch (err: any) {
@@ -728,6 +740,8 @@ export class DocumentSearchEngine {
                 return { scores: new Map(), degraded: true, reasons: ["embedding_timeout"] };
             }
             return { scores: new Map(), degraded: true, reasons: ["vector_disabled"] };
+        } finally {
+            stopQueryEmbed();
         }
         if (!queryVector) {
             return { scores: new Map(), degraded: true, reasons: ["vector_disabled"] };
@@ -735,16 +749,21 @@ export class DocumentSearchEngine {
         const scores = new Map<string, number>();
         const missing: StoredDocumentChunk[] = [];
 
-        for (const chunk of chunks) {
-            const stored = this.embeddingRepository.getEmbedding(chunk.id, provider.provider, provider.model);
-            if (stored?.vector && stored.vector.length > 0) {
-                if (provider.dims === 0) {
-                    provider.dims = stored.dims;
+        const stopVectorScore = metrics.startTimer("docs.search.vector_scoring_ms");
+        try {
+            for (const chunk of chunks) {
+                const stored = this.embeddingRepository.getEmbedding(chunk.id, provider.provider, provider.model);
+                if (stored?.vector && stored.vector.length > 0) {
+                    if (provider.dims === 0) {
+                        provider.dims = stored.dims;
+                    }
+                    scores.set(chunk.id, cosineSimilarity(stored.vector, queryVector));
+                } else {
+                    missing.push(chunk);
                 }
-                scores.set(chunk.id, cosineSimilarity(stored.vector, queryVector));
-            } else {
-                missing.push(chunk);
             }
+        } finally {
+            stopVectorScore();
         }
 
         if (missing.length === 0) {
@@ -770,7 +789,12 @@ export class DocumentSearchEngine {
             const batch = limited.slice(i, i + batchSize);
             let vectors: Float32Array[];
             try {
-                vectors = await provider.embed(batch.map(chunk => chunk.text));
+                const stopBatchEmbed = metrics.startTimer("docs.search.embedding_chunks_ms");
+                try {
+                    vectors = await provider.embed(batch.map(chunk => chunk.text));
+                } finally {
+                    stopBatchEmbed();
+                }
             } catch (err: any) {
                 degraded = true;
                 if (err instanceof EmbeddingTimeoutError) {

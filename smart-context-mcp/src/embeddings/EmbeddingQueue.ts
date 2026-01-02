@@ -1,3 +1,5 @@
+import { metrics } from "../utils/MetricsCollector.js";
+
 export class EmbeddingTimeoutError extends Error {
     public readonly name = "EmbeddingTimeoutError";
     constructor(message: string, public readonly timeoutMs: number) {
@@ -37,6 +39,7 @@ export class EmbeddingQueue {
                 timeoutMs: opts?.timeoutMs,
                 label: opts?.label
             });
+            this.updateQueueGauge();
             this.pump();
         });
     }
@@ -47,6 +50,7 @@ export class EmbeddingQueue {
             const next = this.queue.shift();
             if (!next) return;
             this.active += 1;
+            this.updateQueueGauge();
             void this.execute(next).finally(() => {
                 this.active -= 1;
                 this.pump();
@@ -69,6 +73,9 @@ export class EmbeddingQueue {
                 ]);
                 task.resolve(result);
             } catch (err) {
+                if (err instanceof EmbeddingTimeoutError) {
+                    metrics.inc("embeddings.queue_timeouts_total");
+                }
                 task.reject(err);
             } finally {
                 if (timer) clearTimeout(timer);
@@ -82,6 +89,10 @@ export class EmbeddingQueue {
         } catch (err) {
             task.reject(err);
         }
+    }
+
+    private updateQueueGauge(): void {
+        metrics.gauge("embeddings.queue_depth", this.queue.length);
     }
 }
 

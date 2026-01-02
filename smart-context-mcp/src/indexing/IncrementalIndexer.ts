@@ -338,37 +338,42 @@ export class IncrementalIndexer {
     }
 
     private async enqueueInitialScan(): Promise<void> {
+        const stopInitialScan = metrics.startTimer("indexer.initial_scan_ms");
         const stack: string[] = [this.rootPath];
         
-        while (stack.length > 0 && !this.stopped) {
-            const current = stack.pop()!;
-            let entries: fs.Dirent[];
-            try {
-                entries = await fs.promises.readdir(current, { withFileTypes: true });
-            } catch {
-                continue;
-            }
-
-            const supportedFiles: string[] = [];
-            for (const entry of entries) {
-                const fullPath = path.join(current, entry.name);
-                if (this.shouldIgnore(fullPath)) continue;
-
-                if (entry.isDirectory()) {
-                    stack.push(fullPath);
-                } else if (this.symbolIndex.isSupported(fullPath) || this.isDocumentFile(fullPath)) {
-                    supportedFiles.push(fullPath);
+        try {
+            while (stack.length > 0 && !this.stopped) {
+                const current = stack.pop()!;
+                let entries: fs.Dirent[];
+                try {
+                    entries = await fs.promises.readdir(current, { withFileTypes: true });
+                } catch {
+                    continue;
                 }
-            }
 
-            // Phase 1 (ADR-029): Parallel check for reindexing
-            const filesToIndex = await this.batchShouldReindex(supportedFiles);
-            for (const filePath of filesToIndex) {
-                this.enqueuePath(filePath, 'low');
-            }
+                const supportedFiles: string[] = [];
+                for (const entry of entries) {
+                    const fullPath = path.join(current, entry.name);
+                    if (this.shouldIgnore(fullPath)) continue;
 
-            // Yield control back to event loop periodically
-            await this.sleep(0);
+                    if (entry.isDirectory()) {
+                        stack.push(fullPath);
+                    } else if (this.symbolIndex.isSupported(fullPath) || this.isDocumentFile(fullPath)) {
+                        supportedFiles.push(fullPath);
+                    }
+                }
+
+                // Phase 1 (ADR-029): Parallel check for reindexing
+                const filesToIndex = await this.batchShouldReindex(supportedFiles);
+                for (const filePath of filesToIndex) {
+                    this.enqueuePath(filePath, 'low');
+                }
+
+                // Yield control back to event loop periodically
+                await this.sleep(0);
+            }
+        } finally {
+            stopInitialScan();
         }
     }
 
@@ -431,36 +436,41 @@ export class IncrementalIndexer {
     }
 
     private async scanForNewFiles(): Promise<string[]> {
+        const stopIncremental = metrics.startTimer("indexer.incremental_scan_ms");
         const newFiles: string[] = [];
         const stack: string[] = [this.rootPath];
 
-        while (stack.length > 0 && !this.stopped) {
-            const current = stack.pop()!;
-            let entries: fs.Dirent[];
-            try {
-                entries = await fs.promises.readdir(current, { withFileTypes: true });
-            } catch {
-                continue;
-            }
+        try {
+            while (stack.length > 0 && !this.stopped) {
+                const current = stack.pop()!;
+                let entries: fs.Dirent[];
+                try {
+                    entries = await fs.promises.readdir(current, { withFileTypes: true });
+                } catch {
+                    continue;
+                }
 
-            for (const entry of entries) {
-                const fullPath = path.join(current, entry.name);
-                if (this.shouldIgnore(fullPath)) continue;
+                for (const entry of entries) {
+                    const fullPath = path.join(current, entry.name);
+                    if (this.shouldIgnore(fullPath)) continue;
 
-                if (entry.isDirectory()) {
-                    stack.push(fullPath);
-                } else if (this.symbolIndex.isSupported(fullPath) || this.isDocumentFile(fullPath)) {
-                    // Check if already in index
-                    const relPath = path.relative(this.rootPath, fullPath);
-                    const existing = this.indexDatabase?.getFile(relPath);
-                    if (!existing) {
-                        newFiles.push(fullPath);
+                    if (entry.isDirectory()) {
+                        stack.push(fullPath);
+                    } else if (this.symbolIndex.isSupported(fullPath) || this.isDocumentFile(fullPath)) {
+                        // Check if already in index
+                        const relPath = path.relative(this.rootPath, fullPath);
+                        const existing = this.indexDatabase?.getFile(relPath);
+                        if (!existing) {
+                            newFiles.push(fullPath);
+                        }
                     }
                 }
+                await this.sleep(0);
             }
-            await this.sleep(0);
+            return newFiles;
+        } finally {
+            stopIncremental();
         }
-        return newFiles;
     }
 
     private registerConfigurationEvents(): void {
