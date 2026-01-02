@@ -1,0 +1,67 @@
+{
+  "name": "v2-editor",
+  "description": "ADR-042-005 v2 editor performance benchmarks",
+  "targets": [
+    {
+      "type": "single-edit-resolve",
+      "description": "Single file edit resolution (exact match)",
+      "threshold_ms": 300,
+      "file": "benchmarks/test-fixtures/sample-service.ts",
+      "edits": [
+        {
+          "oldCode": "getActiveCount(): number",
+          "newCode": "getActiveUserCount(): number"
+        }
+      ]
+    },
+    {
+      "type": "batch-edit-resolve",
+      "description": "Batch edit resolution across 5 files",
+      "threshold_ms": 2000,
+      "files": [
+        "src/engine/Editor.ts",
+        "src/engine/EditResolver.ts",
+        "src/engine/EditCoordinator.ts",
+        "src/orchestration/pillars/ChangePillar.ts",
+        "src/orchestration/pillars/BasePillars.ts"
+      ],
+      "edits": [
+        {
+          "oldCode": "// Target comment to replace",
+          "newCode": "// Updated comment"
+        }
+      ]
+    },
+    {
+      "type": "ambiguous-detection",
+      "description": "Ambiguous match detection performance",
+      "threshold_ms": 200,
+      "file": "benchmarks/test-fixtures/ambiguous-matches.ts",
+      "edits": [
+        {
+          "oldCode": "add(",
+          "newCode": "sum("
+        }
+      ],
+      "expectedError": "AMBIGUOUS_MATCH"
+    },
+    {
+      "type": "cost-guardrail-levenshtein",
+      "description": "Levenshtein blocking on large files",
+      "threshold_ms": 50,
+      "file": "benchmarks/test-fixtures/large-file.ts",
+      "edits": [
+        {
+          "oldCode": "console.log(\"Service initialized\")",
+          "newCode": "console.log(\"Service ready\")"
+        }
+      ],
+      "expectedError": "LEVENSHTEIN_BLOCKED"
+    }
+  ],
+  "metrics": [
+    "change.resolve_ms",
+    "change.apply_ms",
+    "write.safe_patch_ms"
+  ]
+}
