@@ -90,6 +90,26 @@ Plan/apply safe edits with impact analysis.
 | `options.suggestDocs` | `boolean` |  | Enable doc update suggestions on successful apply. |
 | `options.batchImpactLimit` | `number` |  | Max files to include in batch impact preview. |
 
+**Output (v2)**
+
+When `SMART_CONTEXT_EDITOR_V2=true` and `V2_MODE=dryrun|apply`, additional fields:
+
+| Field | Type | Notes |
+|---|---|---|
+| `resolution` | `"success" \| "off" \| "dryrun"` | Indicates v2 resolution mode. |
+| `resolveErrors` | `ResolveError[]` | Diagnostics: type (`AMBIGUOUS_MATCH`, `TIMEOUT`, `LEVENSHTEIN_BLOCKED`), lineRange suggestions. |
+| `rollbackAvailable` | `boolean` | True when batch edits can be rolled back via operation record. |
+
+**ENV Configuration**
+
+- `SMART_CONTEXT_EDITOR_V2=true` — Enable v2 "Resolve → Apply" separation (default: `false`)
+- `V2_MODE=off|dryrun|apply` — Rollout stage (default: `off`)
+  - `dryrun`: Resolve-only diagnostics without applying
+  - `apply`: Full v2 execution path
+- `RESOLVE_TIMEOUT_MS=1500` — Max time for edit resolution
+- `MIN_LEVENSHTEIN_TARGET_LEN=20` — Block fuzzy matching on short targets
+- `MAX_LEVENSHTEIN_FILE_BYTES=100000` — Block fuzzy matching on large files
+
 ---
 
 ### `write`
@@ -104,7 +124,17 @@ Create or scaffold files.
 | `targetPath` | `string` |  | Where to create it. |
 | `template` | `string` |  | Template name/path (if supported). |
 | `content` | `string` |  | Explicit content overrides generation. |
-| `options.safeWrite` | `boolean` |  | Use edit_coordinator path to preserve undo history. |
+| `options.safeWrite` | `boolean` |  | Use edit_coordinator path to preserve undo history (range-based patch + operation record). |
+
+**Output (safeWrite mode)**
+
+When `options.safeWrite=true`:
+
+| Field | Type | Notes |
+|---|---|---|
+| `writeMode` | `"fast" \| "safe"` | Indicates execution path. |
+| `rollbackAvailable` | `boolean` | True when operation record created for undo. |
+| `transactionId` | `string` | Transaction ID if grouped with other operations. |
 
 ---
 
