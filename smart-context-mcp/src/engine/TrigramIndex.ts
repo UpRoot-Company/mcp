@@ -13,6 +13,8 @@ export interface TrigramIndexOptions {
     maxFileBytes?: number;
     includeExtensions?: string[];
     enabled?: boolean;
+    maxDocFreq?: number;
+    maxTermsPerFile?: number;
 }
 
 type IgnoreInstance = ReturnType<typeof createIgnore>;
@@ -86,7 +88,9 @@ export class TrigramIndex {
                 ".md", ".txt", ".log", ".css", ".scss", ".less",
                 ".html", ".astro"
             ],
-            enabled: options.enabled ?? true
+            enabled: options.enabled ?? true,
+            maxDocFreq: normalizeDocFreq(options.maxDocFreq),
+            maxTermsPerFile: normalizePositiveInt(options.maxTermsPerFile)
         };
         this.ignoreFilter = createIgnore().add(this.options.ignoreGlobs);
         this.cacheDir = PathManager.getIndexDir();
@@ -241,6 +245,7 @@ export class TrigramIndex {
 
             // 3. Prune entries no longer on disk
             await this.pruneStaleEntries(visited);
+            this.applyDocFreqFilter();
 
             this.isReady = true;
             if (progress) {
@@ -361,10 +366,20 @@ export class TrigramIndex {
         return this.options.includeExtensions.includes(ext);
     }
 
+    private applyPerFileCap(counts: Map<string, number>): Map<string, number> {
+        const maxTerms = this.options.maxTermsPerFile;
+        if (!maxTerms || maxTerms <= 0) return counts;
+        if (counts.size <= maxTerms) return counts;
+        const sorted = Array.from(counts.entries()).sort((a, b) => b[1] - a[1]);
+        const limited = sorted.slice(0, maxTerms);
+        return new Map(limited);
+    }
+
     private async indexFile(absPath: string, relativePath: string, mtime?: number, size?: number): Promise<void> {
         try {
             const content = await this.fileSystem.readFile(absPath);
-            const counts = TrigramIndex.extractTrigramCounts(content);
+            let counts = TrigramIndex.extractTrigramCounts(content);
+            counts = this.applyPerFileCap(counts);
             
             // Remove old postings if updating
             this.removeEntry(relativePath);
@@ -468,6 +483,30 @@ export class TrigramIndex {
         }
     }
 
+    private applyDocFreqFilter(): void {
+        const maxDocFreq = this.options.maxDocFreq;
+        if (!maxDocFreq || maxDocFreq <= 0) return;
+        const totalFiles = this.fileEntries.size;
+        if (totalFiles === 0) return;
+        let changed = false;
+        for (const [trigram, postings] of this.postings.entries()) {
+            if (postings.size / totalFiles > maxDocFreq) {
+                for (const [filePath, count] of postings.entries()) {
+                    const entry = this.fileEntries.get(filePath);
+                    if (!entry) continue;
+                    if (entry.trigramFreq.delete(trigram)) {
+                        entry.trigramCount = Math.max(0, entry.trigramCount - count);
+                    }
+                }
+                this.postings.delete(trigram);
+                changed = true;
+            }
+        }
+        if (changed) {
+            this.markDirty();
+        }
+    }
+
     private markDirty(): void {
         this.needsPersistAfterBuild = true;
     }
@@ -563,4 +602,18 @@ export class TrigramIndex {
             return null;
         }
     }
+}
+
+function normalizeDocFreq(value: number | undefined): number {
+    if (!Number.isFinite(value as number)) return 0;
+    const normalized = Number(value);
+    if (normalized <= 0) return 0;
+    if (normalized >= 1) return 1;
+    return normalized;
+}
+
+function normalizePositiveInt(value: number | undefined): number {
+    if (!Number.isFinite(value as number)) return 0;
+    const normalized = Math.floor(Number(value));
+    return normalized > 0 ? normalized : 0;
 }

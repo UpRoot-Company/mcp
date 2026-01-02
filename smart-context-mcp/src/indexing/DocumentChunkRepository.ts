@@ -26,6 +26,11 @@ export class DocumentChunkRepository {
         return typeof value === "string" && value.length > 0 ? value : null;
     }
 
+    public getChunkById(chunkId: string): StoredDocumentChunk | null {
+        if (!chunkId) return null;
+        return this.indexDb.getDocumentChunk(chunkId);
+    }
+
     public listDocumentFiles(limit: number = 500): string[] {
         return this.indexDb.listDocumentFiles(limit);
     }

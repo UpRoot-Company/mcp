@@ -59,6 +59,7 @@ import { extractPdfAsText, PdfExtractError } from "./documents/extractors/PdfExt
 import { EmbeddingProviderFactory } from "./embeddings/EmbeddingProviderFactory.js";
 import { resolveEmbeddingConfigFromEnv } from "./embeddings/EmbeddingConfig.js";
 import { metrics } from "./utils/MetricsCollector.js";
+import { VectorIndexManager } from "./vector/VectorIndexManager.js";
 
 // Orchestration Imports
 import { OrchestrationEngine } from "./orchestration/OrchestrationEngine.js";
@@ -98,6 +99,7 @@ export class SmartContextServer {
     private documentIndexer?: DocumentIndexer;
     private embeddingRepository: EmbeddingRepository;
     private embeddingProviderFactory: EmbeddingProviderFactory;
+    private vectorIndexManager: VectorIndexManager;
     private documentSearchEngine: DocumentSearchEngine;
     private ghostInterfaceBuilder: GhostInterfaceBuilder;
     private fallbackResolver: FallbackResolver;
@@ -145,10 +147,13 @@ export class SmartContextServer {
         this.indexDatabase = new IndexDatabase(this.rootPath);
         this.embeddingRepository = new EmbeddingRepository(this.indexDatabase);
         this.embeddingProviderFactory = new EmbeddingProviderFactory(resolveEmbeddingConfigFromEnv());
+        this.vectorIndexManager = new VectorIndexManager(this.rootPath, this.embeddingRepository);
+        void this.vectorIndexManager.initializeFromEmbeddingConfig(this.embeddingProviderFactory.getConfig());
         this.documentProfiler = new DocumentProfiler(this.rootPath);
         this.documentIndexer = new DocumentIndexer(this.rootPath, this.fileSystem, this.indexDatabase, {
             embeddingRepository: this.embeddingRepository,
-            embeddingProviderFactory: this.embeddingProviderFactory
+            embeddingProviderFactory: this.embeddingProviderFactory,
+            vectorIndexManager: this.vectorIndexManager
         });
         this.symbolIndex = new SymbolIndex(this.rootPath, this.skeletonGenerator, initialIgnorePatterns, this.indexDatabase);
         this.moduleResolver = new ModuleResolver(this.rootPath);
@@ -179,7 +184,8 @@ export class SmartContextServer {
             this.embeddingProviderFactory,
             this.rootPath,
             this.symbolIndex,
-            new EvidencePackRepository(this.indexDatabase)
+            new EvidencePackRepository(this.indexDatabase),
+            this.vectorIndexManager
         );
         this.clusterSearchEngine = new ClusterSearchEngine({
             rootPath: this.rootPath,

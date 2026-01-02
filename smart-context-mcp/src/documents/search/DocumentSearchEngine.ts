@@ -13,6 +13,7 @@ import { EvidencePackRepository, computeRootFingerprint, type StoredEvidencePack
 import { buildDeterministicPreview } from "../summary/DeterministicSummarizer.js";
 import { metrics } from "../../utils/MetricsCollector.js";
 import { applyEmbeddingPrefix } from "../../embeddings/EmbeddingText.js";
+import { VectorIndexManager } from "../../vector/VectorIndexManager.js";
 
 export interface DocumentSearchOptions {
     scope?: "docs" | "project" | "all";
@@ -87,7 +88,8 @@ export class DocumentSearchEngine {
         private readonly embeddingFactory: EmbeddingProviderFactory,
         private readonly rootPath: string,
         private readonly symbolIndex?: { getSymbolsForFile(filePath: string): Promise<unknown> },
-        private readonly evidencePacks?: EvidencePackRepository
+        private readonly evidencePacks?: EvidencePackRepository,
+        private readonly vectorIndexManager?: VectorIndexManager
     ) {
         const max = Number.parseInt(process.env.SMART_CONTEXT_EVIDENCE_PACK_CACHE_SIZE ?? "100", 10);
         this.packCache = new LRUCache({ max: Number.isFinite(max) && max > 0 ? max : 100 });
@@ -214,8 +216,8 @@ export class DocumentSearchEngine {
         );
         metrics.gauge("docs.search.candidate_files", candidateFiles.length);
         let chunks = await this.collectChunks(candidateFiles, options.includeComments === true);
-        const initialChunkCount = chunks.length;
-        metrics.gauge("docs.search.candidate_chunks", initialChunkCount);
+        let candidateChunkCount = chunks.length;
+        metrics.gauge("docs.search.candidate_chunks", candidateChunkCount);
 
         if (chunks.length > maxChunkCandidates) {
             degradationReasons.push("budget_exceeded");
@@ -274,6 +276,66 @@ export class DocumentSearchEngine {
             };
         }
 
+        const provider = await this.resolveEmbeddingProvider(options.embedding);
+        let vectorEnabled = provider.provider !== "disabled";
+        let vectorScores = new Map<string, number>();
+        let vectorRankMap = new Map<string, number>();
+        let degraded = false;
+        const metricsBoost = includeMetrics
+            ? Number.parseFloat(process.env.SMART_CONTEXT_METRICS_SCORE_BOOST ?? "0.12")
+            : 0;
+        let queryVector: Float32Array | undefined;
+
+        if (vectorEnabled) {
+            const queryEmbedding = await this.embedQuery(query, provider);
+            if (queryEmbedding.vector) {
+                queryVector = queryEmbedding.vector;
+                if (queryEmbedding.degraded) {
+                    degraded = true;
+                    if (queryEmbedding.reasons.length > 0) {
+                        degradationReasons.push(...queryEmbedding.reasons);
+                    }
+                }
+            } else {
+                degraded = true;
+                vectorEnabled = false;
+                if (queryEmbedding.reasons.length > 0) {
+                    degradationReasons.push(...queryEmbedding.reasons);
+                } else {
+                    degradationReasons.push("vector_disabled");
+                }
+            }
+        }
+
+        let annChunks: StoredDocumentChunk[] = [];
+        if (vectorEnabled && queryVector && this.vectorIndexManager?.isEnabled()) {
+            const annResult = await this.collectAnnChunks(queryVector, provider, {
+                scope,
+                includeComments: options.includeComments === true,
+                includeLogs,
+                includeMetrics,
+                maxCandidates: maxVectorCandidates
+            });
+            if (annResult.degraded) {
+                degraded = true;
+                if (annResult.reasons.length > 0) {
+                    degradationReasons.push(...annResult.reasons);
+                }
+            }
+            annChunks = annResult.chunks;
+            if (annChunks.length > 0) {
+                const byId = new Map(chunks.map(chunk => [chunk.id, chunk]));
+                for (const chunk of annChunks) {
+                    if (!byId.has(chunk.id)) {
+                        byId.set(chunk.id, chunk);
+                    }
+                }
+                chunks = Array.from(byId.values());
+                candidateChunkCount = chunks.length;
+                metrics.gauge("docs.search.candidate_chunks", candidateChunkCount);
+            }
+        }
+
         const bm25Documents = chunks.map(chunk => ({
             id: chunk.id,
             text: chunk.text,
@@ -284,23 +346,26 @@ export class DocumentSearchEngine {
         const bm25ScoreMap = new Map(bm25Ranked.map(doc => [doc.id, doc.score ?? 0]));
         const bm25RankMap = buildRankMap(bm25Ranked.map(doc => doc.id));
 
-        const provider = await this.resolveEmbeddingProvider(options.embedding);
-        let vectorEnabled = provider.provider !== "disabled";
-        let vectorScores = new Map<string, number>();
-        let vectorRankMap = new Map<string, number>();
-        let degraded = false;
-        const metricsBoost = includeMetrics
-            ? Number.parseFloat(process.env.SMART_CONTEXT_METRICS_SCORE_BOOST ?? "0.12")
-            : 0;
-
         if (vectorEnabled) {
-            const vectorCandidates = bm25Ranked.slice(0, Math.min(maxVectorCandidates, bm25Ranked.length));
-            const candidateChunks = vectorCandidates
-                .map(doc => chunks.find(chunk => chunk.id === doc.id))
-                .filter((chunk): chunk is StoredDocumentChunk => Boolean(chunk));
+            const candidateMap = new Map<string, StoredDocumentChunk>();
+            for (const doc of bm25Ranked.slice(0, Math.min(maxVectorCandidates, bm25Ranked.length))) {
+                const chunk = chunks.find(entry => entry.id === doc.id);
+                if (chunk) candidateMap.set(chunk.id, chunk);
+            }
+            if (annChunks.length > 0) {
+                for (const chunk of annChunks) {
+                    if (!candidateMap.has(chunk.id)) {
+                        candidateMap.set(chunk.id, chunk);
+                    }
+                }
+            }
+            const candidateChunks = Array.from(candidateMap.values());
 
             try {
-                const embeddingResult = await this.ensureEmbeddings(query, candidateChunks, provider, {
+                if (!queryVector) {
+                    throw new Error("Missing query vector");
+                }
+                const embeddingResult = await this.ensureEmbeddings(queryVector, candidateChunks, provider, {
                     maxChunks: maxChunksEmbeddedPerRequest,
                     maxTimeMs: maxEmbeddingTimeMs
                 });
@@ -421,7 +486,7 @@ export class DocumentSearchEngine {
             provider: vectorEnabled ? { name: provider.provider, model: provider.model, dims: provider.dims } : null,
             stats: {
                 candidateFiles: candidateFiles.length,
-                candidateChunks: initialChunkCount,
+                candidateChunks: candidateChunkCount,
                 vectorEnabled,
                 mmrApplied: useMmr,
                 evidenceSections: evidence?.length ?? 0,
@@ -726,28 +791,12 @@ export class DocumentSearchEngine {
     }
 
     private async ensureEmbeddings(
-        query: string,
+        queryVector: Float32Array,
         chunks: StoredDocumentChunk[],
         provider: { provider: string; model: string; dims: number; normalize: boolean; embed(texts: string[]): Promise<Float32Array[]> },
         limits: { maxChunks: number; maxTimeMs: number }
     ): Promise<{ scores: Map<string, number>; degraded: boolean; reasons: string[] }> {
         const reasons: string[] = [];
-        let queryVector: Float32Array | undefined;
-        const stopQueryEmbed = metrics.startTimer("docs.search.embedding_query_ms");
-        try {
-            const queryInput = applyEmbeddingPrefix([query], "query", provider.model);
-            [queryVector] = await provider.embed(queryInput);
-        } catch (err: any) {
-            if (err instanceof EmbeddingTimeoutError) {
-                return { scores: new Map(), degraded: true, reasons: ["embedding_timeout"] };
-            }
-            return { scores: new Map(), degraded: true, reasons: ["vector_disabled"] };
-        } finally {
-            stopQueryEmbed();
-        }
-        if (!queryVector) {
-            return { scores: new Map(), degraded: true, reasons: ["vector_disabled"] };
-        }
         const scores = new Map<string, number>();
         const missing: StoredDocumentChunk[] = [];
 
@@ -822,11 +871,78 @@ export class DocumentSearchEngine {
                     vector,
                     norm: l2Norm(vector)
                 });
+                this.vectorIndexManager?.upsertEmbedding(chunk.id, {
+                    provider: provider.provider,
+                    model: provider.model,
+                    dims: vector.length,
+                    vector
+                });
                 scores.set(chunk.id, cosineSimilarity(vector, queryVector));
             }
         }
 
         return { scores, degraded, reasons: Array.from(new Set(reasons)) };
+    }
+
+    private async embedQuery(
+        query: string,
+        provider: { provider: string; model: string; dims: number; normalize: boolean; embed(texts: string[]): Promise<Float32Array[]> }
+    ): Promise<{ vector?: Float32Array; degraded: boolean; reasons: string[] }> {
+        const stopQueryEmbed = metrics.startTimer("docs.search.embedding_query_ms");
+        try {
+            const queryInput = applyEmbeddingPrefix([query], "query", provider.model);
+            const [vector] = await provider.embed(queryInput);
+            if (vector && provider.dims === 0) {
+                provider.dims = vector.length;
+            }
+            return vector ? { vector, degraded: false, reasons: [] } : { degraded: true, reasons: ["vector_disabled"] };
+        } catch (err: any) {
+            if (err instanceof EmbeddingTimeoutError) {
+                return { degraded: true, reasons: ["embedding_timeout"] };
+            }
+            return { degraded: true, reasons: ["vector_disabled"] };
+        } finally {
+            stopQueryEmbed();
+        }
+    }
+
+    private async collectAnnChunks(
+        queryVector: Float32Array,
+        provider: { provider: string; model: string },
+        options: { scope: "docs" | "project" | "all"; includeComments: boolean; includeLogs: boolean; includeMetrics: boolean; maxCandidates: number }
+    ): Promise<{ chunks: StoredDocumentChunk[]; degraded: boolean; reasons: string[] }> {
+        if (!this.vectorIndexManager || !this.vectorIndexManager.isEnabled()) {
+            return { chunks: [], degraded: false, reasons: [] };
+        }
+        if (provider.model === "hash" || provider.provider === "disabled") {
+            return { chunks: [], degraded: false, reasons: [] };
+        }
+        const result = await this.vectorIndexManager.search(queryVector, {
+            provider: provider.provider,
+            model: provider.model,
+            k: options.maxCandidates
+        });
+        if (result.ids.length === 0) {
+            return {
+                chunks: [],
+                degraded: result.degraded,
+                reasons: result.reason ? [result.reason] : []
+            };
+        }
+        const chunks: StoredDocumentChunk[] = [];
+        for (const id of result.ids) {
+            const chunk = this.chunkRepository.getChunkById(id);
+            if (!chunk) continue;
+            if (!matchesDocScope(chunk.filePath, options.scope, options.includeComments, options.includeLogs, options.includeMetrics)) {
+                continue;
+            }
+            chunks.push(chunk);
+        }
+        return {
+            chunks,
+            degraded: result.degraded,
+            reasons: result.reason ? [result.reason] : []
+        };
     }
 
     private async resolveEmbeddingProvider(override?: EmbeddingConfig) {

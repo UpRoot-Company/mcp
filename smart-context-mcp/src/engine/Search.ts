@@ -123,6 +123,16 @@ export class SearchEngine {
             ? trigramExtensionsRaw.split(',').map(s => s.trim()).filter(Boolean)
             : undefined;
 
+        const trigramMaxDocFreqRaw = (process.env.SMART_CONTEXT_TRIGRAM_MAX_DOC_FREQ ?? '').trim();
+        const trigramMaxDocFreq = trigramMaxDocFreqRaw.length > 0
+            ? Number.parseFloat(trigramMaxDocFreqRaw)
+            : undefined;
+
+        const trigramMaxTermsRaw = (process.env.SMART_CONTEXT_TRIGRAM_MAX_TERMS_PER_FILE ?? '').trim();
+        const trigramMaxTermsPerFile = trigramMaxTermsRaw.length > 0
+            ? Number.parseInt(trigramMaxTermsRaw, 10)
+            : undefined;
+
         this.trigramIndex = new TrigramIndex(this.rootPath, this.fileSystem, {
             ignoreGlobs: this.defaultExcludeGlobs,
             enabled: trigramEnabled,
@@ -131,6 +141,12 @@ export class SearchEngine {
                 : {}),
             ...(Array.isArray(trigramIncludeExtensions) && trigramIncludeExtensions.length > 0
                 ? { includeExtensions: trigramIncludeExtensions }
+                : {}),
+            ...(Number.isFinite(trigramMaxDocFreq as any) && (trigramMaxDocFreq as number) > 0
+                ? { maxDocFreq: trigramMaxDocFreq as number }
+                : {}),
+            ...(Number.isFinite(trigramMaxTermsPerFile as any) && (trigramMaxTermsPerFile as number) > 0
+                ? { maxTermsPerFile: trigramMaxTermsPerFile as number }
                 : {}),
             ...options.trigram
         });

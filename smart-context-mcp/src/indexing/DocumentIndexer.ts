@@ -11,6 +11,7 @@ import { DocumentKind, DocumentOutlineOptions } from "../types.js";
 import { EmbeddingRepository } from "./EmbeddingRepository.js";
 import { EmbeddingProviderFactory } from "../embeddings/EmbeddingProviderFactory.js";
 import { applyEmbeddingPrefix } from "../embeddings/EmbeddingText.js";
+import { VectorIndexManager } from "../vector/VectorIndexManager.js";
 import { extractHtmlTextPreserveLines } from "../documents/html/HtmlTextExtractor.js";
 import { extractDocxAsHtml, DocxExtractError } from "../documents/extractors/DocxExtractor.js";
 import { extractXlsxAsText, XlsxExtractError } from "../documents/extractors/XlsxExtractor.js";
@@ -60,6 +61,7 @@ export class DocumentIndexer {
             outlineOptions?: DocumentOutlineOptions;
             embeddingRepository?: EmbeddingRepository;
             embeddingProviderFactory?: EmbeddingProviderFactory;
+            vectorIndexManager?: VectorIndexManager;
         }
     ) {
         this.chunkRepo = new DocumentChunkRepository(indexDatabase);
@@ -68,11 +70,13 @@ export class DocumentIndexer {
         this.outlineOptions = options?.outlineOptions ?? {};
         this.embeddingRepository = options?.embeddingRepository;
         this.embeddingProviderFactory = options?.embeddingProviderFactory;
+        this.vectorIndexManager = options?.vectorIndexManager;
     }
 
     private outlineOptions: DocumentOutlineOptions;
     private readonly embeddingRepository?: EmbeddingRepository;
     private readonly embeddingProviderFactory?: EmbeddingProviderFactory;
+    private readonly vectorIndexManager?: VectorIndexManager;
 
     public updateIgnorePatterns(patterns: string[]): void {
         this.ignoreFilter = (ignore as unknown as () => any)().add(patterns ?? []);
@@ -141,6 +145,10 @@ export class DocumentIndexer {
         const contentForChunking = kind === "html" ? extractHtmlTextPreserveLines(rawContent) : rawContent;
 
         this.indexDatabase.getOrCreateFile(relativePath, stats.mtime, kind);
+        const previousChunks = this.chunkRepo.listChunksForFile(relativePath);
+        if (previousChunks.length > 0) {
+            this.vectorIndexManager?.removeChunks(previousChunks.map(chunk => chunk.id));
+        }
         this.embeddingRepository?.deleteEmbeddingsForFile(relativePath);
         let stored: StoredDocumentChunk[];
         if (isLog) {
@@ -169,6 +177,10 @@ export class DocumentIndexer {
     public deleteFile(filePath: string): void {
         const relativePath = this.toRelative(filePath);
         if (!relativePath) return;
+        const previousChunks = this.chunkRepo.listChunksForFile(relativePath);
+        if (previousChunks.length > 0) {
+            this.vectorIndexManager?.removeChunks(previousChunks.map(chunk => chunk.id));
+        }
         this.chunkRepo.deleteChunksForFile(relativePath);
         this.indexDatabase.deleteFile(relativePath);
     }
@@ -322,6 +334,12 @@ export class DocumentIndexer {
                     dims: vector.length,
                     vector,
                     norm: l2Norm(vector)
+                });
+                this.vectorIndexManager?.upsertEmbedding(chunk.id, {
+                    provider: provider.provider,
+                    model: provider.model,
+                    dims: vector.length,
+                    vector
                 });
             }
         }

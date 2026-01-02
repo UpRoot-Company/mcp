@@ -109,12 +109,14 @@ export interface IndexStore {
     listDocumentChunks(filePath: string): StoredDocumentChunk[];
     listDocumentFiles(limit?: number): string[];
     getChunkContentHash(chunkId: string): string | undefined;
+    getDocumentChunk(chunkId: string): StoredDocumentChunk | null;
     deleteDocumentChunks(filePath: string): void;
 
     upsertEmbedding(chunkId: string, key: EmbeddingKey, embedding: { dims: number; vector: Float32Array; norm?: number }): void;
     getEmbedding(chunkId: string, key: EmbeddingKey): StoredEmbedding | null;
     deleteEmbedding(chunkId: string): void;
     deleteEmbeddingsForFile(filePath: string): void;
+    listEmbeddings(key: EmbeddingKey, limit?: number): StoredEmbedding[];
 
     upsertEvidencePack(packId: string, payload: unknown): void;
     getEvidencePack(packId: string): unknown | null;
@@ -376,6 +378,14 @@ export class MemoryIndexStore implements IndexStore {
         return this.chunkIndex.get(chunkId)?.contentHash;
     }
 
+    public getDocumentChunk(chunkId: string): StoredDocumentChunk | null {
+        const meta = this.chunkIndex.get(chunkId);
+        if (!meta) return null;
+        const chunks = this.documentChunks.get(meta.filePath) ?? [];
+        const found = chunks.find(chunk => chunk.id === chunkId);
+        return found ? { ...found, sectionPath: [...(found.sectionPath ?? [])] } : null;
+    }
+
     public deleteDocumentChunks(filePath: string): void {
         const normalized = this.normalize(filePath);
         const chunks = this.documentChunks.get(normalized) ?? [];
@@ -422,6 +432,22 @@ export class MemoryIndexStore implements IndexStore {
                 this.embeddings.delete(chunkId);
             }
         }
+    }
+
+    public listEmbeddings(key: EmbeddingKey, limit?: number): StoredEmbedding[] {
+        const mapKey = embeddingKey(key);
+        const max = Number.isFinite(limit) && (limit as number) > 0 ? Math.floor(limit as number) : undefined;
+        const results: StoredEmbedding[] = [];
+        for (const [chunkId, variants] of this.embeddings.entries()) {
+            const entry = variants.get(mapKey);
+            if (!entry) continue;
+            results.push({
+                ...entry,
+                vector: new Float32Array(entry.vector)
+            });
+            if (max && results.length >= max) break;
+        }
+        return results;
     }
 
     public upsertEvidencePack(packId: string, payload: unknown): void {

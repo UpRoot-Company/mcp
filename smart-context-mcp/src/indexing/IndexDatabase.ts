@@ -136,6 +136,10 @@ export class IndexDatabase implements IndexStore {
         return this.store.getChunkContentHash(chunkId);
     }
 
+    public getDocumentChunk(chunkId: string): StoredDocumentChunk | null {
+        return this.store.getDocumentChunk(chunkId);
+    }
+
     public deleteDocumentChunks(filePath: string): void {
         this.store.deleteDocumentChunks(filePath);
     }
@@ -154,6 +158,10 @@ export class IndexDatabase implements IndexStore {
 
     public deleteEmbeddingsForFile(filePath: string): void {
         this.store.deleteEmbeddingsForFile(filePath);
+    }
+
+    public listEmbeddings(key: EmbeddingKey, limit?: number): StoredEmbedding[] {
+        return this.store.listEmbeddings(key, limit);
     }
 
     public upsertEvidencePack(packId: string, payload: unknown): void {

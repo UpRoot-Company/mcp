@@ -59,6 +59,10 @@ export class PathManager {
         return this.resolve('data', 'cache');
     }
 
+    static getVectorIndexDir() {
+        return this.resolve('vector-index');
+    }
+
     static getHistoryDir() {
         return this.resolve('data', 'history');
     }

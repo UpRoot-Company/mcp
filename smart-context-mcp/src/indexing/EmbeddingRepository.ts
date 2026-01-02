@@ -32,4 +32,8 @@ export class EmbeddingRepository {
     public deleteEmbeddingsForFile(filePath: string): void {
         this.indexDb.deleteEmbeddingsForFile(filePath);
     }
+
+    public listEmbeddings(provider: string, model: string, limit?: number): StoredEmbedding[] {
+        return this.indexDb.listEmbeddings({ provider, model }, limit);
+    }
 }
