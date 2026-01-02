@@ -1,37 +1,39 @@
 import { describe, it, expect } from "@jest/globals";
-import Database from "better-sqlite3";
-import { MigrationRunner } from "../indexing/MigrationRunner.js";
+import * as fs from "fs";
+import * as os from "os";
+import * as path from "path";
+import { IndexDatabase } from "../indexing/IndexDatabase.js";
+import { SymbolInfo } from "../types.js";
 
-describe("MigrationRunner", () => {
-    it("applies migrations and updates schema_version", () => {
-        const db = new Database(":memory:");
-        db.exec(`CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);`);
+const makeTempRoot = () => fs.mkdtempSync(path.join(os.tmpdir(), "smart-context-store-"));
 
-        const runner = new MigrationRunner(db);
-        runner.run();
+describe("IndexDatabase storage", () => {
+    it("persists symbols across sessions in file mode", () => {
+        const rootDir = makeTempRoot();
+        const db = new IndexDatabase(rootDir);
+        const symbol: SymbolInfo = {
+            type: "function",
+            name: "persisted",
+            range: { startLine: 0, endLine: 0, startByte: 0, endByte: 9 },
+            content: "function persisted() {}",
+            modifiers: [],
+            doc: ""
+        };
 
-        const versionRow = db.prepare(`SELECT value FROM metadata WHERE key='schema_version'`).get() as any;
-        expect(versionRow.value).toBe("6");
+        db.replaceSymbols({
+            relativePath: "src/main.ts",
+            lastModified: Date.now(),
+            language: "typescript",
+            symbols: [symbol]
+        });
+        db.dispose();
 
-        const table = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='transaction_log'`).get();
-        expect(table).toBeTruthy();
+        const reopened = new IndexDatabase(rootDir);
+        const stored = reopened.readSymbols("src/main.ts") ?? [];
+        expect(stored).toHaveLength(1);
+        expect(stored[0].name).toBe("persisted");
+        reopened.dispose();
 
-        const docChunks = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='document_chunks'`).get();
-        expect(docChunks).toBeTruthy();
-
-        const chunkEmbeddings = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='chunk_embeddings'`).get();
-        expect(chunkEmbeddings).toBeTruthy();
-
-        const evidencePacks = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='evidence_packs'`).get();
-        expect(evidencePacks).toBeTruthy();
-
-        const evidencePackItems = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='evidence_pack_items'`).get();
-        expect(evidencePackItems).toBeTruthy();
-
-        const chunkSummaries = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='chunk_summaries'`).get();
-        expect(chunkSummaries).toBeTruthy();
-
-        const summaryCols = db.prepare(`PRAGMA table_info(chunk_summaries)`).all() as any[];
-        expect(summaryCols.some(col => col?.name === "content_hash")).toBe(true);
+        fs.rmSync(rootDir, { recursive: true, force: true });
     });
 });

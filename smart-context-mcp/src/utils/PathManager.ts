@@ -51,6 +51,10 @@ export class PathManager {
         return this.resolve('data', 'index');
     }
 
+    static getStorageDir() {
+        return this.resolve('storage');
+    }
+
     static getCacheDir() {
         return this.resolve('data', 'cache');
     }

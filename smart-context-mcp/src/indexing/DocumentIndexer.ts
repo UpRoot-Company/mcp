@@ -140,8 +140,8 @@ export class DocumentIndexer {
         }
         const contentForChunking = kind === "html" ? extractHtmlTextPreserveLines(rawContent) : rawContent;
 
-        const fileRecord = this.indexDatabase.getOrCreateFile(relativePath, stats.mtime, kind);
-        this.embeddingRepository?.deleteEmbeddingsForFileId(fileRecord.id);
+        this.indexDatabase.getOrCreateFile(relativePath, stats.mtime, kind);
+        this.embeddingRepository?.deleteEmbeddingsForFile(relativePath);
         let stored: StoredDocumentChunk[];
         if (isLog) {
             stored = this.buildLogChunks(relativePath, contentForChunking);

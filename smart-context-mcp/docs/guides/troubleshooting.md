@@ -1,22 +1,5 @@
 # Troubleshooting
 
-## `better-sqlite3` / `NODE_MODULE_VERSION` mismatch
-
-This means `better-sqlite3` was compiled for a different Node version than the one currently running.
-
-From `smart-context-mcp/`:
-
-```bash
-npm rebuild better-sqlite3
-```
-
-If it still fails:
-
-```bash
-rm -rf node_modules package-lock.json
-npm ci
-```
-
 ## MCP host timeouts / slow first run
 
 - Increase the host timeout (many hosts default to 30s).

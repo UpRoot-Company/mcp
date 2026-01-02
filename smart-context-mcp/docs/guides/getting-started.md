@@ -7,7 +7,6 @@ Smart Context MCP is an MCP server that communicates over **stdio**. Your MCP ho
 - Node.js **v22**
 - `npm`
 
-If you see a `better-sqlite3` `NODE_MODULE_VERSION` error: `npm rebuild better-sqlite3`.
 
 ## Run from this repo
 

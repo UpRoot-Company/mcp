@@ -8,8 +8,10 @@ describe('SmartContextServer - read_fragment', () => {
     let server: SmartContextServer;
     const testFilesDir = path.join(process.cwd(), 'src', 'tests', 'test_files');
     const testFileName = 'read_test.txt';
+    const originalStorageMode = process.env.SMART_CONTEXT_STORAGE_MODE;
 
     beforeAll(() => {
+        process.env.SMART_CONTEXT_STORAGE_MODE = "memory";
         server = new SmartContextServer(process.cwd());
         if (!fs.existsSync(testFilesDir)) {
             fs.mkdirSync(testFilesDir, { recursive: true });
@@ -29,9 +31,17 @@ describe('SmartContextServer - read_fragment', () => {
         fs.writeFileSync(path.join(testFilesDir, testFileName), content);
     });
 
-    afterAll(() => {
+    afterAll(async () => {
+        if (server) {
+            await server.shutdown();
+        }
         if (fs.existsSync(testFilesDir)) {
             fs.rmSync(testFilesDir, { recursive: true, force: true });
+        }
+        if (originalStorageMode === undefined) {
+            delete process.env.SMART_CONTEXT_STORAGE_MODE;
+        } else {
+            process.env.SMART_CONTEXT_STORAGE_MODE = originalStorageMode;
         }
     });
 

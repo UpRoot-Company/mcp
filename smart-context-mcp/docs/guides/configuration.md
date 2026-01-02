@@ -14,6 +14,7 @@ Smart Context MCP is configured via environment variables. Most users only need 
 | `SMART_CONTEXT_LOG_LEVEL` | Structured logging level. | `debug|info|warn|error`. |
 | `SMART_CONTEXT_LOG_TO_FILE` | Persist logs under `.smart-context`. | Prefer this in MCP hosts (keeps stdout clean). |
 | `SMART_CONTEXT_ALLOW_STDOUT_LOGS` | Allow stdout logs. | Avoid in MCP hosts; stdout is reserved for MCP frames. |
+| `SMART_CONTEXT_STORAGE_MODE` | Storage backend. | `file` (default) or `memory` (non-persistent). |
 
 ## Documents / parsers
 

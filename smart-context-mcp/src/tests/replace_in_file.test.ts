@@ -12,6 +12,7 @@ describe('SmartContextServer - edit_file', () => {
     const testFileName = 'replace_test.txt';
     let backupsDir: string;
     const relativeTestFilePath = path.join('src', 'tests', 'test_files', testFileName);
+    const originalStorageMode = process.env.SMART_CONTEXT_STORAGE_MODE;
 
     const getEncodedPathPrefix = (filePath: string): string => {
         const absolutePath = path.join(testFilesDir, filePath);
@@ -25,6 +26,7 @@ describe('SmartContextServer - edit_file', () => {
     };
 
     beforeEach(async () => {
+        process.env.SMART_CONTEXT_STORAGE_MODE = "memory";
         // Initialize PathManager
         PathManager.setRoot(process.cwd());
         backupsDir = PathManager.getBackupDir();
@@ -60,6 +62,11 @@ describe('SmartContextServer - edit_file', () => {
 
     afterEach(async () => {
         await server.shutdown();
+        if (originalStorageMode === undefined) {
+            delete process.env.SMART_CONTEXT_STORAGE_MODE;
+        } else {
+            process.env.SMART_CONTEXT_STORAGE_MODE = originalStorageMode;
+        }
     });
 
     it('should replace a unique target string and create a backup', async () => {

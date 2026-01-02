@@ -1,9 +1,12 @@
-import { jest, describe, it, expect, beforeEach } from "@jest/globals";
-import Database from "better-sqlite3";
+import { jest, describe, it, expect, beforeEach, afterEach } from "@jest/globals";
 import { EditCoordinator } from "../engine/EditCoordinator.js";
 import { TransactionLog } from "../engine/TransactionLog.js";
 import { MemoryFileSystem } from "../platform/FileSystem.js";
 import { Edit, EditOperation, EditResult } from "../types.js";
+import { IndexDatabase } from "../indexing/IndexDatabase.js";
+import * as fs from "fs";
+import * as os from "os";
+import * as path from "path";
 
 describe("EditCoordinator transactional batch edits", () => {
     const rootPath = "/project/root";
@@ -12,8 +15,11 @@ describe("EditCoordinator transactional batch edits", () => {
     let historyEngine: any;
     let transactionLog: TransactionLog;
     let coordinator: EditCoordinator;
+    let rootDir: string;
+    let indexDb: IndexDatabase;
 
     beforeEach(async () => {
+        rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "smart-context-edit-"));
         fileSystem = new MemoryFileSystem(rootPath);
         await fileSystem.writeFile("/project/root/a.txt", "hello a");
         await fileSystem.writeFile("/project/root/b.txt", "hello b");
@@ -47,14 +53,19 @@ describe("EditCoordinator transactional batch edits", () => {
             removeOperation: jest.fn()
         };
 
-        const db = new Database(":memory:");
-        transactionLog = new TransactionLog(db);
+        indexDb = new IndexDatabase(rootDir);
+        transactionLog = new TransactionLog(indexDb);
 
         coordinator = new EditCoordinator(editorEngine, historyEngine, {
             rootPath,
             transactionLog,
             fileSystem
         });
+    });
+
+    afterEach(() => {
+        indexDb.dispose();
+        fs.rmSync(rootDir, { recursive: true, force: true });
     });
 
     it("rolls back to snapshots when a later file fails", async () => {

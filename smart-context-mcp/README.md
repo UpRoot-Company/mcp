@@ -31,7 +31,6 @@ The project search uses an in-memory trigram index for fast candidate selection.
 - Restrict indexed extensions (comma-separated):
 	- `SMART_CONTEXT_TRIGRAM_INCLUDE_EXTENSIONS=.ts,.tsx,.js,.jsx,.py,.md`
 
-If you see `better-sqlite3 ... NODE_MODULE_VERSION ...`, run `npm rebuild better-sqlite3` (Node native module rebuild).
 
 ## Five Pillars (agent-facing API)
 

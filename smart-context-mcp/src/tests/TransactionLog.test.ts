@@ -1,10 +1,14 @@
 import { describe, it, expect } from "@jest/globals";
-import Database from "better-sqlite3";
 import { TransactionLog } from "../engine/TransactionLog.js";
+import { IndexDatabase } from "../indexing/IndexDatabase.js";
+import * as fs from "fs";
+import * as os from "os";
+import * as path from "path";
 
 describe("TransactionLog", () => {
     it("records pending transactions and clears on commit", () => {
-        const db = new Database(":memory:");
+        const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "smart-context-tx-"));
+        const db = new IndexDatabase(rootDir);
         const log = new TransactionLog(db);
         const txId = "tx-1";
         const snapshots = [
@@ -20,10 +24,13 @@ describe("TransactionLog", () => {
         log.commit(txId, snapshots);
         pending = log.getPendingTransactions();
         expect(pending).toHaveLength(0);
+        db.dispose();
+        fs.rmSync(rootDir, { recursive: true, force: true });
     });
 
     it("clears pending transactions on rollback", () => {
-        const db = new Database(":memory:");
+        const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "smart-context-tx-"));
+        const db = new IndexDatabase(rootDir);
         const log = new TransactionLog(db);
         const txId = "tx-2";
         const snapshots = [
@@ -35,5 +42,7 @@ describe("TransactionLog", () => {
 
         log.rollback(txId);
         expect(log.getPendingTransactions()).toHaveLength(0);
+        db.dispose();
+        fs.rmSync(rootDir, { recursive: true, force: true });
     });
 });

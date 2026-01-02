@@ -30,6 +30,8 @@ const readErrorCode = (response: any): string | undefined => {
  */
 describe("Tool surface consistency", () => {
     it("Intent tools are stable, handled, and schemas are coherent", async () => {
+        const originalStorageMode = process.env.SMART_CONTEXT_STORAGE_MODE;
+        process.env.SMART_CONTEXT_STORAGE_MODE = "memory";
         const server = new SmartContextServer(process.cwd());
         const tools = (server as any).listIntentTools() as ListedTool[];
 
@@ -69,13 +71,20 @@ describe("Tool surface consistency", () => {
 
         }
         await server.shutdown();
+        if (originalStorageMode === undefined) {
+            delete process.env.SMART_CONTEXT_STORAGE_MODE;
+        } else {
+            process.env.SMART_CONTEXT_STORAGE_MODE = originalStorageMode;
+        }
         });
 
     it("Legacy tools are exposed only when enabled", async () => {
         const prevLegacy = process.env.SMART_CONTEXT_EXPOSE_LEGACY_TOOLS;
         const prev = process.env.SMART_CONTEXT_EXPOSE_COMPAT_TOOLS;
+        const originalStorageMode = process.env.SMART_CONTEXT_STORAGE_MODE;
         process.env.SMART_CONTEXT_EXPOSE_LEGACY_TOOLS = "true";
         process.env.SMART_CONTEXT_EXPOSE_COMPAT_TOOLS = "true";
+        process.env.SMART_CONTEXT_STORAGE_MODE = "memory";
 
         try {
             const server = new SmartContextServer(process.cwd());
@@ -111,6 +120,11 @@ describe("Tool surface consistency", () => {
                 delete process.env.SMART_CONTEXT_EXPOSE_LEGACY_TOOLS;
             } else {
                 process.env.SMART_CONTEXT_EXPOSE_LEGACY_TOOLS = prevLegacy;
+            }
+            if (originalStorageMode === undefined) {
+                delete process.env.SMART_CONTEXT_STORAGE_MODE;
+            } else {
+                process.env.SMART_CONTEXT_STORAGE_MODE = originalStorageMode;
             }
         }
     });

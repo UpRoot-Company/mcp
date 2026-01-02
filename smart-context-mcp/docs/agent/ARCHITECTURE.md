@@ -22,7 +22,7 @@ Legacy tool names can be enabled, but should not be used by new integrations: `s
 
 - Tool registration + schemas: `smart-context-mcp/src/index.ts`
 - Orchestration engine (intent routing + pillar dispatch): `smart-context-mcp/src/orchestration/`
-- Index + SQLite DB: `smart-context-mcp/src/indexing/`
+- Index + standalone storage: `smart-context-mcp/src/indexing/`
 - Document ingestion/search: `smart-context-mcp/src/documents/`
 - Evidence packs: `smart-context-mcp/src/evidence/`
 - Integrity audit engine: `smart-context-mcp/src/integrity/`

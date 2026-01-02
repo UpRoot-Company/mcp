@@ -193,7 +193,7 @@ export class SmartContextServer {
         const historyEngine = new HistoryEngine(this.rootPath, this.fileSystem);
         this.historyEngine = historyEngine;
         const editorEngine = new EditorEngine(this.rootPath, this.fileSystem, new AstAwareDiff(this.skeletonGenerator));
-        const transactionLog = new TransactionLog(this.indexDatabase.getHandle());
+        const transactionLog = new TransactionLog(this.indexDatabase);
 
         this.editCoordinator = new EditCoordinator(editorEngine, historyEngine, {
             rootPath: this.rootPath,
@@ -2037,7 +2037,7 @@ export class SmartContextServer {
                     const embeddingConfig = resolveEmbeddingConfigFromEnv();
                     const maxSamplesRaw = Number.parseInt(process.env.SMART_CONTEXT_METRICS_HIST_MAX_SAMPLES ?? "", 10);
                     const metricsMaxSamples = Number.isFinite(maxSamplesRaw) && maxSamplesRaw > 0 ? maxSamplesRaw : 1024;
-                    const storageMode = process.env.SMART_CONTEXT_STORAGE_MODE ?? "auto";
+                    const storageMode = process.env.SMART_CONTEXT_STORAGE_MODE ?? "file";
                     const embeddingProvider = embeddingConfig.provider ?? "auto";
                     const embeddingModel = embeddingConfig.local?.model;
                     return {

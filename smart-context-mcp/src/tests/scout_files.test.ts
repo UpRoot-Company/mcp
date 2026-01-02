@@ -10,11 +10,19 @@ describe('SmartContextServer - scout_files', () => {
     const testFilesDir = path.join(process.cwd(), 'src', 'tests', 'test_files');
     const rankingKeyword = 'rankingToken';
     const tieBreakerKeyword = 'keywordToken';
+    const basePath = testFilesDir;
+    const originalEnv = {
+        storageMode: process.env.SMART_CONTEXT_STORAGE_MODE,
+        trigramIndex: process.env.SMART_CONTEXT_TRIGRAM_INDEX
+    };
 
     // Increase timeout for all tests in this suite
     jest.setTimeout(30000);
 
     beforeAll(async () => {
+        process.env.SMART_CONTEXT_STORAGE_MODE = "memory";
+        process.env.SMART_CONTEXT_TRIGRAM_INDEX = "disabled";
+
         if (!fs.existsSync(testFilesDir)) {
             fs.mkdirSync(testFilesDir, { recursive: true });
         }
@@ -44,6 +52,16 @@ describe('SmartContextServer - scout_files', () => {
                 // Ignore cleanup errors
             }
         }
+        if (originalEnv.storageMode === undefined) {
+            delete process.env.SMART_CONTEXT_STORAGE_MODE;
+        } else {
+            process.env.SMART_CONTEXT_STORAGE_MODE = originalEnv.storageMode;
+        }
+        if (originalEnv.trigramIndex === undefined) {
+            delete process.env.SMART_CONTEXT_TRIGRAM_INDEX;
+        } else {
+            process.env.SMART_CONTEXT_TRIGRAM_INDEX = originalEnv.trigramIndex;
+        }
     });
 
     beforeEach(async () => {
@@ -53,42 +71,42 @@ describe('SmartContextServer - scout_files', () => {
     });
 
     it('should find files with a single keyword', async () => {
-        const args = { keywords: ['keyword1'], excludeGlobs: ["node_modules"] };
+        const args = { keywords: ['keyword1'], excludeGlobs: ["node_modules"], basePath };
         const response = await (server as any).handleCallTool('search_files', args);
         expect(response.isError).toBeFalsy();
         const result: FileSearchResult[] = JSON.parse(response.content[0].text);
         expect(result).toHaveLength(2);
         expect(result).toEqual(expect.arrayContaining([
-            expect.objectContaining({ filePath: path.join('src', 'tests', 'test_files', 'file1.txt') }),
-            expect.objectContaining({ filePath: path.join('src', 'tests', 'test_files', 'file3.js') }),
+            expect.objectContaining({ filePath: 'file1.txt' }),
+            expect.objectContaining({ filePath: 'file3.js' }),
         ]));
     });
 
     it('should find files with a single regex pattern', async () => {
-        const args = { patterns: ['pattern[1-2]'], excludeGlobs: ["**/node_modules/**"] };
+        const args = { patterns: ['pattern[1-2]'], excludeGlobs: ["**/node_modules/**"], basePath };
         const response = await (server as any).handleCallTool('search_files', args);
         expect(response.isError).toBeFalsy();
         const result: FileSearchResult[] = JSON.parse(response.content[0].text);
         expect(result).toHaveLength(2);
         expect(result).toEqual(expect.arrayContaining([
-            expect.objectContaining({ filePath: path.join('src', 'tests', 'test_files', 'file2.ts') }),
+            expect.objectContaining({ filePath: 'file2.ts' }),
         ]));
     });
 
     it('should find files with multiple keywords/patterns and deduplicate', async () => {
-        const args = { keywords: ['keyword2'], patterns: ['pattern1'], excludeGlobs: ["**/node_modules/**"] };
+        const args = { keywords: ['keyword2'], patterns: ['pattern1'], excludeGlobs: ["**/node_modules/**"], basePath };
         const response = await (server as any).handleCallTool('search_files', args);
         expect(response.isError).toBeFalsy();
         const result: FileSearchResult[] = JSON.parse(response.content[0].text);
         expect(result).toHaveLength(2);
         expect(result).toEqual(expect.arrayContaining([
-            expect.objectContaining({ filePath: path.join('src', 'tests', 'test_files', 'file1.txt') }),
-            expect.objectContaining({ filePath: path.join('src', 'tests', 'test_files', 'file2.ts') }),
+            expect.objectContaining({ filePath: 'file1.txt' }),
+            expect.objectContaining({ filePath: 'file2.ts' }),
         ]));
     });
 
     it('should rank files by relevance using BM25', async () => {
-        const args = { keywords: [rankingKeyword, tieBreakerKeyword], excludeGlobs: ["**/node_modules/**"] };
+        const args = { keywords: [rankingKeyword, tieBreakerKeyword], excludeGlobs: ["**/node_modules/**"], basePath };
         const response = await (server as any).handleCallTool('search_files', args);
         expect(response.isError).toBeFalsy();
         const result: FileSearchResult[] = JSON.parse(response.content[0].text);
@@ -105,7 +123,7 @@ describe('SmartContextServer - scout_files', () => {
     });
 
     it('should match substrings by default and honor word boundary option', async () => {
-        const substringArgs = { keywords: ['User'], excludeGlobs: ["**/node_modules/**"] };
+        const substringArgs = { keywords: ['User'], excludeGlobs: ["**/node_modules/**"], basePath };
         const substringResponse = await (server as any).handleCallTool('search_files', substringArgs);
         expect(substringResponse.isError).toBeFalsy();
         const substringResult: FileSearchResult[] = JSON.parse(substringResponse.content[0].text);
@@ -121,7 +139,7 @@ describe('SmartContextServer - scout_files', () => {
         expect(partialMatch!.scoreDetails?.filenameMatchType).toBe('partial');
         expect(partialMatch!.scoreDetails?.filenameMultiplier).toBe(5);
 
-        const boundaryArgs = { keywords: ['User'], wordBoundary: true, excludeGlobs: ["**/node_modules/**"] };
+        const boundaryArgs = { keywords: ['User'], wordBoundary: true, excludeGlobs: ["**/node_modules/**"], basePath };
         const boundaryResponse = await (server as any).handleCallTool('search_files', boundaryArgs);
         expect(boundaryResponse.isError).toBeFalsy();
         const boundaryResult: FileSearchResult[] = JSON.parse(boundaryResponse.content[0].text);
