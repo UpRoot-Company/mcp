@@ -204,12 +204,18 @@ export class HnswVectorIndex implements VectorIndex {
 }
 
 async function createIndex(space: string, dims: number): Promise<HnswIndex> {
-    const module = (await import("hnswlib-wasm")) as HnswModule;
-    const ctor = module?.HierarchicalNSW ?? module?.default?.HierarchicalNSW;
-    if (!ctor) {
-        throw new Error("Failed to load hnswlib-wasm");
+    try {
+        const module = (await import("hnswlib-wasm")) as HnswModule;
+        const ctor = module?.HierarchicalNSW ?? module?.default?.HierarchicalNSW;
+        if (!ctor) {
+            throw new Error("Failed to load hnswlib-wasm");
+        }
+        return new ctor(space, dims);
+    } catch {
+        // Offline-first fallback: provide a pure JS brute-force index that supports persistence,
+        // so the "hnsw" backend remains functional even when the optional ANN module is unavailable.
+        return new PersistedBruteforceIndex(space, dims);
     }
-    return new ctor(space, dims);
 }
 
 function normalizeSearchOutput(raw: any): { labels: number[]; distances: number[] } {
@@ -232,5 +238,149 @@ async function readJson<T>(filePath: string, fallback: T): Promise<T> {
         return JSON.parse(raw) as T;
     } catch {
         return fallback;
+    }
+}
+
+class PersistedBruteforceIndex implements HnswIndex {
+    private readonly space: string;
+    private readonly dims: number;
+    private maxElements = 0;
+    private vectors: Float32Array = new Float32Array(0);
+    private norms: Float32Array = new Float32Array(0);
+    private deleted: Uint8Array = new Uint8Array(0);
+
+    constructor(space: string, dims: number) {
+        this.space = space;
+        this.dims = dims;
+    }
+
+    public initIndex(maxElements: number): void {
+        this.maxElements = Math.max(1, Math.floor(maxElements));
+        this.vectors = new Float32Array(this.maxElements * this.dims);
+        this.norms = new Float32Array(this.maxElements);
+        this.deleted = new Uint8Array(this.maxElements);
+    }
+
+    public addPoint(vector: Float32Array, label: number): void {
+        if (!this.vectors.length) return;
+        if (label < 0 || label >= this.maxElements) return;
+        const base = label * this.dims;
+        let norm = 0;
+        for (let i = 0; i < this.dims; i += 1) {
+            const v = vector[i] ?? 0;
+            this.vectors[base + i] = v;
+            norm += v * v;
+        }
+        this.norms[label] = Math.sqrt(norm);
+        this.deleted[label] = 0;
+    }
+
+    public markDelete(label: number): void {
+        if (label < 0 || label >= this.maxElements) return;
+        this.deleted[label] = 1;
+    }
+
+    public deletePoint(label: number): void {
+        this.markDelete(label);
+    }
+
+    public setEf(_ef: number): void {}
+
+    public getCurrentCount(): number {
+        if (!this.deleted.length) return 0;
+        let count = 0;
+        for (let i = 0; i < this.deleted.length; i += 1) {
+            if (this.deleted[i] === 0 && this.norms[i] > 0) count += 1;
+        }
+        return count;
+    }
+
+    public searchKnn(query: Float32Array, k: number): { labels: number[]; distances: number[] } {
+        if (!this.vectors.length) return { labels: [], distances: [] };
+        const topK = Math.max(0, Math.floor(k));
+        if (topK === 0) return { labels: [], distances: [] };
+
+        let queryNorm = 0;
+        for (let i = 0; i < this.dims; i += 1) {
+            const v = query[i] ?? 0;
+            queryNorm += v * v;
+        }
+        queryNorm = Math.sqrt(queryNorm) || 1;
+
+        const candidates: Array<{ label: number; score: number }> = [];
+        for (let label = 0; label < this.maxElements; label += 1) {
+            if (this.deleted[label] === 1) continue;
+            const vecNorm = this.norms[label];
+            if (!vecNorm) continue;
+            const base = label * this.dims;
+            let dot = 0;
+            for (let i = 0; i < this.dims; i += 1) {
+                dot += (this.vectors[base + i] ?? 0) * (query[i] ?? 0);
+            }
+            let score = dot;
+            if (this.space === "cosine") {
+                score = dot / (vecNorm * queryNorm);
+            }
+            candidates.push({ label, score });
+        }
+
+        candidates.sort((a, b) => b.score - a.score);
+        const labels = candidates.slice(0, topK).map(c => c.label);
+        const distances = candidates.slice(0, topK).map(c => (this.space === "cosine" ? 1 - c.score : c.score));
+        return { labels, distances };
+    }
+
+    public async writeIndex(filePath: string): Promise<void> {
+        const header = Buffer.allocUnsafe(16);
+        header.write("SCVX", 0, "ascii");
+        header.writeUInt32LE(1, 4); // version
+        header.writeUInt32LE(this.dims, 8);
+        header.writeUInt32LE(this.maxElements, 12);
+        const payload = Buffer.concat([
+            header,
+            Buffer.from(this.vectors.buffer, this.vectors.byteOffset, this.vectors.byteLength),
+            Buffer.from(this.norms.buffer, this.norms.byteOffset, this.norms.byteLength),
+            Buffer.from(this.deleted.buffer, this.deleted.byteOffset, this.deleted.byteLength)
+        ]);
+        await fs.writeFile(filePath, payload);
+    }
+
+    public async readIndex(filePath: string, maxElements?: number): Promise<void> {
+        const raw = await fs.readFile(filePath);
+        if (raw.length < 16) {
+            throw new Error("Invalid vector index file");
+        }
+        const magic = raw.subarray(0, 4).toString("ascii");
+        if (magic !== "SCVX") {
+            throw new Error("Unsupported vector index format");
+        }
+        const version = raw.readUInt32LE(4);
+        if (version !== 1) {
+            throw new Error("Unsupported vector index version");
+        }
+        const dims = raw.readUInt32LE(8);
+        const storedMax = raw.readUInt32LE(12);
+        if (dims !== this.dims) {
+            throw new Error("Vector dims mismatch");
+        }
+        const effectiveMax = Math.max(storedMax, maxElements ?? 0);
+        this.initIndex(effectiveMax);
+
+        const vecBytes = storedMax * this.dims * 4;
+        const normsBytes = storedMax * 4;
+        const deletedBytes = storedMax;
+        const expected = 16 + vecBytes + normsBytes + deletedBytes;
+        if (raw.length < expected) {
+            throw new Error("Truncated vector index file");
+        }
+        let offset = 16;
+        const vectors = new Float32Array(raw.buffer, raw.byteOffset + offset, storedMax * this.dims);
+        this.vectors.set(vectors);
+        offset += vecBytes;
+        const norms = new Float32Array(raw.buffer, raw.byteOffset + offset, storedMax);
+        this.norms.set(norms);
+        offset += normsBytes;
+        const deleted = new Uint8Array(raw.buffer, raw.byteOffset + offset, storedMax);
+        this.deleted.set(deleted);
     }
 }

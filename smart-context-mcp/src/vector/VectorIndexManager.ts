@@ -9,7 +9,7 @@ import { metrics } from "../utils/MetricsCollector.js";
 import type { VectorIndex, VectorIndexResult } from "./VectorIndex.js";
 import { BruteforceVectorIndex } from "./BruteforceVectorIndex.js";
 import { HnswVectorIndex } from "./HnswVectorIndex.js";
-import { resolveVectorIndexConfigFromEnv, type VectorIndexConfig, type VectorIndexMode } from "./VectorIndexConfig.js";
+import { resolveVectorIndexConfigFromEnv, type VectorIndexConfig, type VectorIndexMode, type VectorIndexShardSetting } from "./VectorIndexConfig.js";
 
 type VectorIndexMeta = {
     version: number;
@@ -19,6 +19,8 @@ type VectorIndexMeta = {
     count: number;
     rootFingerprint: string;
     backend: "hnsw" | "bruteforce";
+    shardCount?: number;
+    shards?: Array<{ shardId: number; count: number }>;
     hnsw?: { m: number; efConstruction: number; efSearch: number };
     updatedAt: number;
 };
@@ -29,7 +31,8 @@ type VectorIndexState = {
     model: string;
     backend: "hnsw";
     dims: number;
-    index: HnswVectorIndex;
+    shardCount: number;
+    indexes: HnswVectorIndex[];
     meta: VectorIndexMeta;
 };
 
@@ -115,7 +118,21 @@ export class VectorIndexManager {
 
         const stop = metrics.startTimer("vector_index.query_ms");
         try {
-            const results = state.index.search(query, args.k);
+            const scoreMap = new Map<string, number>();
+            const perShardK = Math.max(0, Math.floor(args.k));
+            for (const index of state.indexes) {
+                const results = index.search(query, perShardK);
+                for (const res of results) {
+                    const prev = scoreMap.get(res.id);
+                    if (prev === undefined || res.score > prev) {
+                        scoreMap.set(res.id, res.score);
+                    }
+                }
+            }
+            const results = Array.from(scoreMap.entries())
+                .map(([id, score]) => ({ id, score }))
+                .sort((a, b) => b.score - a.score)
+                .slice(0, perShardK);
             return {
                 ids: results.map(r => r.id),
                 scores: new Map(results.map(r => [r.id, r.score])),
@@ -133,13 +150,15 @@ export class VectorIndexManager {
         const state = this.states.get(key);
         if (!state) return;
         if (state.dims !== embedding.dims) return;
-        state.index.upsert(chunkId, embedding.vector);
+        const shardId = this.shardForId(chunkId, state.shardCount);
+        state.indexes[shardId]?.upsert(chunkId, embedding.vector);
     }
 
     public removeChunk(chunkId: string): void {
         if (!chunkId) return;
         for (const state of this.states.values()) {
-            state.index.remove(chunkId);
+            const shardId = this.shardForId(chunkId, state.shardCount);
+            state.indexes[shardId]?.remove(chunkId);
         }
     }
 
@@ -162,8 +181,34 @@ export class VectorIndexManager {
         return path.join(PathManager.getVectorIndexDir(), provider, model);
     }
 
+    private shardDir(provider: string, model: string, shardId: number): string {
+        return path.join(this.indexDir(provider, model), "shards", String(shardId));
+    }
+
     private metaPath(provider: string, model: string): string {
         return path.join(this.indexDir(provider, model), "meta.json");
+    }
+
+    private resolveShardCount(setting: VectorIndexShardSetting, maxPoints: number): number {
+        if (setting === "off") return 1;
+        if (typeof setting === "number") return Math.max(1, Math.floor(setting));
+        // auto: conservative defaults; can be tuned as we learn more.
+        if (maxPoints >= 500000) return 8;
+        if (maxPoints >= 200000) return 4;
+        if (maxPoints >= 100000) return 2;
+        return 1;
+    }
+
+    private shardForId(id: string, shardCount: number): number {
+        if (!id || shardCount <= 1) return 0;
+        // FNV-1a 32-bit
+        let hash = 2166136261;
+        for (let i = 0; i < id.length; i += 1) {
+            hash ^= id.charCodeAt(i);
+            hash = Math.imul(hash, 16777619);
+        }
+        // >>> 0 to force uint32
+        return (hash >>> 0) % shardCount;
     }
 
     private async ensureIndex(provider: string, model: string, options: { allowRebuild: boolean }): Promise<VectorIndexState | null> {
@@ -188,17 +233,24 @@ export class VectorIndexManager {
         const meta = await readJson<VectorIndexMeta | null>(this.metaPath(provider, model), null);
         if (meta && meta.provider === provider && meta.model === model && meta.rootFingerprint === this.rootFingerprint) {
             try {
-                const index = new HnswVectorIndex({
-                    dims: meta.dims,
-                    maxElements: this.config.maxPoints,
-                    m: this.config.m,
-                    efConstruction: this.config.efConstruction,
-                    efSearch: this.config.efSearch
-                });
-                await index.load(this.indexDir(provider, model));
-                metrics.gauge("vector_index.size", index.size());
+                const shardCount = Math.max(1, meta.shardCount ?? 1);
+                const indexes: HnswVectorIndex[] = [];
+                for (let shardId = 0; shardId < shardCount; shardId += 1) {
+                    const maxElements = Math.ceil((this.config.maxPoints / shardCount) * 1.1);
+                    const index = new HnswVectorIndex({
+                        dims: meta.dims,
+                        maxElements,
+                        m: this.config.m,
+                        efConstruction: this.config.efConstruction,
+                        efSearch: this.config.efSearch
+                    });
+                    const dir = shardCount > 1 ? this.shardDir(provider, model, shardId) : this.indexDir(provider, model);
+                    await index.load(dir);
+                    indexes.push(index);
+                }
+                metrics.gauge("vector_index.size", indexes.reduce((sum, idx) => sum + idx.size(), 0));
                 metrics.gauge("vector_index.backend", 1);
-                return { key: this.keyFor(provider, model), provider, model, backend: "hnsw", dims: meta.dims, index, meta };
+                return { key: this.keyFor(provider, model), provider, model, backend: "hnsw", dims: meta.dims, shardCount, indexes, meta };
             } catch {
                 // fall through to rebuild
             }
@@ -217,36 +269,53 @@ export class VectorIndexManager {
                 dims = embedding.dims;
             }, { limit: 1 });
             if (!dims) return null;
-            const index = new HnswVectorIndex({
-                dims,
-                maxElements: this.config.maxPoints,
-                m: this.config.m,
-                efConstruction: this.config.efConstruction,
-                efSearch: this.config.efSearch
-            });
-            await index.initializeEmpty();
+            const shardCount = this.resolveShardCount(this.config.shards, this.config.maxPoints);
+            const indexes: HnswVectorIndex[] = [];
+            for (let shardId = 0; shardId < shardCount; shardId += 1) {
+                const maxElements = Math.ceil((this.config.maxPoints / shardCount) * 1.1);
+                const index = new HnswVectorIndex({
+                    dims,
+                    maxElements,
+                    m: this.config.m,
+                    efConstruction: this.config.efConstruction,
+                    efSearch: this.config.efSearch
+                });
+                await index.initializeEmpty();
+                indexes.push(index);
+            }
+
+            const shardCounts = new Array<number>(shardCount).fill(0);
             let count = 0;
             this.embeddingRepository.iterateEmbeddings(provider, model, (embedding) => {
+                if (count >= this.config.maxPoints) return;
                 if (embedding.vector.length !== dims) return;
-                index.upsert(embedding.chunkId, embedding.vector);
-                count++;
+                const shardId = this.shardForId(embedding.chunkId, shardCount);
+                indexes[shardId]?.upsert(embedding.chunkId, embedding.vector);
+                shardCounts[shardId] += 1;
+                count += 1;
             }, { limit: this.config.maxPoints });
-            await index.save(this.indexDir(provider, model));
+
+            for (let shardId = 0; shardId < shardCount; shardId += 1) {
+                const dir = shardCount > 1 ? this.shardDir(provider, model, shardId) : this.indexDir(provider, model);
+                await indexes[shardId]!.save(dir);
+            }
             const meta: VectorIndexMeta = {
-                version: 1,
+                version: 2,
                 provider,
                 model,
                 dims,
                 count,
                 rootFingerprint: this.rootFingerprint,
                 backend: "hnsw",
+                shardCount,
+                shards: shardCounts.map((c, shardId) => ({ shardId, count: c })),
                 hnsw: { m: this.config.m, efConstruction: this.config.efConstruction, efSearch: this.config.efSearch },
                 updatedAt: Date.now()
             };
             await writeJson(this.metaPath(provider, model), meta);
-            metrics.gauge("vector_index.size", index.size());
+            metrics.gauge("vector_index.size", indexes.reduce((sum, idx) => sum + idx.size(), 0));
             metrics.gauge("vector_index.backend", 1);
-            return { key: this.keyFor(provider, model), provider, model, backend: "hnsw", dims, index, meta };
+            return { key: this.keyFor(provider, model), provider, model, backend: "hnsw", dims, shardCount, indexes, meta };
         } finally {
             stop();
         }

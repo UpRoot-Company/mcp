@@ -75,6 +75,7 @@ SMART_CONTEXT_VECTOR_INDEX_REBUILD=manual \
 smart-context-build-vector-index
 ```
 
+- For large repos, consider sharding: `SMART_CONTEXT_VECTOR_INDEX_SHARDS=auto` (or a number like `4`).
 - Default `SMART_CONTEXT_VECTOR_INDEX=auto` will fall back to brute-force if no index exists.
 - The index is stored under `.smart-context/vector-index/<provider>/<model>/`.
 

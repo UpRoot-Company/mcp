@@ -15,7 +15,8 @@
 ## Vector index unavailable
 
 - Run `smart-context-build-vector-index` (see `docs/guides/getting-started.md`).
-- Or disable ANN: `SMART_CONTEXT_VECTOR_INDEX=off` (fallback to brute-force).
+- For large repos, consider sharding: `SMART_CONTEXT_VECTOR_INDEX_SHARDS=auto` (or a number like `4`).
+- Or disable vector search entirely: `SMART_CONTEXT_VECTOR_INDEX=off`.
 
 ## “My MCP host can’t parse responses / protocol errors”
 

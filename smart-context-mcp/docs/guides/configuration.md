@@ -59,6 +59,7 @@ Use `smart-context-migrate-embeddings-pack` to migrate legacy `.smart-context/st
 |---|---|
 | `SMART_CONTEXT_VECTOR_INDEX` | Vector index backend (`auto`, `off`, `bruteforce`, `hnsw`). |
 | `SMART_CONTEXT_VECTOR_INDEX_REBUILD` | Rebuild policy (`auto`, `on_start`, `manual`). |
+| `SMART_CONTEXT_VECTOR_INDEX_SHARDS` | Shard count for large repos (`off`, `auto`, or a number). |
 | `SMART_CONTEXT_VECTOR_INDEX_MAX_POINTS` | Index size cap for ANN builds. |
 | `SMART_CONTEXT_VECTOR_INDEX_M` | HNSW M parameter. |
 | `SMART_CONTEXT_VECTOR_INDEX_EF_CONSTRUCTION` | HNSW build parameter. |

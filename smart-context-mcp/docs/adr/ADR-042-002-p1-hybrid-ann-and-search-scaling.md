@@ -75,10 +75,10 @@ P1은 다음을 채택한다.
    - `bruteforce` + `hnsw (WASM)` 2가지 백엔드
    - 기본은 `auto`(ANN 사용 가능할 때만 사용, 미사용 시 brute-force)
 
-2) **ANN 백엔드 확정: `hnswlib-wasm`**
-   - 네이티브 빌드 없이 동작(WASM only)
+2) **ANN 백엔드: `hnsw` (optional module + fallback)**
+   - 목표: 네이티브 빌드 없이 동작하는 ANN(또는 ANN 유사 경로)을 제공
    - 오프라인 환경에서 모델/인덱스 모두 로컬 로드 가능
-   - 로딩 실패 시 brute-force로 자동 degrade
+   - ANN 모듈이 사용 불가한 환경에서는 **persisted brute-force 인덱스**로 자동 degrade(기능은 유지, 성능은 제한)
 
 3) **Vector Index persistence 도입**  
    - `.smart-context/vector-index/<provider>/<model>/`에 저장
