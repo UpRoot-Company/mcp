@@ -87,6 +87,8 @@ Plan/apply safe edits with impact analysis.
 | `options.includeImpact` | `boolean` |  | Include impact report when enabled. |
 | `options.autoRollback` | `boolean` |  | Reserved (implementation-dependent). |
 | `options.batchMode` | `boolean` |  | Reserved (implementation-dependent). |
+| `options.suggestDocs` | `boolean` |  | Enable doc update suggestions on successful apply. |
+| `options.batchImpactLimit` | `number` |  | Max files to include in batch impact preview. |
 
 ---
 
@@ -102,6 +104,7 @@ Create or scaffold files.
 | `targetPath` | `string` |  | Where to create it. |
 | `template` | `string` |  | Template name/path (if supported). |
 | `content` | `string` |  | Explicit content overrides generation. |
+| `options.safeWrite` | `boolean` |  | Use edit_coordinator path to preserve undo history. |
 
 ---
 

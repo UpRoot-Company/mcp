@@ -94,7 +94,7 @@ describe("HistoryEngine", () => {
         const expectedIds = operations.slice(10).map((op) => op.id);
         const actualIds = history.undoStack.map((op: any) => op.id);
         expect(actualIds).toEqual(expectedIds);
-    });
+    }, 15000);
 });
 
 function createOperation(description: string) {

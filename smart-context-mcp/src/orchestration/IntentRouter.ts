@@ -11,6 +11,7 @@ export interface IntentConstraints {
   includeImpact?: boolean;
   dryRun?: boolean;
   batchMode?: boolean;
+  batchImpactLimit?: number;
   limit?: number;
   edits?: any[];
   view?: 'auto' | 'preview' | 'section' | 'full' | 'skeleton' | 'fragment';

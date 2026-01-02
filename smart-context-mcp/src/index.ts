@@ -732,7 +732,8 @@ export class SmartContextServer {
                                 includeImpact: { type: 'boolean' },
                                 autoRollback: { type: 'boolean' },
                                 batchMode: { type: 'boolean' },
-                                suggestDocs: { type: 'boolean' }
+                                suggestDocs: { type: 'boolean' },
+                                batchImpactLimit: { type: 'number' }
                             }
                         }
                     },

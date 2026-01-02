@@ -16,23 +16,24 @@ export class ChangePillar {
   public async execute(intent: ParsedIntent, context: OrchestrationContext): Promise<any> {
     const stopTotal = metrics.startTimer("change.total_ms");
     try {
-      const { targets, constraints, originalIntent, action } = intent;
-      const { dryRun = true, includeImpact = false } = constraints;
+    const { targets, constraints, originalIntent, action } = intent;
+    const { dryRun = true, includeImpact = false } = constraints;
       const integrityOptions = IntegrityEngine.resolveOptions(constraints.integrity, "change");
 
       const rawEdits = Array.isArray(constraints.edits) ? constraints.edits : [];
       const targetFiles = this.resolveTargetFiles(constraints, targets);
       const editPaths = this.collectEditPaths(rawEdits);
       const shouldBatch = this.shouldUseBatch(constraints, targetFiles, editPaths);
-      if (shouldBatch) {
-        return this.executeBatchChange({
-          intent,
-          context,
-          rawEdits,
-          targetFiles,
-          dryRun
-        });
-      }
+    if (shouldBatch) {
+      return this.executeBatchChange({
+        intent,
+        context,
+        rawEdits,
+        targetFiles,
+        dryRun,
+        includeImpact
+      });
+    }
 
       let targetPath: string | undefined = constraints.targetPath || targets[0] || this.extractTargetFromEdits(rawEdits);
 
@@ -152,13 +153,34 @@ export class ChangePillar {
     let autoCorrected = false;
     const autoCorrectionAttempts: string[] = [];
 
+    let allowLevenshtein = budget.allowLevenshtein;
+    if (allowLevenshtein) {
+      const minTargetLength = this.getMinLevenshteinTargetLength();
+      const tooShort = edits.some((edit: any) => (edit?.targetString?.length ?? 0) < minTargetLength);
+      if (tooShort) {
+        allowLevenshtein = false;
+      } else {
+        const maxFileBytes = this.getMaxLevenshteinFileBytes();
+        if (maxFileBytes > 0) {
+          try {
+            const stat = await this.runTool(context, 'stat_file', { path: targetPath });
+            if (typeof stat?.size === 'number' && stat.size > maxFileBytes) {
+              allowLevenshtein = false;
+            }
+          } catch {
+            // ignore stat failures
+          }
+        }
+      }
+    }
+
     if (!editResult.success && edits.length > 0) {
       const attempts: Array<{ label: string; edits: any[] }> = [];
       if (budget.allowNormalization) {
         attempts.push({ label: 'whitespace', edits: edits.map((edit: any) => ({ ...edit, fuzzyMode: edit.fuzzyMode ?? 'whitespace' })) });
         attempts.push({ label: 'structural', edits: edits.map((edit: any) => ({ ...edit, normalization: edit.normalization ?? 'structural' })) });
       }
-      if (budget.allowLevenshtein) {
+      if (allowLevenshtein) {
         const eligible = edits.every((edit: any) => (edit?.targetString?.length ?? 0) <= budget.maxLevenshteinTargetLength);
         if (eligible) {
           attempts.push({ label: 'fuzzy', edits: edits.map((edit: any) => ({ ...edit, fuzzyMode: edit.fuzzyMode ?? 'levenshtein' })) });
@@ -535,8 +557,9 @@ export class ChangePillar {
     rawEdits: any[];
     targetFiles: string[];
     dryRun: boolean;
+    includeImpact: boolean;
   }): Promise<any> {
-    const { intent, context, rawEdits, targetFiles, dryRun } = args;
+    const { intent, context, rawEdits, targetFiles, dryRun, includeImpact } = args;
     const originalIntent = intent.originalIntent;
 
     if (rawEdits.length === 0) {
@@ -590,7 +613,9 @@ export class ChangePillar {
         originalIntent,
         rawEdits,
         targetFiles,
-        normalizedByFile
+        normalizedByFile,
+        includeImpact,
+        batchImpactLimit: this.resolveBatchImpactLimit(intent.constraints)
       });
     }
 
@@ -599,7 +624,9 @@ export class ChangePillar {
       originalIntent,
       rawEdits,
       targetFiles,
-      normalizedByFile
+      normalizedByFile,
+      includeImpact,
+      batchImpactLimit: this.resolveBatchImpactLimit(intent.constraints)
     });
   }
 
@@ -609,11 +636,15 @@ export class ChangePillar {
     rawEdits: any[];
     targetFiles: string[];
     normalizedByFile: Map<string, { edits: any[] }>;
+    includeImpact: boolean;
+    batchImpactLimit: number;
   }): Promise<any> {
-    const { context, originalIntent, rawEdits, targetFiles, normalizedByFile } = args;
+    const { context, originalIntent, rawEdits, targetFiles, normalizedByFile, includeImpact, batchImpactLimit } = args;
     const results: Array<{ filePath: string; success: boolean; diff?: string; error?: string }> = [];
     const planSteps: Array<{ action: 'modify'; file: string; description: string; diff?: string }> = [];
     const diffBlocks: string[] = [];
+    const impactReports: Array<{ filePath: string; preview?: any }> = [];
+    let remainingImpact = includeImpact ? Math.max(0, batchImpactLimit) : 0;
 
     for (const [filePath, normalization] of normalizedByFile.entries()) {
       const stopEdit = metrics.startTimer("change.edit_coordinator_ms");
@@ -623,7 +654,7 @@ export class ChangePillar {
           filePath,
           edits: normalization.edits,
           dryRun: true,
-          options: { skipImpactPreview: true }
+          options: { skipImpactPreview: remainingImpact <= 0 }
         });
       } finally {
         stopEdit();
@@ -655,6 +686,12 @@ export class ChangePillar {
         description: originalIntent,
         diff: editResult.diff
       });
+      if (remainingImpact > 0) {
+        if (editResult?.impactPreview) {
+          impactReports.push({ filePath, preview: editResult.impactPreview });
+        }
+        remainingImpact -= 1;
+      }
       if (typeof editResult.diff === "string" && editResult.diff.length > 0) {
         diffBlocks.push(this.formatBatchDiff(filePath, editResult.diff));
       }
@@ -680,6 +717,7 @@ export class ChangePillar {
       diff: diffBlocks.join("\n\n"),
       plan: { steps: planSteps },
       results,
+      impactReports: impactReports.length > 0 ? impactReports : undefined,
       guidance: successGuidance
     };
   }
@@ -690,8 +728,10 @@ export class ChangePillar {
     rawEdits: any[];
     targetFiles: string[];
     normalizedByFile: Map<string, { edits: any[] }>;
+    includeImpact: boolean;
+    batchImpactLimit: number;
   }): Promise<any> {
-    const { context, originalIntent, rawEdits, targetFiles, normalizedByFile } = args;
+    const { context, originalIntent, rawEdits, targetFiles, normalizedByFile, includeImpact, batchImpactLimit } = args;
     const batchEdits: any[] = [];
     for (const [filePath, normalization] of normalizedByFile.entries()) {
       for (const edit of normalization.edits) {
@@ -699,10 +739,16 @@ export class ChangePillar {
       }
     }
 
-    const editResult = await this.runTool(context, "edit_code", {
-      edits: batchEdits,
-      dryRun: false
-    });
+    const stopEditCode = metrics.startTimer("change.edit_code_ms");
+    let editResult: any;
+    try {
+      editResult = await this.runTool(context, "edit_code", {
+        edits: batchEdits,
+        dryRun: false
+      });
+    } finally {
+      stopEditCode();
+    }
     const success = editResult?.success !== false;
     const results = Array.isArray(editResult?.results) ? editResult.results.map((entry: any) => ({
       filePath: entry.filePath,
@@ -711,6 +757,9 @@ export class ChangePillar {
     })) : undefined;
 
     const message = success ? undefined : (editResult?.message ?? "Batch apply failed.");
+    const impactReports = success && includeImpact
+      ? await this.collectBatchImpactReports(context, normalizedByFile, Math.max(0, batchImpactLimit))
+      : [];
     const guidance = success
       ? {
           message: "Batch changes successfully applied.",
@@ -728,6 +777,7 @@ export class ChangePillar {
       message,
       operation: "apply",
       results,
+      impactReports: impactReports.length > 0 ? impactReports : undefined,
       editResult,
       transactionId: editResult?.operation?.id ?? "",
       rollbackAvailable: success,
@@ -737,6 +787,48 @@ export class ChangePillar {
 
   private formatBatchDiff(filePath: string, diff: string): string {
     return `# ${filePath}\n${diff}`;
+  }
+
+  private resolveBatchImpactLimit(constraints: any): number {
+    const raw = constraints?.batchImpactLimit ?? process.env.SMART_CONTEXT_CHANGE_BATCH_IMPACT_LIMIT;
+    const parsed = Number.parseInt(raw ?? "", 10);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+    return 0;
+  }
+
+  private async collectBatchImpactReports(
+    context: OrchestrationContext,
+    normalizedByFile: Map<string, { edits: any[] }>,
+    limit: number
+  ): Promise<Array<{ filePath: string; preview?: any; error?: string }>> {
+    const results: Array<{ filePath: string; preview?: any; error?: string }> = [];
+    if (limit <= 0) return results;
+    let count = 0;
+    for (const [filePath, normalization] of normalizedByFile.entries()) {
+      if (count >= limit) break;
+      try {
+        const preview = await this.runTool(context, 'impact_analyzer', { target: filePath, edits: normalization.edits });
+        results.push({ filePath, preview });
+      } catch (error: any) {
+        results.push({ filePath, error: error?.message ?? "impact_analyzer failed" });
+      }
+      count += 1;
+    }
+    return results;
+  }
+
+  private getMinLevenshteinTargetLength(): number {
+    const raw = process.env.SMART_CONTEXT_CHANGE_MIN_LEVENSHTEIN_TARGET_LEN;
+    const parsed = Number.parseInt(raw ?? "", 10);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+    return 24;
+  }
+
+  private getMaxLevenshteinFileBytes(): number {
+    const raw = process.env.SMART_CONTEXT_CHANGE_MAX_LEVENSHTEIN_FILE_BYTES;
+    const parsed = Number.parseInt(raw ?? "", 10);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+    return 262144;
   }
 
   private async suggestDocUpdates(

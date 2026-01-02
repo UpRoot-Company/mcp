@@ -121,7 +121,7 @@ MCP tool 'change' ... batchMode + targetFiles + edits
 
 - **Phase 0 (Correctness Hotfix)**: batch change를 실제로 동작시키고, write를 fast-path로 전환한다. (기능 정상화 우선)
 - **Phase 1 (Latency Guardrails)**: 실패/드라이런에서의 불필요한 비용(doc_search/auto-correction)을 차단하고, fast-fail 규칙을 도입한다. (타임아웃 제거 우선)
-- **Phase 2 (Observability + Tuning)**: change/write의 p50/p95를 관측 가능하게 하고, 현장 데이터로 budget/threshold를 조정한다.
+- **Phase 2 (Observability + Tuning)**: change/write의 p50/p95를 관측 가능하게 하고, 현장 데이터로 budget/threshold를 조정한다. (implemented: metrics timers 추가 완료)
 
 ---
 
@@ -199,6 +199,20 @@ function mapEditsToFiles(targetFiles: string[], rawEdits: any[], fallbackTarget?
 - 멀티파일에서 “의도치 않게 모든 edit가 첫 번째 파일로 몰리는 현상”을 원천 차단한다.
 - 불명확한 입력은 빠르게 실패시키고, 클라이언트/상위 에이전트가 filePath를 명시하도록 유도한다.
 
+#### 5.1.2 Batch + Impact 처리 정책
+
+batch에서 impact는 비용이 크므로 “상한 기반”으로 제한한다.
+
+- 기본값: batch impact 비활성화 (`batchImpactLimit = 0`)
+- 활성화 조건:
+  - `options.includeImpact=true` + (`options.batchImpactLimit` > 0 또는 ENV 설정)
+- 상한:
+  - 최대 N개 파일만 impact preview 포함 (N = `batchImpactLimit`)
+
+관련 옵션/ENV:
+- `options.batchImpactLimit` (tool option)
+- `SMART_CONTEXT_CHANGE_BATCH_IMPACT_LIMIT` (env, 기본 0)
+
 **실행 경로**
 
 - **DryRun**
@@ -256,6 +270,11 @@ function mapEditsToFiles(targetFiles: string[], rawEdits: any[], fallbackTarget?
 
 - 단일 파일이라도 파일 크기 > N MB 또는 targetString이 매우 짧은 경우:
   - levenshtein 자동 시도 차단
+
+튜닝 파라미터(Phase 2):
+
+- `SMART_CONTEXT_CHANGE_MIN_LEVENSHTEIN_TARGET_LEN` (default: `24`)
+- `SMART_CONTEXT_CHANGE_MAX_LEVENSHTEIN_FILE_BYTES` (default: `262144`)
 
 **구현 지점**
 
@@ -345,6 +364,12 @@ write는 “파일 생성”과 “파일 overwrite”를 구분해야 한다.
   - 예외 허용: `targetFiles.length === edits.length`일 때 index 매핑
   - 그 외: 빠르게 에러(명시적 메시지)
 
+추가 옵션:
+
+- `options.suggestDocs`: 성공 apply 후 doc 추천 활성화
+- `options.batchImpactLimit`: batch impact preview 상한
+- `options.safeWrite`: write를 edit_coordinator 경로로 강제
+
 예시(권장):
 
 ```json
@@ -367,10 +392,17 @@ write는 “파일 생성”과 “파일 overwrite”를 구분해야 한다.
 
 - `change.total_ms` (change tool end-to-end)
 - `change.edit_coordinator_ms` (per-file)
+- `change.edit_code_ms` (batch apply)
 - `change.doc_suggest_ms` (doc_search 포함)
 - `write.total_ms`
 
 구현은 `src/utils/MetricsCollector.ts`의 `metrics`를 활용한다.
+
+예시(스냅샷 조회):
+
+```json
+{ "command": "metrics" }
+```
 
 ---
 

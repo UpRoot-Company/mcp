@@ -140,8 +140,9 @@ describe("Pillars", () => {
       targets: ["src/demo.ts"],
       originalIntent: "update demo",
       constraints: {
-        dryRun: true,
+        dryRun: false,
         includeImpact: false,
+        suggestDocs: true,
         edits: [{ targetString: "a", replacementString: "b" }]
       },
       confidence: 1
