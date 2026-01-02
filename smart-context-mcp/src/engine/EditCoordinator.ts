@@ -16,7 +16,8 @@ import {
     BatchOperation,
     HistoryItem,
     EditExecutionOptions,
-    ImpactPreview
+    ImpactPreview,
+    ResolvedEdit
 } from "../types.js";
 import { IFileSystem } from "../platform/FileSystem.js";
 import { TransactionLog, TransactionSnapshot } from "./TransactionLog.js";
@@ -103,6 +104,72 @@ export class EditCoordinator {
         }
 
         return result;
+    }
+
+    // ADR-042-005: Phase B1 - Apply ResolvedEdits
+    /**
+     * Apply resolved edits (indexRange-based) to a file.
+     * 
+     * ResolvedEdits are already validated by EditResolver and contain exact indexRanges,
+     * so this method directly converts them to Edit format and applies them.
+     * 
+     * @param absPath Absolute file path
+     * @param resolvedEdits Array of ResolvedEdit from Resolver
+     * @param dryRun If true, performs dry-run without modifying files
+     * @param options Execution options (diffMode, skipImpactPreview, etc.)
+     * @returns EditResult with operation details
+     */
+    public async applyResolvedEdits(
+        absPath: string,
+        resolvedEdits: ResolvedEdit[],
+        dryRun: boolean = false,
+        options?: EditExecutionOptions
+    ): Promise<EditResult> {
+        // Convert ResolvedEdit to Edit format
+        const edits: Edit[] = resolvedEdits.map(re => ({
+            targetString: re.targetString,
+            replacementString: re.replacementString,
+            indexRange: re.indexRange,
+            expectedHash: re.expectedHash
+        }));
+
+        // Use existing applyEdits method
+        const result = await this.applyEdits(absPath, edits, dryRun, options);
+
+        // Attach resolution diagnostics to result if available
+        if (result.success && resolvedEdits.length > 0 && resolvedEdits[0].diagnostics) {
+            (result as any).resolutionDiagnostics = resolvedEdits.map(re => re.diagnostics);
+        }
+
+        return result;
+    }
+
+    /**
+     * Apply batch of resolved edits across multiple files.
+     * 
+     * @param fileResolvedEdits Array of {filePath, resolvedEdits}
+     * @param dryRun If true, performs dry-run
+     * @param options Execution options
+     * @returns EditResult with batch operation details
+     */
+    public async applyBatchResolvedEdits(
+        fileResolvedEdits: { filePath: string; resolvedEdits: ResolvedEdit[] }[],
+        dryRun: boolean = false,
+        options?: EditExecutionOptions
+    ): Promise<EditResult> {
+        // Convert to Edit format for batch processing
+        const fileEdits = fileResolvedEdits.map(({ filePath, resolvedEdits }) => ({
+            filePath,
+            edits: resolvedEdits.map(re => ({
+                targetString: re.targetString,
+                replacementString: re.replacementString,
+                indexRange: re.indexRange,
+                expectedHash: re.expectedHash
+            } as Edit))
+        }));
+
+        // Use existing batch method
+        return this.applyBatchEdits(fileEdits, dryRun, options);
     }
 
     /**

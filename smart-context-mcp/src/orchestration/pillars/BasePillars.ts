@@ -164,6 +164,12 @@ function truncateText(text: string, maxChars: number): string {
 export class WritePillar {
   constructor(private readonly registry: InternalToolRegistry) {}
 
+  private computeHash(content: string): { algorithm: 'xxhash' | 'sha256'; value: string } {
+    const hash = crypto.createHash('sha256').update(content).digest('hex');
+    return { algorithm: 'sha256', value: hash };
+  }
+
+
   public async execute(intent: ParsedIntent, context: OrchestrationContext): Promise<any> {
     const stopTotal = metrics.startTimer("write.total_ms");
     try {
@@ -189,6 +195,83 @@ export class WritePillar {
 
       const resolvedPath = await this.resolveTargetPath(targetPath);
 
+      // ADR-042-005: Phase B3 - safeWrite mode (full range patch with undo support)
+      if (hasExplicitContent && safeWrite) {
+        const stopSafePatch = metrics.startTimer("write.safe_patch_ms");
+        
+        try {
+          let existingContent = '';
+          try {
+            existingContent = await this.runTool(context, 'read_code', { 
+              filePath: resolvedPath, 
+              view: 'full' 
+            });
+          } catch {
+            // File doesn't exist - create empty first
+            try {
+              await this.runTool(context, 'write_file', { filePath: resolvedPath, content: '' });
+            } catch {
+              await this.runTool(context, 'edit_code', {
+                edits: [{ filePath: resolvedPath, operation: 'create', replacementString: '' }],
+                dryRun: false,
+                createMissingDirectories: true
+              });
+            }
+            existingContent = '';
+          }
+
+          // Convert to full range edit (using edit_coordinator)
+          const edit = {
+            targetString: existingContent,
+            replacementString: content,
+            indexRange: { start: 0, end: existingContent.length },
+            expectedHash: existingContent ? this.computeHash(existingContent) : undefined
+          };
+
+          const result = await this.runTool(context, 'edit_coordinator', {
+            filePath: resolvedPath,
+            edits: [edit],
+            dryRun: false
+          });
+
+          stopSafePatch();
+
+          return {
+            success: result.success ?? true,
+            status: result.success === false ? 'failure' : 'success',
+            createdFiles: result.success ? [{ 
+              path: resolvedPath, 
+              description: `Written (safe mode) from intent: ${originalIntent}` 
+            }] : [],
+            transactionId: result.operation?.id || '',
+            rollbackAvailable: true,
+            writeMode: 'safe',
+            guidance: {
+              message: result.success 
+                ? 'File written with undo support.' 
+                : `Write failed: ${result.message || 'Unknown error'}`,
+              suggestedActions: result.success 
+                ? [{ pillar: 'read', action: 'view_full', target: resolvedPath }] 
+                : []
+            }
+          };
+        } catch (error: any) {
+          stopSafePatch();
+          return {
+            success: false,
+            status: 'failure',
+            createdFiles: [],
+            transactionId: '',
+            rollbackAvailable: false,
+            writeMode: 'safe',
+            guidance: {
+              message: `Safe write failed: ${error.message}`,
+              suggestedActions: []
+            }
+          };
+        }
+      }
+
       if (hasExplicitContent && !safeWrite) {
         try {
           await this.runTool(context, 'write_file', { filePath: resolvedPath, content });
@@ -205,8 +288,10 @@ export class WritePillar {
           status: 'success',
           createdFiles: [{ path: resolvedPath, description: `Written from intent: ${originalIntent}` }],
           transactionId: '',
+          rollbackAvailable: false,
+          writeMode: 'fast',
           guidance: {
-            message: 'File written.',
+            message: 'File written (fast mode, no undo).',
             suggestedActions: [{ pillar: 'read', action: 'view_full', target: resolvedPath }]
           }
         };

@@ -8,10 +8,35 @@ import * as path from 'path';
 import { IntegrityEngine } from '../../integrity/IntegrityEngine.js';
 import type { IntegrityFinding, IntegrityReport } from '../../integrity/IntegrityTypes.js';
 import { metrics } from '../../utils/MetricsCollector.js';
+import { ConfigurationManager } from '../../config/ConfigurationManager.js';
+import { EditResolver } from '../../engine/EditResolver.js';
+import type { ResolveError } from '../../types.js';
+import { EditCoordinator } from '../../engine/EditCoordinator.js';
+import { EditorEngine } from '../../engine/Editor.js';
+import { HistoryEngine } from '../../engine/History.js';
+import { NodeFileSystem } from '../../platform/FileSystem.js';
 
 
 export class ChangePillar {
+  private fileSystem = new NodeFileSystem(process.cwd());
+  
   constructor(private readonly registry: InternalToolRegistry) {}
+
+  private getEditCoordinator(): EditCoordinator {
+    // Create EditCoordinator instance when needed
+    // EditorEngine and HistoryEngine need rootPath and fileSystem
+    const rootPath = process.cwd();
+    const editorEngine = new EditorEngine(rootPath, this.fileSystem);
+    const historyEngine = new HistoryEngine(rootPath, this.fileSystem);
+    return new EditCoordinator(editorEngine, historyEngine);
+  }
+
+  private getEditResolver(): EditResolver {
+    // Create EditResolver instance when needed
+    const rootPath = process.cwd();
+    const editorEngine = new EditorEngine(rootPath, this.fileSystem);
+    return new EditResolver(this.fileSystem, editorEngine);
+  }
 
   public async execute(intent: ParsedIntent, context: OrchestrationContext): Promise<any> {
     const stopTotal = metrics.startTimer("change.total_ms");
@@ -24,6 +49,24 @@ export class ChangePillar {
       const targetFiles = this.resolveTargetFiles(constraints, targets);
       const editPaths = this.collectEditPaths(rawEdits);
       const shouldBatch = this.shouldUseBatch(constraints, targetFiles, editPaths);
+    
+    // ADR-042-005: Phase B2 - Check for v2 editor mode
+    const v2Enabled = ConfigurationManager.getEditorV2Enabled();
+    const v2Mode = ConfigurationManager.getEditorV2Mode();
+    const useV2 = v2Enabled && v2Mode !== 'off';
+    
+    if (useV2 && shouldBatch) {
+      return this.executeV2BatchChange({
+        intent,
+        context,
+        rawEdits,
+        targetFiles,
+        dryRun,
+        includeImpact,
+        v2Mode
+      });
+    }
+    
     if (shouldBatch) {
       return this.executeBatchChange({
         intent,
@@ -1208,6 +1251,198 @@ export class ChangePillar {
     const normalized = text.replace(/\s+/g, " ").trim();
     if (normalized.length <= max) return normalized;
     return `${normalized.slice(0, max - 3)}...`;
+  }
+
+  /**
+   * ADR-042-005: Phase B2 - V2 batch change execution using EditResolver
+   */
+  private async executeV2BatchChange(args: {
+    intent: ParsedIntent;
+    context: OrchestrationContext;
+    rawEdits: any[];
+    targetFiles: string[];
+    dryRun: boolean;
+    includeImpact: boolean;
+    v2Mode: string;
+  }): Promise<any> {
+    const { intent, context, rawEdits, targetFiles, dryRun, includeImpact, v2Mode } = args;
+    const stopResolve = metrics.startTimer("change.resolve_ms");
+    
+    try {
+      // Group edits by file
+      const editsByFile = new Map<string, any[]>();
+      for (const edit of rawEdits) {
+        const filePath = edit.filePath || targetFiles[0];
+        if (!filePath) {
+          throw new Error("Cannot determine target file for edit");
+        }
+        if (!editsByFile.has(filePath)) {
+          editsByFile.set(filePath, []);
+        }
+        editsByFile.get(filePath)!.push(edit);
+      }
+
+      // Resolve all edits
+      const resolveOptions = {
+        allowAmbiguousAutoPick: ConfigurationManager.getAllowAmbiguousAutoPick(),
+        timeoutMs: ConfigurationManager.getResolveTimeoutMs()
+      };
+
+      const allResolvedEdits: any[] = [];
+      const allErrors: ResolveError[] = [];
+
+      // Create EditResolver instance
+      const editResolver = this.getEditResolver();
+
+      for (const [filePath, edits] of editsByFile.entries()) {
+        const result = await editResolver.resolveAll(filePath, edits, resolveOptions);
+        
+        if (!result.success && result.errors) {
+          allErrors.push(...result.errors);
+        } else if (result.success && result.resolvedEdits) {
+          for (const resolved of result.resolvedEdits) {
+            allResolvedEdits.push({
+              ...resolved,
+              filePath
+            });
+          }
+        }
+      }
+
+      stopResolve();
+
+      // If any errors, format guidance and return failure
+      if (allErrors.length > 0) {
+        const guidance = this.formatResolveErrors(allErrors, intent.originalIntent, targetFiles);
+        return {
+          success: false,
+          dryRun,
+          message: guidance.message,
+          suggestedActions: guidance.suggestedActions,
+          diagnostics: { resolveErrors: allErrors }
+        };
+      }
+
+      // dryrun mode: return resolved edits without applying
+      if (v2Mode === 'dryrun') {
+        return {
+          success: true,
+          dryRun: true,
+          message: `[DRYRUN] Resolved ${allResolvedEdits.length} edits successfully`,
+          resolvedEdits: allResolvedEdits
+        };
+      }
+
+      // Apply resolved edits
+      const stopApply = metrics.startTimer("change.apply_ms");
+      
+      const editCoordinator = this.getEditCoordinator();
+      const applyResult = await editCoordinator.applyBatchResolvedEdits(
+        allResolvedEdits.map(r => ({
+          filePath: r.filePath,
+          resolvedEdits: [r]
+        })),
+        dryRun
+      );
+
+      stopApply();
+
+      // Extract changed files from resolved edits (since applyResult doesn't have results array)
+      const changedFiles = allResolvedEdits.map(r => r.filePath).filter((v, i, a) => a.indexOf(v) === i);
+
+      let message = `${changedFiles.length} file(s) modified`;
+      if (dryRun) {
+        message = `[DRYRUN] ${message}`;
+      }
+
+      return {
+        success: applyResult.success,
+        dryRun,
+        message: applyResult.message || message,
+        changedFiles,
+        rollbackAvailable: false // EditCoordinator doesn't expose transactionId in result
+      };
+
+    } catch (error: any) {
+      stopResolve();
+      return {
+        success: false,
+        dryRun,
+        message: `V2 batch change failed: ${error.message}`,
+        error: error.message
+      };
+    }
+  }
+
+  /**
+   * ADR-042-005: Format ResolveError[] into user guidance
+   */
+  private formatResolveErrors(
+    errors: ResolveError[],
+    intent: string,
+    targetFiles: string[]
+  ): { message: string; suggestedActions: any[] } {
+    const messages: string[] = [];
+    const actions: any[] = [];
+
+    // Group errors by type
+    const ambiguousErrors = errors.filter(e => e.errorCode === 'AMBIGUOUS_MATCH');
+    const timeoutErrors = errors.filter(e => e.errorCode === 'RESOLVE_TIMEOUT');
+    const otherErrors = errors.filter(e => e.errorCode !== 'AMBIGUOUS_MATCH' && e.errorCode !== 'RESOLVE_TIMEOUT');
+
+    if (ambiguousErrors.length > 0) {
+      const first = ambiguousErrors[0];
+      messages.push(`Ambiguous match detected.`);
+      
+      // Suggest lineRange narrowing
+      if (first.suggestion?.lineRange) {
+        messages.push(`Try narrowing to lines ${first.suggestion.lineRange.start}-${first.suggestion.lineRange.end}.`);
+        actions.push({
+          pillar: 'read',
+          action: 'view_fragment',
+          target: first.filePath,
+          options: {
+            view: 'fragment',
+            lineRange: `${first.suggestion.lineRange.start}-${first.suggestion.lineRange.end}`
+          }
+        });
+      } else {
+        actions.push({
+          pillar: 'read',
+          action: 'view_file',
+          target: first.filePath
+        });
+      }
+    }
+
+    if (timeoutErrors.length > 0) {
+      messages.push(`Resolve timeout (>${ConfigurationManager.getResolveTimeoutMs()}ms). Provide more precise targetString.`);
+    }
+
+    if (otherErrors.length > 0) {
+      const first = otherErrors[0];
+      messages.push(`Resolve failed: ${first.message}`);
+    }
+
+    // Default retry actions
+    actions.push({
+      pillar: 'change',
+      action: 'retry',
+      intent,
+      target: targetFiles[0]
+    });
+
+    actions.push({
+      pillar: 'write',
+      action: 'overwrite',
+      intent: `Rewrite ${targetFiles[0]} with corrected content`,
+      targetPath: targetFiles[0]
+    });
+
+    return {
+      message: messages.join(' '),
+      suggestedActions: actions
+    };
   }
 
 }
