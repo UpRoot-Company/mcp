@@ -44,6 +44,13 @@ interface Match {
     escapeVariant?: EscapeVariantMode;
 }
 
+// ADR-042-005: Phase A2 - PlannedMatch for Resolver
+export interface PlannedMatch {
+    match: Match;
+    candidateCount: number;
+    allCandidates?: Match[];
+}
+
 export class AmbiguousMatchError extends Error {
     public conflictingLines: number[];
 
@@ -1451,6 +1458,201 @@ export class EditorEngine {
         });
 
         return diagnostics;
+    }
+
+    // ADR-042-005: Phase A2 - Planning API for Resolver
+    /**
+     * Plans edits from content without applying them.
+     * Returns match candidates with diagnostics for Resolver to make decisions.
+     */
+    public planEditsFromContent(
+        content: string,
+        edits: Edit[],
+        opts?: {
+            allowAmbiguousAutoPick?: boolean;
+            timeoutMs?: number;
+        }
+    ): PlannedMatch[] {
+        const lineCounter = new LineCounter(content);
+        const results: PlannedMatch[] = [];
+
+        for (const edit of edits) {
+            try {
+                // For indexRange edits, validate directly
+                if (edit.indexRange) {
+                    const { start, end } = edit.indexRange;
+                    if (start < 0 || end > content.length || start > end) {
+                        throw new MatchNotFoundError(
+                            `Invalid indexRange: start=${start}, end=${end}, contentLength=${content.length}`
+                        );
+                    }
+                    const targetSlice = content.substring(start, end);
+                    results.push({
+                        match: {
+                            start,
+                            end,
+                            replacement: edit.replacementString,
+                            original: targetSlice,
+                            lineNumber: lineCounter.getLineNumber(start),
+                            matchType: 'exact',
+                            normalizationLevel: 'exact'
+                        },
+                        candidateCount: 1
+                    });
+                    continue;
+                }
+
+                // For insert operations
+                if (edit.insertMode) {
+                    const insertMatch = this.planInsertOperation(content, edit, lineCounter);
+                    results.push({
+                        match: insertMatch,
+                        candidateCount: 1
+                    });
+                    continue;
+                }
+
+                // For string-based matching, find all candidates
+                const allMatches = this.findAllMatches(content, edit, lineCounter);
+                
+                if (allMatches.length === 0) {
+                    throw new MatchNotFoundError(`No match found for target: "${edit.targetString}"`);
+                }
+
+                if (allMatches.length === 1) {
+                    results.push({
+                        match: allMatches[0],
+                        candidateCount: 1
+                    });
+                    continue;
+                }
+
+                // Multiple candidates - resolve or return all
+                const allowAutoPick = opts?.allowAmbiguousAutoPick ?? true;
+                if (allowAutoPick) {
+                    const resolved = this.resolveAmbiguousMatches(allMatches, edit);
+                    if (resolved) {
+                        results.push({
+                            match: resolved,
+                            candidateCount: allMatches.length,
+                            allCandidates: allMatches
+                        });
+                        continue;
+                    }
+                }
+
+                // Return all candidates for Resolver to decide
+                results.push({
+                    match: allMatches[0], // first as default
+                    candidateCount: allMatches.length,
+                    allCandidates: allMatches
+                });
+
+            } catch (error) {
+                // Re-throw with edit context
+                (error as any).edit = edit;
+                throw error;
+            }
+        }
+
+        return results;
+    }
+
+    /**
+     * Helper: Find all matches without filtering by ambiguity rules
+     */
+    private findAllMatches(content: string, edit: Edit, lineCounter: LineCounter): Match[] {
+        let matches: Match[] = [];
+
+        if (edit.fuzzyMode === "levenshtein") {
+            const exactRegex = this.createExactRegex(edit.targetString, "exact", edit.normalizationConfig);
+            const exactMatches = [...content.matchAll(exactRegex)].map(m => ({
+                start: m.index!,
+                end: m.index! + m[0].length,
+                replacement: edit.replacementString,
+                original: m[0],
+                lineNumber: lineCounter.getLineNumber(m.index!),
+                matchType: 'exact' as const,
+                normalizationLevel: 'exact' as NormalizationLevel
+            }));
+
+            if (exactMatches.length > 0) {
+                matches = exactMatches;
+            } else {
+                matches = this.findLevenshteinCandidates(content, edit.targetString, edit.replacementString, lineCounter, edit.lineRange);
+            }
+        } else if (edit.fuzzyMode === "whitespace") {
+            const regex = this.createFuzzyRegex(edit.targetString);
+            matches = [...content.matchAll(regex)].map(m => ({
+                start: m.index!,
+                end: m.index! + m[0].length,
+                replacement: edit.replacementString,
+                original: m[0],
+                lineNumber: lineCounter.getLineNumber(m.index!),
+                matchType: 'whitespace-fuzzy' as const,
+                normalizationLevel: 'whitespace' as NormalizationLevel
+            }));
+        } else {
+            const attempts = this.getNormalizationAttempts(edit.normalization);
+            for (const level of attempts) {
+                const regex = this.createExactRegex(edit.targetString, level, edit.normalizationConfig);
+                const matchType: Match['matchType'] = level === 'exact' ? 'exact' : 'normalization';
+                const attemptMatches = [...content.matchAll(regex)].map(m => ({
+                    start: m.index!,
+                    end: m.index! + m[0].length,
+                    replacement: edit.replacementString,
+                    original: m[0],
+                    lineNumber: lineCounter.getLineNumber(m.index!),
+                    matchType,
+                    normalizationLevel: level
+                }));
+                if (attemptMatches.length > 0) {
+                    matches = attemptMatches;
+                    break;
+                }
+            }
+        }
+
+        // Apply filters
+        const filteredMatches = matches.filter(match => {
+            if (edit.lineRange) {
+                if (match.lineNumber < edit.lineRange.start || match.lineNumber > edit.lineRange.end) return false;
+            }
+
+            if (edit.beforeContext) {
+                const searchStart = edit.anchorSearchRange?.chars
+                    ? Math.max(0, match.start - edit.anchorSearchRange.chars)
+                    : 0;
+                const preceding = content.substring(searchStart, match.start);
+                const contextFuzziness = edit.contextFuzziness ?? "normal";
+                if (!this.matchesContext(edit.beforeContext, preceding, contextFuzziness, edit.normalizationConfig)) {
+                    return false;
+                }
+            }
+
+            if (edit.afterContext) {
+                const searchEnd = edit.anchorSearchRange?.chars
+                    ? Math.min(content.length, match.end + edit.anchorSearchRange.chars)
+                    : content.length;
+                const following = content.substring(match.end, searchEnd);
+                const contextFuzziness = edit.contextFuzziness ?? "normal";
+                if (!this.matchesContext(edit.afterContext, following, contextFuzziness, edit.normalizationConfig)) {
+                    return false;
+                }
+            }
+            return true;
+        });
+
+        // Compute confidence for all
+        for (const match of filteredMatches) {
+            match.confidence = this.computeMatchConfidence(
+                match,
+                edit,
+                match.normalizationLevel ?? 'exact'
+            );
+        }
+
+        return filteredMatches;
     }
 
     public async applyEdits(

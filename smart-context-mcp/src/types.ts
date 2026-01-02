@@ -860,3 +860,42 @@ export interface ManageProjectResult {
     output: string;
     data?: any;
 }
+
+// ADR-042-005: Phase A1 - Resolver Types
+export interface ResolvedEdit {
+    filePath: string; // relative path (history/ops 호환)
+    indexRange: { start: number; end: number };
+    targetString: string; // 해당 indexRange의 실제 slice (Editor.ts 검증용)
+    expectedHash?: { algorithm: "xxhash" | "sha256"; value: string };
+    replacementString: string;
+    diagnostics?: {
+        resolvedBy: "indexRange" | "lineRange" | "context" | "ast" | "fuzzy";
+        candidateCount?: number;
+        timingMs?: number;
+        notes?: string[];
+    };
+}
+
+export interface ResolveError {
+    filePath: string;
+    editIndex: number;
+    errorCode: "NO_MATCH" | "AMBIGUOUS_MATCH" | "HASH_MISMATCH" | "INVALID_RANGE" | "RESOLVE_TIMEOUT";
+    message: string;
+    suggestion?: {
+        tool?: "read" | "change";
+        lineRange?: { start: number; end: number };
+        indexRange?: { start: number; end: number };
+        next?: string;
+    };
+}
+
+export interface ResolveResult {
+    success: boolean;
+    resolvedEdits?: ResolvedEdit[];
+    errors?: ResolveError[];
+}
+
+export interface ResolveOptions {
+    allowAmbiguousAutoPick?: boolean;
+    timeoutMs?: number;
+}

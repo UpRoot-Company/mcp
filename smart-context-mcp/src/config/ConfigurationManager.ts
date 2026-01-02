@@ -185,4 +185,58 @@ export class ConfigurationManager extends EventEmitter {
         }
         return `${negation}${normalized}`;
     }
+
+    // ADR-042-005: Phase A4 - ENV Configuration Getters
+    public static get(key: string, defaultValue?: any): any {
+        const envValue = process.env[key];
+        if (envValue === undefined) {
+            return defaultValue;
+        }
+        // Boolean conversion
+        if (defaultValue === true || defaultValue === false) {
+            return envValue === 'true';
+        }
+        // Number conversion
+        if (typeof defaultValue === 'number') {
+            const parsed = Number(envValue);
+            return isNaN(parsed) ? defaultValue : parsed;
+        }
+        // String or other types
+        return envValue;
+    }
+
+    public static getEditorV2Enabled(): boolean {
+        return ConfigurationManager.get('SMART_CONTEXT_EDITOR_V2', false);
+    }
+
+    public static getEditorV2Mode(): 'off' | 'dryrun' | 'apply' {
+        const mode = ConfigurationManager.get('SMART_CONTEXT_EDITOR_V2_MODE', 'off');
+        if (mode === 'dryrun' || mode === 'apply') {
+            return mode;
+        }
+        return 'off';
+    }
+
+    public static getResolveTimeoutMs(): number {
+        return ConfigurationManager.get('SMART_CONTEXT_EDITOR_RESOLVE_TIMEOUT_MS', 1500);
+    }
+
+    public static getMinLevenshteinTargetLen(): number {
+        return ConfigurationManager.get('SMART_CONTEXT_CHANGE_MIN_LEVENSHTEIN_TARGET_LEN', 20);
+    }
+
+    public static getMaxLevenshteinFileBytes(): number {
+        return ConfigurationManager.get('SMART_CONTEXT_CHANGE_MAX_LEVENSHTEIN_FILE_BYTES', 100000);
+    }
+
+    public static getAllowAmbiguousAutoPick(): boolean {
+        // v2 모드에서는 기본적으로 false
+        const v2Enabled = ConfigurationManager.getEditorV2Enabled();
+        const v2Mode = ConfigurationManager.getEditorV2Mode();
+        if (v2Enabled && v2Mode !== 'off') {
+            return ConfigurationManager.get('SMART_CONTEXT_EDITOR_ALLOW_AMBIGUOUS_AUTOPICK', false);
+        }
+        // v1 모드에서는 기본적으로 true
+        return ConfigurationManager.get('SMART_CONTEXT_EDITOR_ALLOW_AMBIGUOUS_AUTOPICK', true);
+    }
 }
