@@ -63,6 +63,7 @@ type PackPaths = {
     indexPath: string;
     tombstonesPath: string;
     readyPath: string;
+    indexBinPath: string;
     f32Path: string;
     q8Path: string;
 };
@@ -75,6 +76,7 @@ function getPackPaths(key: EmbeddingKey): PackPaths {
         indexPath: path.join(dir, "embeddings.index.json"),
         tombstonesPath: path.join(dir, "tombstones.json"),
         readyPath: path.join(dir, "ready.json"),
+        indexBinPath: path.join(dir, "embeddings.index.bin"),
         f32Path: path.join(dir, "embeddings.f32.bin"),
         q8Path: path.join(dir, "embeddings.q8.bin")
     };
@@ -193,9 +195,9 @@ export class EmbeddingPackManager {
         }
 
         if (!this.index) {
-            const index = readJson<EmbeddingPackIndexV1 | null>(this.paths.indexPath, null);
-            if (index && index.version === 1 && index.provider === this.key.provider && index.model === this.key.model) {
-                this.index = index;
+            const loaded = this.loadIndexFromDisk(dimsHint);
+            if (loaded) {
+                this.index = loaded;
             } else {
                 this.index = {
                     version: 1,
@@ -362,7 +364,11 @@ export class EmbeddingPackManager {
             this.meta.count = count;
         }
         if (this.dirtyIndex && this.index) {
-            writeJsonAtomic(this.paths.indexPath, this.index);
+            if (this.config.index === "bin") {
+                this.writeIndexBin(this.index);
+            } else {
+                writeJsonAtomic(this.paths.indexPath, this.index);
+            }
             this.dirtyIndex = false;
         }
         if (this.tombstones) {
@@ -391,6 +397,118 @@ export class EmbeddingPackManager {
         this.flushTimer = setTimeout(() => {
             this.flush();
         }, 500);
+    }
+
+    private loadIndexFromDisk(dimsHint?: number): EmbeddingPackIndexV1 | null {
+        const dims = this.meta?.dims ?? dimsHint ?? 0;
+        if (this.config.index === "bin") {
+            const binIndex = this.readIndexBin(dims);
+            if (binIndex) return binIndex;
+        }
+        const index = readJson<EmbeddingPackIndexV1 | null>(this.paths.indexPath, null);
+        if (index && index.version === 1 && index.provider === this.key.provider && index.model === this.key.model) {
+            return index;
+        }
+        return null;
+    }
+
+    private readIndexBin(dims: number): EmbeddingPackIndexV1 | null {
+        if (!fs.existsSync(this.paths.indexBinPath)) return null;
+        try {
+            const raw = fs.readFileSync(this.paths.indexBinPath);
+            if (raw.length < 16) return null;
+            const magic = raw.subarray(0, 4).toString("ascii");
+            if (magic !== "SCIX") return null;
+            const version = raw.readUInt32LE(4);
+            if (version !== 1) return null;
+            const flags = raw.readUInt32LE(8);
+            const recordCount = raw.readUInt32LE(12);
+            const index: EmbeddingPackIndexV1 = {
+                version: 1,
+                provider: this.key.provider,
+                model: this.key.model,
+                dims,
+                format: flags === 3 ? "both" : (flags === 2 ? "q8" : "float32"),
+                f32: (flags & 1) ? {} : undefined,
+                q8: (flags & 2) ? {} : undefined
+            };
+            let offset = 16;
+            for (let i = 0; i < recordCount; i += 1) {
+                if (offset + 4 > raw.length) break;
+                const keyLen = raw.readUInt32LE(offset);
+                offset += 4;
+                if (offset + keyLen + 12 > raw.length) break;
+                const key = raw.subarray(offset, offset + keyLen).toString("utf8");
+                offset += keyLen;
+                const kind = raw.readUInt8(offset);
+                offset += 1;
+                offset += 1; // reserved
+                offset += 2; // reserved
+                const off64 = raw.readBigUInt64LE(offset);
+                offset += 8;
+                if (off64 > BigInt(Number.MAX_SAFE_INTEGER)) {
+                    continue;
+                }
+                const offNum = Number(off64);
+                if (kind === 0) {
+                    if (!index.f32) index.f32 = {};
+                    index.f32[key] = offNum;
+                } else if (kind === 1) {
+                    if (!index.q8) index.q8 = {};
+                    index.q8[key] = offNum;
+                }
+            }
+            return index;
+        } catch {
+            return null;
+        }
+    }
+
+    private writeIndexBin(index: EmbeddingPackIndexV1): void {
+        const dir = path.dirname(this.paths.indexBinPath);
+        fs.mkdirSync(dir, { recursive: true });
+        const tmpPath = `${this.paths.indexBinPath}.tmp-${process.pid}-${Date.now()}`;
+        const fd = fs.openSync(tmpPath, "w");
+        try {
+            const formatFlags = index.format === "both" ? 3 : (index.format === "q8" ? 2 : 1);
+            const f32Keys = index.f32 ? Object.keys(index.f32) : [];
+            const q8Keys = index.q8 ? Object.keys(index.q8) : [];
+            const recordCount = f32Keys.length + q8Keys.length;
+            const header = Buffer.allocUnsafe(16);
+            header.write("SCIX", 0, "ascii");
+            header.writeUInt32LE(1, 4);
+            header.writeUInt32LE(formatFlags, 8);
+            header.writeUInt32LE(recordCount, 12);
+            fs.writeSync(fd, header);
+
+            const writeRecord = (key: string, kind: number, offsetValue: number) => {
+                const keyBuf = Buffer.from(key, "utf8");
+                const buf = Buffer.allocUnsafe(4 + keyBuf.length + 1 + 1 + 2 + 8);
+                let off = 0;
+                buf.writeUInt32LE(keyBuf.length, off); off += 4;
+                keyBuf.copy(buf, off); off += keyBuf.length;
+                buf.writeUInt8(kind, off); off += 1;
+                buf.writeUInt8(0, off); off += 1;
+                buf.writeUInt16LE(0, off); off += 2;
+                const offset64 = BigInt(Math.max(0, Math.floor(offsetValue)));
+                buf.writeBigUInt64LE(offset64, off);
+                fs.writeSync(fd, buf);
+            };
+
+            for (const key of f32Keys) {
+                const offsetValue = index.f32?.[key];
+                if (typeof offsetValue !== "number") continue;
+                writeRecord(key, 0, offsetValue);
+            }
+            for (const key of q8Keys) {
+                const offsetValue = index.q8?.[key];
+                if (typeof offsetValue !== "number") continue;
+                writeRecord(key, 1, offsetValue);
+            }
+        } finally {
+            try { fs.closeSync(fd); } catch { /* ignore */ }
+        }
+        fs.renameSync(tmpPath, this.paths.indexBinPath);
     }
 
     private readF32Embedding(chunkId: string): StoredEmbedding | null {

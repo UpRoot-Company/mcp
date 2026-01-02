@@ -154,7 +154,8 @@ export class HnswVectorIndex implements VectorIndex {
             this.labelToId.set(i, id);
         }
         this.nextLabel = idsRaw.length;
-        this.index = await createIndex(this.space, this.dims);
+        const useScvx = await isScvxIndex(indexPath);
+        this.index = useScvx ? new PersistedBruteforceIndex(this.space, this.dims) : await createIndex(this.space, this.dims);
         const readIndex = this.index.readIndexSync ?? this.index.readIndex;
         if (typeof readIndex !== "function") {
             throw new Error("hnsw index does not support deserialization");
@@ -238,6 +239,23 @@ async function readJson<T>(filePath: string, fallback: T): Promise<T> {
         return JSON.parse(raw) as T;
     } catch {
         return fallback;
+    }
+}
+
+async function isScvxIndex(filePath: string): Promise<boolean> {
+    let handle: fs.FileHandle | null = null;
+    try {
+        handle = await fs.open(filePath, "r");
+        const buffer = Buffer.alloc(4);
+        const { bytesRead } = await handle.read(buffer, 0, 4, 0);
+        if (bytesRead < 4) return false;
+        return buffer.toString("ascii") === "SCVX";
+    } catch {
+        return false;
+    } finally {
+        if (handle) {
+            await handle.close();
+        }
     }
 }
 

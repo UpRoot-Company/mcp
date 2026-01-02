@@ -580,7 +580,7 @@ export class FileIndexStore extends MemoryIndexStore {
     private readonly embeddingPackConfig: EmbeddingPackConfig;
     private readonly embeddingPacks = new Map<string, EmbeddingPackManager>();
     private readonly hasLegacyEmbeddingsOnDisk: boolean;
-    private readonly hasEmbeddingPackOnDisk: boolean;
+    private hasEmbeddingPackOnDisk: boolean;
 
     constructor(rootPath: string) {
         super(rootPath, "file");
@@ -600,6 +600,7 @@ export class FileIndexStore extends MemoryIndexStore {
         this.ensureStorage();
         this.hasLegacyEmbeddingsOnDisk = fs.existsSync(this.embeddingsPath) && fs.statSync(this.embeddingsPath).size > 2;
         this.hasEmbeddingPackOnDisk = this.embeddingPackConfig.enabled && (!this.hasLegacyEmbeddingsOnDisk || this.detectEmbeddingPackOnDisk());
+        this.maybeMigrateEmbeddingPack();
         this.loadFromDisk();
     }
 
@@ -955,6 +956,55 @@ export class FileIndexStore extends MemoryIndexStore {
             return false;
         }
         return false;
+    }
+
+    private maybeMigrateEmbeddingPack(): void {
+        if (!this.embeddingPackConfig.enabled || !this.hasLegacyEmbeddingsOnDisk) return;
+        if (this.embeddingPackConfig.rebuild === "manual") return;
+        const hasReadyPack = this.detectEmbeddingPackOnDisk();
+        if (this.embeddingPackConfig.rebuild === "auto" && hasReadyPack) {
+            this.hasEmbeddingPackOnDisk = true;
+            return;
+        }
+
+        try {
+            if (this.embeddingPackConfig.rebuild === "on_start") {
+                const v1Dir = path.join(this.storageDir, "v1", "embeddings");
+                fs.rmSync(v1Dir, { recursive: true, force: true });
+            }
+
+            const embeddings = this.readJson<Record<string, Record<string, PersistedEmbedding>>>(this.embeddingsPath, {});
+            const packs = new Map<string, EmbeddingPackManager>();
+            let wrote = false;
+
+            for (const [chunkId, variants] of Object.entries(embeddings)) {
+                for (const [variantKey, payload] of Object.entries(variants ?? {})) {
+                    if (!payload?.vector) continue;
+                    const [provider, model] = variantKey.split("::", 2);
+                    if (!provider || !model) continue;
+                    const packKey = `${provider}::${model}`;
+                    let pack = packs.get(packKey);
+                    if (!pack) {
+                        pack = new EmbeddingPackManager({ provider, model }, this.embeddingPackConfig);
+                        packs.set(packKey, pack);
+                    }
+                    const vector = decodeVector(payload.vector);
+                    pack.upsertEmbedding(chunkId, { dims: payload.dims, vector, norm: payload.norm });
+                    wrote = true;
+                }
+            }
+
+            for (const pack of packs.values()) {
+                pack.markReady();
+                pack.close();
+            }
+
+            if (wrote) {
+                this.hasEmbeddingPackOnDisk = true;
+            }
+        } catch (err) {
+            console.warn("[embedding-pack] Failed to migrate legacy embeddings pack:", err);
+        }
     }
 
     private persistPacks(): void {

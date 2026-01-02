@@ -95,6 +95,8 @@ smart-context-migrate-embeddings-pack
 
 - Pass `--force` to overwrite an existing pack.
 - Pack files are stored under `.smart-context/storage/v1/embeddings/<provider>/<model>/`.
+- For very large packs, set `SMART_CONTEXT_EMBEDDING_PACK_INDEX=bin` to use the binary index.
+- To migrate automatically at startup, set `SMART_CONTEXT_EMBEDDING_PACK_REBUILD=auto` (or `on_start` to force rebuild from legacy).
 
 ## Use as an MCP server (example config)
 

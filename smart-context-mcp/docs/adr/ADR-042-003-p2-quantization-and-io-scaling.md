@@ -142,7 +142,7 @@ P2는 아래를 채택합니다.
   "model": "multilingual-e5-small",
   "dims": 384,
   "count": 42150,
-  "format": "f32|q8|both",
+  "format": "float32|q8|both",
   "createdAt": "2026-01-02T00:00:00.000Z"
 }
 ```
@@ -164,7 +164,7 @@ P2는 아래를 채택합니다.
 - `i8[dims] q` (round(vector/scale), clamp [-127,127])
 
 인덱스:
-- `embeddings.index.json`: `{ "<chunkId>": { "offset": number, "format": "f32|q8" } }`
+- `embeddings.index.json`: `{ "<chunkId>": { "offset": number, "format": "float32|q8" } }`
 - 대형(L)에서 JSON index가 커지면 `embeddings.index.bin`로 대체(후속)
 
 > P2의 우선 목표는 “JSON+base64 탈피 + streaming 읽기”이므로, index는 1차로 JSON 유지 가능(단 L에서 병목이면 bin으로 교체).

@@ -47,11 +47,12 @@ For large repos, persisting embeddings as a binary pack reduces restore time and
 | Variable | Purpose |
 |---|---|
 | `SMART_CONTEXT_EMBEDDING_PACK_FORMAT` | Enable pack persistence: `float32`, `q8`, or `both` (unset = disabled/legacy). |
-| `SMART_CONTEXT_EMBEDDING_PACK_REBUILD` | Policy: `auto`, `on_start`, `manual` (migration/rollout control). |
-| `SMART_CONTEXT_EMBEDDING_PACK_INDEX` | Index format: `json` (default) or `bin` (reserved). |
+| `SMART_CONTEXT_EMBEDDING_PACK_REBUILD` | Policy: `auto` (migrate if pack missing), `on_start` (force rebuild from legacy), `manual` (no auto). |
+| `SMART_CONTEXT_EMBEDDING_PACK_INDEX` | Index format: `json` (default) or `bin` (binary index for large packs). |
 | `SMART_CONTEXT_VECTOR_CACHE_MB` | Max MB for the on-demand embedding vector cache. |
 
 Use `smart-context-migrate-embeddings-pack` to migrate legacy `.smart-context/storage/embeddings.json` into `.smart-context/storage/v1/embeddings/<provider>/<model>/`.
+To auto-migrate at startup when legacy embeddings exist, set `SMART_CONTEXT_EMBEDDING_PACK_REBUILD=auto` (or `on_start` to force rebuild).
 
 ## Vector index (P1)
 
