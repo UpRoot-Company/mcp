@@ -128,5 +128,85 @@ export const MIGRATIONS: Migration[] = [
                 `INSERT OR REPLACE INTO metadata(key, value) VALUES ('schema_version', '4')`
             ).run();
         }
+    },
+    {
+        version: 5,
+        name: "token_efficient_evidence_packs_v5",
+        up: (db) => {
+            db.exec(`
+                CREATE TABLE IF NOT EXISTS evidence_packs (
+                    pack_id TEXT PRIMARY KEY,
+                    query TEXT NOT NULL,
+                    options_json TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    expires_at INTEGER,
+                    meta_json TEXT,
+                    root_fingerprint TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_evidence_packs_expires_at
+                    ON evidence_packs(expires_at);
+
+                CREATE TABLE IF NOT EXISTS evidence_pack_items (
+                    pack_id TEXT NOT NULL,
+                    role TEXT NOT NULL CHECK(role IN ('result','evidence')),
+                    rank INTEGER NOT NULL,
+                    chunk_id TEXT NOT NULL,
+                    file_path TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    section_path_json TEXT,
+                    heading TEXT,
+                    heading_level INTEGER,
+                    start_line INTEGER,
+                    end_line INTEGER,
+                    preview TEXT NOT NULL,
+                    content_hash_snapshot TEXT,
+                    updated_at_snapshot INTEGER,
+                    scores_json TEXT,
+                    PRIMARY KEY(pack_id, role, rank),
+                    FOREIGN KEY(pack_id) REFERENCES evidence_packs(pack_id) ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_evidence_pack_items_chunk
+                    ON evidence_pack_items(chunk_id);
+                CREATE INDEX IF NOT EXISTS idx_evidence_pack_items_file
+                    ON evidence_pack_items(file_path);
+
+                CREATE TABLE IF NOT EXISTS chunk_summaries (
+                    chunk_id TEXT NOT NULL,
+                    style TEXT NOT NULL,
+                    summary TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    PRIMARY KEY(chunk_id, style)
+                );
+
+                CREATE TRIGGER IF NOT EXISTS evidence_packs_prune_expired
+                AFTER INSERT ON evidence_packs
+                BEGIN
+                    DELETE FROM evidence_packs
+                    WHERE expires_at IS NOT NULL
+                      AND expires_at < (strftime('%s','now') * 1000);
+                END;
+            `);
+            db.prepare(
+                `INSERT OR REPLACE INTO metadata(key, value) VALUES ('schema_version', '5')`
+            ).run();
+        }
+    },
+    {
+        version: 6,
+        name: "chunk_summaries_content_hash_v6",
+        up: (db) => {
+            // Add content_hash to allow staleness detection for cached previews/summaries.
+            const columns = db.prepare(`PRAGMA table_info(chunk_summaries)`).all() as Array<{ name: string }>;
+            const hasContentHash = columns.some(c => c?.name === "content_hash");
+            if (!hasContentHash) {
+                db.exec(`ALTER TABLE chunk_summaries ADD COLUMN content_hash TEXT;`);
+            }
+            db.exec(`CREATE INDEX IF NOT EXISTS idx_chunk_summaries_hash ON chunk_summaries(content_hash);`);
+            db.prepare(
+                `INSERT OR REPLACE INTO metadata(key, value) VALUES ('schema_version', '6')`
+            ).run();
+        }
     }
 ];

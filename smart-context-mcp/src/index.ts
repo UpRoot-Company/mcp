@@ -33,6 +33,7 @@ import { IncrementalIndexer } from "./indexing/IncrementalIndexer.js";
 import { DocumentIndexer } from "./indexing/DocumentIndexer.js";
 import { EmbeddingRepository } from "./indexing/EmbeddingRepository.js";
 import { DocumentChunkRepository } from "./indexing/DocumentChunkRepository.js";
+import { EvidencePackRepository } from "./indexing/EvidencePackRepository.js";
 import { TransactionLog } from "./engine/TransactionLog.js";
 import { ConfigurationManager } from "./config/ConfigurationManager.js";
 import { PathManager } from "./utils/PathManager.js";
@@ -49,6 +50,7 @@ import { HotSpotDetector } from "./engine/ClusterSearch/HotSpotDetector.js";
 import { ReferenceFinder } from "./ast/ReferenceFinder.js";
 import { DocumentProfiler } from "./documents/DocumentProfiler.js";
 import { extractHtmlTextPreserveLines } from "./documents/html/HtmlTextExtractor.js";
+import { buildDeterministicPreview, buildDeterministicSummary } from "./documents/summary/DeterministicSummarizer.js";
 import { DocumentSearchEngine } from "./documents/search/DocumentSearchEngine.js";
 import { EmbeddingProviderFactory } from "./embeddings/EmbeddingProviderFactory.js";
 import { resolveEmbeddingConfigFromEnv } from "./embeddings/EmbeddingConfig.js";
@@ -171,7 +173,8 @@ export class SmartContextServer {
             this.embeddingRepository,
             this.embeddingProviderFactory,
             this.rootPath,
-            this.symbolIndex
+            this.symbolIndex,
+            new EvidencePackRepository(this.indexDatabase)
         );
         this.clusterSearchEngine = new ClusterSearchEngine({
             rootPath: this.rootPath,
@@ -507,6 +510,8 @@ export class SmartContextServer {
                     type: 'object',
                     properties: {
                         query: { type: 'string' },
+                        output: { type: 'string', enum: ['full', 'compact', 'pack_only'] },
+                        packId: { type: 'string' },
                         maxResults: { type: 'number' },
                         maxCandidates: { type: 'number' },
                         maxChunkCandidates: { type: 'number' },
@@ -1101,6 +1106,14 @@ export class SmartContextServer {
         const sectionId = args?.sectionId as string | undefined;
         const headingPath = normalizeHeadingPath(args?.headingPath);
         const includeSubsections = args?.includeSubsections === true;
+        const mode = (args?.mode ?? "preview") as "summary" | "preview" | "raw";
+        const maxCharsRaw = args?.maxChars;
+        const maxCharsDefault = Number.parseInt(process.env.SMART_CONTEXT_DOC_SECTION_MAX_CHARS ?? "4000", 10);
+        const maxChars = typeof maxCharsRaw === "number"
+            ? maxCharsRaw
+            : (typeof maxCharsRaw === "string" ? Number.parseInt(maxCharsRaw, 10) : maxCharsDefault);
+        const effectiveMaxChars = Number.isFinite(maxChars) && maxChars > 0 ? maxChars : maxCharsDefault;
+        const queryHint = typeof args?.query === "string" ? args.query : undefined;
         const reasons: string[] = [];
         if (profile.parser?.reason) {
             reasons.push(profile.parser.reason);
@@ -1153,6 +1166,38 @@ export class SmartContextServer {
             : rawSectionContent;
         const status = reasons.includes("closest_match") ? "closest_match" : "success";
 
+        const truncated = (value: string) => {
+            const text = String(value ?? "");
+            if (text.length <= effectiveMaxChars) return { text, truncated: false };
+            return { text: `${text.slice(0, Math.max(1, effectiveMaxChars - 1))}…`, truncated: true };
+        };
+
+        let contentOut = sectionContent;
+        let contentTruncated = false;
+        if (mode === "preview") {
+            const preview = buildDeterministicPreview({
+                text: sectionContent,
+                query: queryHint,
+                kind: profile.kind,
+                maxChars: effectiveMaxChars
+            });
+            contentOut = preview.preview;
+            contentTruncated = preview.truncated;
+        } else if (mode === "summary") {
+            const summary = buildDeterministicSummary({
+                text: sectionContent,
+                query: queryHint,
+                kind: profile.kind,
+                maxChars: effectiveMaxChars
+            });
+            contentOut = summary.summary;
+            contentTruncated = summary.truncated;
+        } else {
+            const capped = truncated(sectionContent);
+            contentOut = capped.text;
+            contentTruncated = capped.truncated;
+        }
+
         return {
             success: true,
             status,
@@ -1162,8 +1207,11 @@ export class SmartContextServer {
                 ...section,
                 range: { ...section.range, startLine: range.startLine, endLine: range.endLine }
             },
-            content: sectionContent,
-            rawContent: args?.includeRaw === true ? rawSectionContent : undefined,
+            mode,
+            maxChars: effectiveMaxChars,
+            truncated: contentTruncated,
+            content: contentOut,
+            rawContent: args?.includeRaw === true ? truncated(rawSectionContent).text : undefined,
             resolvedHeadingPath: section.path,
             requestedHeadingPath: headingPath ?? undefined,
             ...buildDegradation(reasons)
@@ -1194,6 +1242,8 @@ export class SmartContextServer {
         }
 
         return this.documentSearchEngine.search(String(query), {
+            output: args?.output,
+            packId: args?.packId,
             maxResults: args?.maxResults ?? args?.limit,
             maxCandidates: args?.maxCandidates,
             maxChunkCandidates: args?.maxChunkCandidates,

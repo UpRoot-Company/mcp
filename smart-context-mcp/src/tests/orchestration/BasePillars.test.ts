@@ -60,6 +60,38 @@ describe("BasePillars Read", () => {
       { tool: "read_code", view: "full" }
     ]);
   });
+
+  it("uses doc_section preview mode for document section reads by default", async () => {
+    const registry = new InternalToolRegistry();
+    const calls: Array<{ tool: string; args: any }> = [];
+
+    const originalMax = process.env.SMART_CONTEXT_DOC_SECTION_MAX_CHARS;
+    process.env.SMART_CONTEXT_DOC_SECTION_MAX_CHARS = "1234";
+
+    registry.register("doc_section", async (args: any) => {
+      calls.push({ tool: "doc_section", args });
+      return { success: true, content: "preview", section: { id: "s1" } } as any;
+    });
+    registry.register("file_profiler", async () => ({
+      metadata: { filePath: "docs/guide.md", lineCount: 10, language: "md" },
+      structure: { symbols: [] }
+    } as any));
+
+    const pillar = new ReadPillar(registry);
+    const result = await pillar.execute(buildIntent({
+      targets: ["docs/guide.md"],
+      constraints: { view: "skeleton", headingPath: ["Guide", "Install"] }
+    }) as any, new OrchestrationContext());
+
+    expect(result.content).toBe("preview");
+    expect(calls.length).toBe(1);
+    expect(calls[0].tool).toBe("doc_section");
+    expect(calls[0].args.mode).toBe("preview");
+    expect(calls[0].args.maxChars).toBe(1234);
+
+    if (originalMax === undefined) delete process.env.SMART_CONTEXT_DOC_SECTION_MAX_CHARS;
+    else process.env.SMART_CONTEXT_DOC_SECTION_MAX_CHARS = originalMax;
+  });
 });
 
 describe("BasePillars Write", () => {

@@ -25,11 +25,17 @@ export class ReadPillar {
     let documentOutline: any = undefined;
 
     if (isDocument && (sectionId || headingPath)) {
+      const mode = (constraints.mode ?? (view === 'full' ? 'raw' : 'preview')) as 'summary' | 'preview' | 'raw';
+      const maxChars = typeof constraints.maxChars === 'number'
+        ? constraints.maxChars
+        : Number.parseInt(process.env.SMART_CONTEXT_DOC_SECTION_MAX_CHARS ?? (mode === 'raw' ? '12000' : '4000'), 10);
       const docSection = await this.runTool(context, 'doc_section', {
         filePath: resolvedPath,
         sectionId,
         headingPath,
-        includeSubsections: constraints.includeSubsections === true
+        includeSubsections: constraints.includeSubsections === true,
+        mode,
+        maxChars
       });
       content = docSection?.content ?? '';
       documentOutline = docSection?.section ? [docSection.section] : undefined;
@@ -38,7 +44,8 @@ export class ReadPillar {
         filePath: resolvedPath,
         options: constraints.outlineOptions
       });
-      content = docSkeleton?.skeleton ?? '';
+      const maxChars = Number.parseInt(process.env.SMART_CONTEXT_DOC_SKELETON_MAX_CHARS ?? "2000", 10);
+      content = truncateText(docSkeleton?.skeleton ?? '', maxChars);
       documentOutline = docSkeleton?.outline;
     } else {
       content = await this.runTool(context, 'read_code', {
@@ -144,6 +151,13 @@ export class ReadPillar {
     });
     return output;
   }
+}
+
+function truncateText(text: string, maxChars: number): string {
+  const limit = Number.isFinite(maxChars) && maxChars > 0 ? maxChars : 2000;
+  const value = String(text ?? "");
+  if (value.length <= limit) return value;
+  return `${value.slice(0, Math.max(1, limit - 1))}…`;
 }
 
 export class WritePillar {
