@@ -18,6 +18,7 @@ All ADRs live in `smart-context-mcp/docs/adr/`. This index is intentionally **cu
 - ADR-017 / ADR-018 — clustered search: `../adr/ADR-017-context-aware-clustered-search.md`, `../adr/ADR-018-consolidated-cluster-search.md`
 - ADR-023 — gap remediation (trigram/hash): `../adr/ADR-023-Enhanced-Architectural-Gap-Remediation.md`
 - ADR-036 — universal document support (markdown/mdx-first): `../adr/ADR-036-universal-document-support.md`
+- ADR-037 — docs v2 (plain text + code comments + retrieval quality + embedding ops + scalable storage): `../adr/ADR-037-universal-text-retrieval-ops.md`
 
 ## Editing safety
 

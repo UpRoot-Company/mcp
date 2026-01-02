@@ -1,10 +1,11 @@
 import Database from "better-sqlite3";
 import { IndexDatabase } from "./IndexDatabase.js";
+import type { DocumentKind } from "../types.js";
 
 export interface StoredDocumentChunk {
     id: string;
     filePath: string;
-    kind: "markdown" | "mdx";
+    kind: DocumentKind;
     sectionPath: string[];
     heading: string | null;
     headingLevel: number | null;
@@ -102,7 +103,7 @@ export class DocumentChunkRepository {
         const rows = this.selectChunksForFileStmt.all(file.path) as Array<{
             id: string;
             path: string;
-            kind: "markdown" | "mdx";
+            kind: DocumentKind;
             section_path_json: string;
             heading: string | null;
             heading_level: number | null;

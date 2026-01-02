@@ -4,6 +4,9 @@ import { DocumentKind, DocumentOutlineOptions, DocumentProfile, DocumentSection 
 import { DocumentLinkResolver } from "./DocumentLinkResolver.js";
 import { parseMarkdownWithRemark, type RemarkParseResult } from "./RemarkDocumentParser.js";
 import { TreeSitterMarkdownParser } from "./TreeSitterMarkdownParser.js";
+import { TreeSitterHtmlParser } from "./html/TreeSitterHtmlParser.js";
+import { extractHtmlHeadings, extractHtmlReferences } from "./html/HtmlTextExtractor.js";
+import { inferTextHeadings } from "./text/TextHeuristics.js";
 
 export interface DocumentProfileInput {
     filePath: string;
@@ -32,6 +35,8 @@ export class DocumentProfiler {
 
     private static markdownParser = new TreeSitterMarkdownParser();
     private static markdownInitStarted = false;
+    private static htmlParser = new TreeSitterHtmlParser();
+    private static htmlInitStarted = false;
 
     public profile(input: DocumentProfileInput): DocumentProfile {
         const options = input.options ?? {};
@@ -44,18 +49,42 @@ export class DocumentProfiler {
             void DocumentProfiler.markdownParser.initialize();
         }
 
+        const shouldUseHtmlTreeSitter = input.kind === "html" && DocumentProfiler.htmlParser.isAvailable();
+        if (shouldUseHtmlTreeSitter && !DocumentProfiler.htmlInitStarted) {
+            DocumentProfiler.htmlInitStarted = true;
+            void DocumentProfiler.htmlParser.initialize();
+        }
+
         const frontmatter = options.includeFrontmatter === false
             ? undefined
             : parseFrontmatter(input.content);
 
-        const treeHeadings = shouldUseTreeSitter
+        const remarkParsed = (input.kind === "markdown" || input.kind === "mdx")
+            ? parseMarkdownWithRemark(input.content, input.kind)
+            : null;
+
+        const treeMarkdownHeadings = shouldUseTreeSitter
             ? DocumentProfiler.markdownParser.tryParseHeadings(input.content)
             : null;
-        const remarkParsed = parseMarkdownWithRemark(input.content, input.kind);
-        const headings = applyMaxDepth(treeHeadings ?? remarkParsed?.headings ?? extractHeadings(lines), options.maxDepth);
+
+        const treeHtmlHeadings = shouldUseHtmlTreeSitter
+            ? DocumentProfiler.htmlParser.tryParseHeadings(input.content)
+            : null;
+
+        const headings = applyMaxDepth(resolveHeadings({
+            kind: input.kind,
+            lines,
+            remarkParsed,
+            treeMarkdownHeadings,
+            treeHtmlHeadings,
+            content: input.content
+        }), options.maxDepth);
+
         const parserInfo = resolveParserInfo({
             kind: input.kind,
-            treeHeadings,
+            content: input.content,
+            treeMarkdownHeadings,
+            treeHtmlHeadings,
             remarkParsed
         });
         const outline = buildOutline({
@@ -66,7 +95,12 @@ export class DocumentProfiler {
             lineOffsets
         });
 
-        const rawLinks = remarkParsed?.links ?? extractLinks(lines);
+        const rawLinks = resolveLinks({
+            kind: input.kind,
+            lines,
+            remarkParsed,
+            content: input.content
+        });
         const links = rawLinks.map(link => {
             const resolved = this.linkResolver.resolveLink(input.filePath, link.href, link.text);
             const lineIndex = Math.max(0, Math.min(lines.length - 1, (link.line ?? 1) - 1));
@@ -527,12 +561,14 @@ function normalizeReference(value: string): string {
 
 function resolveParserInfo(params: {
     kind: DocumentKind;
-    treeHeadings: HeadingNode[] | null;
+    content: string;
+    treeMarkdownHeadings: HeadingNode[] | null;
+    treeHtmlHeadings: HeadingNode[] | null;
     remarkParsed: RemarkParseResult | null;
 }): { name: "tree-sitter" | "remark" | "regex"; degraded: boolean; reason?: string } | undefined {
-    const { kind, treeHeadings, remarkParsed } = params;
+    const { kind, treeMarkdownHeadings, treeHtmlHeadings, remarkParsed } = params;
     if (kind === "markdown") {
-        if (treeHeadings !== null) {
+        if (treeMarkdownHeadings !== null) {
             return { name: "tree-sitter", degraded: false };
         }
         if (remarkParsed?.headings?.length) {
@@ -546,7 +582,62 @@ function resolveParserInfo(params: {
         }
         return { name: "regex", degraded: true, reason: "parser_fallback" };
     }
+    if (kind === "html") {
+        if (treeHtmlHeadings !== null) {
+            return { name: "tree-sitter", degraded: false };
+        }
+        const fallback = extractHtmlHeadings(params.content);
+        if (fallback.length > 0) {
+            return { name: "regex", degraded: true, reason: "parser_fallback" };
+        }
+        return { name: "regex", degraded: false };
+    }
+    if (kind === "css" || kind === "text") {
+        return { name: "regex", degraded: false };
+    }
     return { name: "regex", degraded: false };
+}
+
+function resolveHeadings(params: {
+    kind: DocumentKind;
+    lines: string[];
+    content: string;
+    remarkParsed: RemarkParseResult | null;
+    treeMarkdownHeadings: HeadingNode[] | null;
+    treeHtmlHeadings: Array<{ title: string; level: number; line: number }> | null;
+}): HeadingNode[] {
+    if (params.kind === "markdown") {
+        return params.treeMarkdownHeadings ?? params.remarkParsed?.headings ?? extractHeadings(params.lines);
+    }
+    if (params.kind === "mdx") {
+        return params.remarkParsed?.headings ?? extractHeadings(params.lines);
+    }
+    if (params.kind === "html") {
+        const html = params.content;
+        return (params.treeHtmlHeadings ?? extractHtmlHeadings(html)).map(h => ({ title: h.title, level: h.level, line: h.line }));
+    }
+    if (params.kind === "css") {
+        return [];
+    }
+    if (params.kind === "text") {
+        return inferTextHeadings(params.content).map(h => ({ title: h.title, level: h.level, line: h.line }));
+    }
+    return [];
+}
+
+function resolveLinks(params: {
+    kind: DocumentKind;
+    lines: string[];
+    content: string;
+    remarkParsed: RemarkParseResult | null;
+}): LinkNode[] {
+    if (params.kind === "markdown" || params.kind === "mdx") {
+        return params.remarkParsed?.links ?? extractLinks(params.lines);
+    }
+    if (params.kind === "html") {
+        return extractHtmlReferences(params.content).map(item => ({ text: item.text, href: item.href, line: item.line }));
+    }
+    return [];
 }
 
 export function applyMdxPlaceholders(content: string): string {

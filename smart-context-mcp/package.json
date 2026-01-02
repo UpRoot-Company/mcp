@@ -5,7 +5,8 @@
   "bin": {
     "smart-context-mcp": "dist/index.js",
     "smart-context-gen-languages": "dist/cli/generate-languages-config.js",
-    "smart-context-build-markdown-wasm": "dist/cli/build-markdown-wasm.js"
+    "smart-context-build-markdown-wasm": "dist/cli/build-markdown-wasm.js",
+    "smart-context-warmup-embeddings": "dist/cli/warmup-embeddings.js"
   },
   "files": [
     "dist",

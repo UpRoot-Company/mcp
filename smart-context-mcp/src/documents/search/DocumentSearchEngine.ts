@@ -5,6 +5,8 @@ import { EmbeddingRepository } from "../../indexing/EmbeddingRepository.js";
 import { DocumentIndexer } from "../../indexing/DocumentIndexer.js";
 import { EmbeddingConfig, DocumentKind } from "../../types.js";
 import { EmbeddingProviderFactory } from "../../embeddings/EmbeddingProviderFactory.js";
+import * as path from "path";
+import { EmbeddingTimeoutError } from "../../embeddings/EmbeddingQueue.js";
 
 export interface DocumentSearchOptions {
     maxResults?: number;
@@ -22,6 +24,7 @@ export interface DocumentSearchOptions {
     maxChunksEmbeddedPerRequest?: number;
     maxEmbeddingTimeMs?: number;
     embedding?: EmbeddingConfig;
+    includeComments?: boolean;
 }
 
 export interface DocumentSearchSection {
@@ -41,12 +44,17 @@ export interface DocumentSearchResponse {
     results: DocumentSearchSection[];
     evidence?: DocumentSearchSection[];
     degraded?: boolean;
+    reason?: string;
+    reasons?: string[];
     provider?: { name: string; model: string; dims: number } | null;
     stats: {
         candidateFiles: number;
         candidateChunks: number;
         vectorEnabled: boolean;
         mmrApplied: boolean;
+        evidenceSections: number;
+        evidenceChars: number;
+        evidenceTruncated: boolean;
     };
 }
 
@@ -58,7 +66,9 @@ export class DocumentSearchEngine {
         private readonly documentIndexer: DocumentIndexer,
         private readonly chunkRepository: DocumentChunkRepository,
         private readonly embeddingRepository: EmbeddingRepository,
-        private readonly embeddingFactory: EmbeddingProviderFactory
+        private readonly embeddingFactory: EmbeddingProviderFactory,
+        private readonly rootPath: string,
+        private readonly symbolIndex?: { getSymbolsForFile(filePath: string): Promise<unknown> }
     ) {}
 
     public async search(query: string, options: DocumentSearchOptions = {}): Promise<DocumentSearchResponse> {
@@ -68,12 +78,17 @@ export class DocumentSearchEngine {
                 results: [],
                 evidence: [],
                 degraded: false,
+                reason: undefined,
+                reasons: undefined,
                 provider: null,
                 stats: {
                     candidateFiles: 0,
                     candidateChunks: 0,
                     vectorEnabled: false,
-                    mmrApplied: false
+                    mmrApplied: false,
+                    evidenceSections: 0,
+                    evidenceChars: 0,
+                    evidenceTruncated: false
                 }
             };
         }
@@ -92,12 +107,14 @@ export class DocumentSearchEngine {
         const mmrLambda = options.mmrLambda ?? 0.7;
         const maxChunksEmbeddedPerRequest = options.maxChunksEmbeddedPerRequest ?? 32;
         const maxEmbeddingTimeMs = options.maxEmbeddingTimeMs ?? 2500;
+        const degradationReasons: string[] = [];
 
-        const candidateFiles = await this.collectCandidateFiles(query, maxCandidates);
-        let chunks = await this.collectChunks(candidateFiles);
+        const candidateFiles = await this.collectCandidateFiles(query, maxCandidates, options.includeComments === true);
+        let chunks = await this.collectChunks(candidateFiles, options.includeComments === true);
         const initialChunkCount = chunks.length;
 
         if (chunks.length > maxChunkCandidates) {
+            degradationReasons.push("budget_exceeded");
             const queryTokens = tokenize(query);
             chunks = chunks
                 .map(chunk => ({
@@ -115,12 +132,17 @@ export class DocumentSearchEngine {
                 results: [],
                 evidence: includeEvidence ? [] : undefined,
                 degraded: false,
+                reason: undefined,
+                reasons: undefined,
                 provider: null,
                 stats: {
                     candidateFiles: candidateFiles.length,
                     candidateChunks: 0,
                     vectorEnabled: false,
-                    mmrApplied: false
+                    mmrApplied: false,
+                    evidenceSections: 0,
+                    evidenceChars: 0,
+                    evidenceTruncated: false
                 }
             };
         }
@@ -154,13 +176,21 @@ export class DocumentSearchEngine {
                 });
 
                 degraded = embeddingResult.degraded;
+                if (embeddingResult.reasons.length > 0) {
+                    degradationReasons.push(...embeddingResult.reasons);
+                }
                 vectorScores = embeddingResult.scores;
                 const vectorRanked = Array.from(vectorScores.entries())
                     .sort((a, b) => b[1] - a[1])
                     .slice(0, rrfDepth);
                 vectorRankMap = buildRankMap(vectorRanked.map(([id]) => id));
-            } catch {
+            } catch (err: any) {
                 degraded = true;
+                if (err instanceof EmbeddingTimeoutError) {
+                    degradationReasons.push("embedding_timeout");
+                } else {
+                    degradationReasons.push("vector_disabled");
+                }
                 vectorEnabled = false;
                 vectorScores = new Map();
                 vectorRankMap = new Map();
@@ -217,29 +247,68 @@ export class DocumentSearchEngine {
             : scoredSections;
 
         const results = ordered.slice(0, maxResults).map(entry => toSearchSection(entry.chunk, entry.scores, snippetLength));
+        const evidenceCandidates = includeEvidence
+            ? ordered.map(entry => toSearchSection(entry.chunk, entry.scores, snippetLength))
+            : [];
         const evidence = includeEvidence
-            ? limitEvidence(ordered.map(entry => toSearchSection(entry.chunk, entry.scores, snippetLength)), maxEvidenceSections, maxEvidenceChars)
+            ? limitEvidence(evidenceCandidates, maxEvidenceSections, maxEvidenceChars)
             : undefined;
+
+        const evidenceChars = (evidence ?? []).reduce((sum, section) => sum + (section.preview?.length ?? 0), 0);
+        const evidenceTruncated = includeEvidence && evidence != null && evidence.length < evidenceCandidates.length;
+        if (evidenceTruncated) {
+            degradationReasons.push("evidence_truncated");
+        }
+
+        const uniqueReasons = Array.from(new Set(degradationReasons.filter(Boolean)));
+        const degradedAny = degraded || uniqueReasons.length > 0;
+        const reason = uniqueReasons.length > 0 ? uniqueReasons[0] : undefined;
+        const reasons = uniqueReasons.length > 1 ? uniqueReasons : undefined;
 
         return {
             query,
             results,
             evidence,
-            degraded,
+            degraded: degradedAny,
+            reason,
+            reasons,
             provider: vectorEnabled ? { name: provider.provider, model: provider.model, dims: provider.dims } : null,
             stats: {
                 candidateFiles: candidateFiles.length,
                 candidateChunks: initialChunkCount,
                 vectorEnabled,
-                mmrApplied: useMmr
+                mmrApplied: useMmr,
+                evidenceSections: evidence?.length ?? 0,
+                evidenceChars,
+                evidenceTruncated
             }
         };
     }
 
-    private async collectCandidateFiles(query: string, maxCandidates: number): Promise<string[]> {
+    private async collectCandidateFiles(query: string, maxCandidates: number, includeComments: boolean): Promise<string[]> {
+        const includeGlobs = [
+            "**/*.md",
+            "**/*.mdx",
+            "**/*.txt",
+            "**/*.html",
+            "**/*.htm",
+            "**/*.css",
+            "**/README",
+            "**/LICENSE",
+            "**/NOTICE",
+            "**/CHANGELOG",
+            "**/CODEOWNERS",
+            "**/.gitignore",
+            "**/.mcpignore",
+            "**/.editorconfig"
+        ];
+        if (includeComments) {
+            includeGlobs.push("**/*.ts", "**/*.tsx", "**/*.js", "**/*.jsx", "**/*.py");
+        }
+
         const scoutResults = await this.searchEngine.scout({
             query,
-            includeGlobs: ["**/*.md", "**/*.mdx"],
+            includeGlobs,
             maxResults: maxCandidates,
             groupByFile: true,
             deduplicateByContent: true
@@ -253,13 +322,18 @@ export class DocumentSearchEngine {
         return Array.from(new Set(filenameFallback.map(result => result.path)));
     }
 
-    private async collectChunks(filePaths: string[]): Promise<StoredDocumentChunk[]> {
+    private async collectChunks(filePaths: string[], includeComments: boolean): Promise<StoredDocumentChunk[]> {
         const chunks: StoredDocumentChunk[] = [];
         for (const filePath of filePaths) {
             let stored = this.chunkRepository.listChunksForFile(filePath);
             if (stored.length === 0) {
                 try {
-                    await this.documentIndexer.indexFile(filePath);
+                    if (includeComments && this.symbolIndex && isCodeFile(filePath)) {
+                        const abs = path.resolve(this.rootPath, filePath);
+                        await this.symbolIndex.getSymbolsForFile(abs);
+                    } else {
+                        await this.documentIndexer.indexFile(filePath);
+                    }
                     stored = this.chunkRepository.listChunksForFile(filePath);
                 } catch {
                     stored = [];
@@ -275,10 +349,19 @@ export class DocumentSearchEngine {
         chunks: StoredDocumentChunk[],
         provider: { provider: string; model: string; dims: number; normalize: boolean; embed(texts: string[]): Promise<Float32Array[]> },
         limits: { maxChunks: number; maxTimeMs: number }
-    ): Promise<{ scores: Map<string, number>; degraded: boolean }> {
-        const [queryVector] = await provider.embed([query]);
+    ): Promise<{ scores: Map<string, number>; degraded: boolean; reasons: string[] }> {
+        const reasons: string[] = [];
+        let queryVector: Float32Array | undefined;
+        try {
+            [queryVector] = await provider.embed([query]);
+        } catch (err: any) {
+            if (err instanceof EmbeddingTimeoutError) {
+                return { scores: new Map(), degraded: true, reasons: ["embedding_timeout"] };
+            }
+            return { scores: new Map(), degraded: true, reasons: ["vector_disabled"] };
+        }
         if (!queryVector) {
-            return { scores: new Map(), degraded: true };
+            return { scores: new Map(), degraded: true, reasons: ["vector_disabled"] };
         }
         const scores = new Map<string, number>();
         const missing: StoredDocumentChunk[] = [];
@@ -296,7 +379,7 @@ export class DocumentSearchEngine {
         }
 
         if (missing.length === 0) {
-            return { scores, degraded: false };
+            return { scores, degraded: false, reasons: [] };
         }
 
         const startedAt = Date.now();
@@ -304,6 +387,7 @@ export class DocumentSearchEngine {
         const limited = missing.slice(0, limits.maxChunks);
         if (missing.length > limits.maxChunks) {
             degraded = true;
+            reasons.push("embedding_partial");
         }
 
         const batchSize = Math.max(1, Math.min(limits.maxChunks, 16));
@@ -311,10 +395,22 @@ export class DocumentSearchEngine {
             const elapsed = Date.now() - startedAt;
             if (elapsed > limits.maxTimeMs) {
                 degraded = true;
+                reasons.push("embedding_timeout");
                 break;
             }
             const batch = limited.slice(i, i + batchSize);
-            const vectors = await provider.embed(batch.map(chunk => chunk.text));
+            let vectors: Float32Array[];
+            try {
+                vectors = await provider.embed(batch.map(chunk => chunk.text));
+            } catch (err: any) {
+                degraded = true;
+                if (err instanceof EmbeddingTimeoutError) {
+                    reasons.push("embedding_timeout");
+                } else {
+                    reasons.push("vector_disabled");
+                }
+                break;
+            }
             for (let idx = 0; idx < batch.length; idx += 1) {
                 const chunk = batch[idx];
                 const vector = vectors[idx];
@@ -333,7 +429,7 @@ export class DocumentSearchEngine {
             }
         }
 
-        return { scores, degraded };
+        return { scores, degraded, reasons: Array.from(new Set(reasons)) };
     }
 
     private async resolveEmbeddingProvider(override?: EmbeddingConfig) {
@@ -460,6 +556,11 @@ function cosineSimilarity(a: Float32Array, b: Float32Array): number {
     }
     if (normA === 0 || normB === 0) return 0;
     return dot / (Math.sqrt(normA) * Math.sqrt(normB));
+}
+
+function isCodeFile(filePath: string): boolean {
+    const ext = path.extname(filePath).toLowerCase();
+    return ext === ".ts" || ext === ".tsx" || ext === ".js" || ext === ".jsx" || ext === ".py";
 }
 
 function l2Norm(vector: Float32Array): number {

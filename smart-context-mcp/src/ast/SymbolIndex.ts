@@ -5,6 +5,7 @@ import { LRUCache } from 'lru-cache';
 import { SkeletonGenerator } from './SkeletonGenerator.js';
 import { SymbolInfo } from '../types.js';
 import { IndexDatabase } from '../indexing/IndexDatabase.js';
+import { CommentIndexer } from '../indexing/CommentIndexer.js';
 
 const SUPPORTED_EXTENSIONS = new Set<string>(['.ts', '.tsx', '.js', '.jsx', '.py']);
 const HOT_CACHE_SIZE = 50;
@@ -25,6 +26,7 @@ export class SymbolIndex {
     private readonly skeletonGenerator: SkeletonGenerator;
     private ignoreFilter: ReturnType<typeof ignore.default>;
     private readonly db: IndexDatabase;
+    private readonly commentIndexer: CommentIndexer;
     private userIgnorePatterns: string[];
 
     private baselinePromise?: Promise<void>;
@@ -41,6 +43,7 @@ export class SymbolIndex {
         this.userIgnorePatterns = [...ignorePatterns];
         this.ignoreFilter = this.createIgnoreFilter(this.userIgnorePatterns);
         this.db = db ?? new IndexDatabase(this.rootPath);
+        this.commentIndexer = new CommentIndexer(this.db);
         this.cache = new LRUCache({ max: HOT_CACHE_SIZE });
     }
 
@@ -156,6 +159,11 @@ export class SymbolIndex {
         if (!this.isSupported(filePath)) {
             this.cache.set(relativePath, { mtime: currentMtime, symbols: [] });
             this.db.replaceSymbols({ relativePath, lastModified: currentMtime, symbols: [] });
+            try {
+                this.commentIndexer.upsertCommentChunksForFile(relativePath, []);
+            } catch {
+                // best-effort
+            }
             return [];
         }
 
@@ -168,6 +176,11 @@ export class SymbolIndex {
             language: null,
             symbols
         });
+        try {
+            this.commentIndexer.upsertCommentChunksForFile(relativePath, symbols, content);
+        } catch {
+            // best-effort
+        }
         return symbols;
     }
 

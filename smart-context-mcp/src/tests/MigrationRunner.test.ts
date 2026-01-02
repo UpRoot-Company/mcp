@@ -11,7 +11,7 @@ describe("MigrationRunner", () => {
         runner.run();
 
         const versionRow = db.prepare(`SELECT value FROM metadata WHERE key='schema_version'`).get() as any;
-        expect(versionRow.value).toBe("3");
+        expect(versionRow.value).toBe("4");
 
         const table = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='transaction_log'`).get();
         expect(table).toBeTruthy();

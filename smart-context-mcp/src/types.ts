@@ -329,7 +329,7 @@ export interface Document {
     symbolId?: string;
 }
 
-export type DocumentKind = "markdown" | "mdx" | "text" | "unknown";
+export type DocumentKind = "markdown" | "mdx" | "html" | "css" | "text" | "code_comment" | "unknown";
 
 export interface DocumentSection {
     id: string;
@@ -395,6 +395,10 @@ export interface EmbeddingConfig {
     provider?: "auto" | EmbeddingProvider;
     normalize?: boolean;
     batchSize?: number;
+    timeoutMs?: number;
+    concurrency?: number;
+    maxQueueSize?: number;
+    modelCacheDir?: string;
     openai?: {
         apiKeyEnv?: string;
         model?: string;

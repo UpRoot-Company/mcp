@@ -4,6 +4,7 @@ import { DisabledEmbeddingProvider } from "./DisabledEmbeddingProvider.js";
 import { HashEmbeddingProvider } from "./HashEmbeddingProvider.js";
 import { OpenAIEmbeddingProvider } from "./OpenAIEmbeddingProvider.js";
 import { TransformersEmbeddingProvider } from "./TransformersEmbeddingProvider.js";
+import { EmbeddingQueue } from "./EmbeddingQueue.js";
 
 export interface EmbeddingProviderClient {
     provider: EmbeddingProvider;
@@ -15,6 +16,7 @@ export interface EmbeddingProviderClient {
 
 export class EmbeddingProviderFactory {
     private cached?: EmbeddingProviderClient;
+    private queue?: EmbeddingQueue;
 
     constructor(private readonly config: EmbeddingConfig) {}
 
@@ -26,7 +28,8 @@ export class EmbeddingProviderFactory {
             this.cached = new OpenAIEmbeddingProvider({
                 apiKey: resolved.apiKey,
                 model: this.config.openai?.model ?? "text-embedding-3-small",
-                normalize: this.config.normalize !== false
+                normalize: this.config.normalize !== false,
+                timeoutMs: this.config.timeoutMs
             });
             return this.cached;
         }
@@ -41,10 +44,14 @@ export class EmbeddingProviderFactory {
                     normalize: this.config.normalize !== false
                 });
             } else {
+                const queue = this.getQueue();
                 this.cached = new TransformersEmbeddingProvider({
                     model,
                     dims: this.config.local?.dims,
-                    normalize: this.config.normalize !== false
+                    normalize: this.config.normalize !== false,
+                    timeoutMs: this.config.timeoutMs,
+                    queue,
+                    modelCacheDir: this.config.modelCacheDir
                 });
             }
             return this.cached;
@@ -56,6 +63,17 @@ export class EmbeddingProviderFactory {
 
     public getConfig(): EmbeddingConfig {
         return this.config;
+    }
+
+    private getQueue(): EmbeddingQueue {
+        if (!this.queue) {
+            this.queue = new EmbeddingQueue({
+                concurrency: this.config.concurrency ?? 1,
+                defaultTimeoutMs: this.config.timeoutMs,
+                maxQueueSize: this.config.maxQueueSize
+            });
+        }
+        return this.queue;
     }
 }
 

@@ -6,25 +6,41 @@ export class OpenAIEmbeddingProvider implements EmbeddingProviderClient {
     public readonly model: string;
     public dims: number;
     public readonly normalize: boolean;
+    private readonly timeoutMs?: number;
 
-    constructor(options: { apiKey: string; model: string; normalize: boolean }) {
+    constructor(options: { apiKey: string; model: string; normalize: boolean; timeoutMs?: number }) {
         this.apiKey = options.apiKey;
         this.model = options.model;
         this.normalize = options.normalize;
+        this.timeoutMs = options.timeoutMs;
         this.dims = 0;
     }
 
     private readonly apiKey: string;
 
     public async embed(texts: string[]): Promise<Float32Array[]> {
-        const response = await fetch("https://api.openai.com/v1/embeddings", {
-            method: "POST",
-            headers: {
-                "Authorization": `Bearer ${this.apiKey}`,
-                "Content-Type": "application/json"
-            },
-            body: JSON.stringify({ model: this.model, input: texts })
-        });
+        const controller = new AbortController();
+        const timeoutMs = this.timeoutMs ?? 15_000;
+        const timer = setTimeout(() => controller.abort(), Math.max(1, timeoutMs));
+        let response: Response;
+        try {
+            response = await fetch("https://api.openai.com/v1/embeddings", {
+                method: "POST",
+                headers: {
+                    "Authorization": `Bearer ${this.apiKey}`,
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify({ model: this.model, input: texts }),
+                signal: controller.signal
+            });
+        } catch (err: any) {
+            if (err?.name === "AbortError") {
+                throw new Error(`OpenAI embedding timed out after ${timeoutMs}ms`);
+            }
+            throw err;
+        } finally {
+            clearTimeout(timer);
+        }
 
         if (!response.ok) {
             const message = await response.text();
