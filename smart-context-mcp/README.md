@@ -11,6 +11,15 @@ npm run build
 node dist/index.js
 ```
 
+## VS Code / Copilot MCP root path
+
+Some MCP hosts may launch the server with an unexpected working directory (e.g. `~` or a parent folder). If that happens, Smart Context may try to index *everything under that directory*.
+
+Pin the project root explicitly:
+
+- Env (preferred): `SMART_CONTEXT_ROOT_PATH=/absolute/path/to/your/project`
+- CLI: `node dist/index.js --root /absolute/path/to/your/project`
+
 ## Memory tuning (search)
 
 The project search uses an in-memory trigram index for fast candidate selection. On very large repos this can consume multiple GB of RAM.
