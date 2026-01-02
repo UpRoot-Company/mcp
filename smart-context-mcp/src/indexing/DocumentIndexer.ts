@@ -15,7 +15,21 @@ import { extractDocxAsHtml, DocxExtractError } from "../documents/extractors/Doc
 import { extractXlsxAsText, XlsxExtractError } from "../documents/extractors/XlsxExtractor.js";
 import { extractPdfAsText, PdfExtractError } from "../documents/extractors/PdfExtractor.js";
 
-const SUPPORTED_DOC_EXTENSIONS = new Set<string>([".md", ".mdx", ".txt", ".log", ".html", ".htm", ".css", ".docx", ".xlsx", ".pdf"]);
+const SUPPORTED_DOC_EXTENSIONS = new Set<string>([
+    ".md",
+    ".mdx",
+    ".txt",
+    ".log",
+    ".html",
+    ".htm",
+    ".css",
+    ".docx",
+    ".xlsx",
+    ".pdf",
+    ".csv",
+    ".json",
+    ".ndjson"
+]);
 const WELL_KNOWN_TEXT_FILES = new Set<string>([
     "README",
     "LICENSE",
@@ -319,6 +333,9 @@ function inferKind(filePath: string): DocumentKind {
     if (ext === ".md") return "markdown";
     if (ext === ".txt") return "text";
     if (ext === ".log") return "text";
+    if (ext === ".csv") return "text";
+    if (ext === ".json") return "text";
+    if (ext === ".ndjson") return "text";
     if (ext === ".docx") return "html";
     if (ext === ".xlsx") return "text";
     if (ext === ".pdf") return "text";

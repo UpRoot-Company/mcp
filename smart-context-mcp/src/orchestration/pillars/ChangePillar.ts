@@ -5,6 +5,8 @@ import { ParsedIntent } from '../IntentRouter.js';
 import { ChangeBudgetManager } from '../ChangeBudgetManager.js';
 import { analyzeQuery } from '../../engine/search/QueryMetrics.js';
 import * as path from 'path';
+import { IntegrityEngine } from '../../integrity/IntegrityEngine.js';
+import type { IntegrityFinding, IntegrityReport } from '../../integrity/IntegrityTypes.js';
 
 
 export class ChangePillar {
@@ -13,6 +15,7 @@ export class ChangePillar {
   public async execute(intent: ParsedIntent, context: OrchestrationContext): Promise<any> {
     const { targets, constraints, originalIntent, action } = intent;
     const { dryRun = true, includeImpact = false } = constraints;
+    const integrityOptions = IntegrityEngine.resolveOptions(constraints.integrity, "change");
 
     const rawEdits = Array.isArray(constraints.edits) ? constraints.edits : [];
     let targetPath: string | undefined = constraints.targetPath || targets[0] || this.extractTargetFromEdits(rawEdits);
@@ -64,6 +67,41 @@ export class ChangePillar {
       dryRun
     });
     const allowImpactPreview = includeImpact === true;
+
+    let integrityReport: IntegrityReport | undefined;
+    if (integrityOptions && integrityOptions.mode !== "off") {
+      integrityReport = (await IntegrityEngine.run(
+        {
+          query: originalIntent,
+          targetPaths: targetPath ? [targetPath] : undefined,
+          scope: integrityOptions.scope ?? "auto",
+          sources: integrityOptions.sources ?? [],
+          limits: integrityOptions.limits ?? {},
+          mode: integrityOptions.mode ?? "preflight"
+        },
+        (tool, args) => this.runTool(context, tool, args)
+      )).report;
+
+      if (!dryRun && shouldBlockIntegrity(integrityOptions.mode ?? "preflight", integrityOptions.blockPolicy, integrityReport)) {
+        const blockedReport: IntegrityReport = {
+          ...integrityReport,
+          status: "blocked",
+          blockedReason: integrityReport.blockedReason ?? "high_severity_conflict"
+        };
+        const blockedSummary = this.formatIntegrityBlockMessage(blockedReport.topFindings);
+        return {
+          success: false,
+          status: "blocked",
+          message: blockedSummary,
+          operation: "apply",
+          targetFile: targetPath,
+          integrity: blockedReport,
+          guidance: {
+            message: blockedSummary
+          }
+        };
+      }
+    }
 
     // 2. Impact Analysis (Parallel, opt-in)
     const impactPromise = !dryRun && budget.allowImpact
@@ -198,6 +236,7 @@ export class ChangePillar {
       autoCorrectionAttempts: autoCorrectionAttempts.length > 0 ? autoCorrectionAttempts : undefined,
       guidance: failureGuidance ?? successGuidance,
       relatedDocs,
+      integrity: integrityReport,
       degraded: !finalResult.success && autoCorrectionAttempts.length === 0,
       refinement: {
         stage: refinementStage,
@@ -722,4 +761,43 @@ export class ChangePillar {
 
     return scored.map(({ _index, ...candidate }) => candidate);
   }
+
+  private formatIntegrityBlockMessage(findings?: IntegrityFinding[]): string {
+    const items = Array.isArray(findings) ? findings.slice(0, 3) : [];
+    if (items.length === 0) {
+      return "Integrity check blocked. Resolve conflicts before applying.";
+    }
+    const summary = items
+      .map((finding, index) => `${index + 1}) ${this.summarizeIntegrityFinding(finding)}`)
+      .join("; ");
+    return `Integrity check blocked. Fix first: ${summary}`;
+  }
+
+  private summarizeIntegrityFinding(finding: IntegrityFinding): string {
+    const left = this.compactIntegrityText(finding.claimA ?? "");
+    const right = this.compactIntegrityText(finding.claimB ?? "");
+    return right ? `${left} vs ${right}` : left;
+  }
+
+  private compactIntegrityText(text: string, max = 80): string {
+    const normalized = text.replace(/\s+/g, " ").trim();
+    if (normalized.length <= max) return normalized;
+    return `${normalized.slice(0, max - 3)}...`;
+  }
+
+}
+
+function shouldBlockIntegrity(
+  mode: string,
+  blockPolicy: string | undefined,
+  report: IntegrityReport
+): boolean {
+  if (!report?.summary) return false;
+  if (blockPolicy === "off") return false;
+  const highCount = report.summary.bySeverity?.high ?? 0;
+  const warnCount = report.summary.bySeverity?.warn ?? 0;
+  if (mode === "strict") {
+    return highCount + warnCount > 0;
+  }
+  return highCount > 0;
 }

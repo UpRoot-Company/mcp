@@ -20,6 +20,6 @@ This directory is written **for AI agents / tool integrations**.
 ## Legacy tools
 
 Legacy tool names are opt-in. See:
-- `smart-context-mcp/docs/legacy/README.md`
-- `smart-context-mcp/docs/legacy/LEGACY_TOOL_CATALOG.md`
+- `smart-context-mcp/docs/compat/README.md`
+- `smart-context-mcp/docs/compat/LEGACY_TOOL_CATALOG.md`
 

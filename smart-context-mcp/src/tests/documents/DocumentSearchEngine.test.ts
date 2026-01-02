@@ -76,6 +76,14 @@ function setupWorkspaceWithLog(): string {
     return rootDir;
 }
 
+function setupWorkspaceWithMetrics(): string {
+    const rootDir = setupWorkspace();
+    fs.mkdirSync(path.join(rootDir, "metrics"), { recursive: true });
+    fs.writeFileSync(path.join(rootDir, "metrics", "latency.csv"), "latency 250\n");
+    fs.writeFileSync(path.join(rootDir, "docs", "latency.md"), "latency 250\n");
+    return rootDir;
+}
+
 function setupWorkspaceWithCode(): string {
     const rootDir = setupWorkspace();
     fs.mkdirSync(path.join(rootDir, "src"), { recursive: true });
@@ -750,6 +758,53 @@ describe("DocumentSearchEngine", () => {
         const response = await engine.search("install failed", { output: "compact", includeEvidence: false });
         const match = response.results.find(r => r.filePath === "logs/app.log");
         expect(match).toBeTruthy();
+
+        indexDatabase.close();
+        await searchEngine.dispose();
+        fs.rmSync(rootDir, { recursive: true, force: true });
+    });
+
+    it("boosts metrics files when includeMetrics is enabled", async () => {
+        const rootDir = setupWorkspaceWithMetrics();
+        const fileSystem = new NodeFileSystem(rootDir);
+        const indexDatabase = new IndexDatabase(rootDir);
+        const embeddingRepository = new EmbeddingRepository(indexDatabase);
+        const documentIndexer = new DocumentIndexer(rootDir, fileSystem, indexDatabase, { embeddingRepository });
+        await documentIndexer.indexFile("metrics/latency.csv");
+        await documentIndexer.indexFile("docs/latency.md");
+
+        const searchEngine = new SearchEngine(rootDir, fileSystem);
+        const engine = new DocumentSearchEngine(
+            searchEngine,
+            documentIndexer,
+            new DocumentChunkRepository(indexDatabase),
+            embeddingRepository,
+            new EmbeddingProviderFactory({
+                provider: "local",
+                normalize: true,
+                local: { model: "hash-test", dims: 64 }
+            }),
+            rootDir
+        );
+
+        const originalBoost = process.env.SMART_CONTEXT_METRICS_SCORE_BOOST;
+        process.env.SMART_CONTEXT_METRICS_SCORE_BOOST = "0.5";
+        try {
+            const response = await engine.search("latency 250", {
+                output: "compact",
+                includeEvidence: false,
+                includeMetrics: true,
+                scope: "docs",
+                embedding: { provider: "disabled" }
+            });
+            expect(response.results[0]?.filePath).toBe("metrics/latency.csv");
+        } finally {
+            if (originalBoost === undefined) {
+                delete process.env.SMART_CONTEXT_METRICS_SCORE_BOOST;
+            } else {
+                process.env.SMART_CONTEXT_METRICS_SCORE_BOOST = originalBoost;
+            }
+        }
 
         indexDatabase.close();
         await searchEngine.dispose();

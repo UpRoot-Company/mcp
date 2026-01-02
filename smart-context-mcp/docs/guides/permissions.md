@@ -91,6 +91,6 @@ Allow analysis plus running tests/build, but keep edits disabled.
 If you enable legacy tool names (e.g. `search_project`, `read_code`, `edit_code`) via environment variables, you must also allow them explicitly in your tool permissions.
 
 See:
-- `smart-context-mcp/docs/legacy/README.md`
-- `smart-context-mcp/docs/legacy/LEGACY_TOOL_CATALOG.md`
+- `smart-context-mcp/docs/compat/README.md`
+- `smart-context-mcp/docs/compat/LEGACY_TOOL_CATALOG.md`
 

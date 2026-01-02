@@ -13,6 +13,7 @@ import { EvidencePackRepository, computeRootFingerprint, type StoredEvidencePack
 import { buildDeterministicPreview } from "../summary/DeterministicSummarizer.js";
 
 export interface DocumentSearchOptions {
+    scope?: "docs" | "project" | "all";
     output?: "full" | "compact" | "pack_only";
     packId?: string;
     maxResults?: number;
@@ -31,6 +32,8 @@ export interface DocumentSearchOptions {
     maxEmbeddingTimeMs?: number;
     embedding?: EmbeddingConfig;
     includeComments?: boolean;
+    includeLogs?: boolean;
+    includeMetrics?: boolean;
 }
 
 export interface DocumentSearchSection {
@@ -91,6 +94,9 @@ export class DocumentSearchEngine {
     public async search(query: string, options: DocumentSearchOptions = {}): Promise<DocumentSearchResponse> {
         const output = options.output ?? "full";
         const packTtlMs = Number.parseInt(process.env.SMART_CONTEXT_EVIDENCE_PACK_TTL_MS ?? "86400000", 10); // 24h
+        const scope = options.scope ?? "all";
+        const includeLogs = options.includeLogs === true;
+        const includeMetrics = options.includeMetrics === true;
 
         if (!query || !query.trim()) {
             return {
@@ -146,6 +152,9 @@ export class DocumentSearchEngine {
             maxChunksEmbeddedPerRequest,
             maxEmbeddingTimeMs,
             includeComments: options.includeComments === true,
+            includeLogs,
+            includeMetrics,
+            scope,
             embedding: options.embedding ?? null
         });
 
@@ -191,7 +200,14 @@ export class DocumentSearchEngine {
         }
         }
 
-        const candidateFiles = await this.collectCandidateFiles(query, maxCandidates, options.includeComments === true);
+        const candidateFiles = await this.collectCandidateFiles(
+            query,
+            maxCandidates,
+            options.includeComments === true,
+            scope,
+            includeLogs,
+            includeMetrics
+        );
         let chunks = await this.collectChunks(candidateFiles, options.includeComments === true);
         const initialChunkCount = chunks.length;
 
@@ -267,6 +283,9 @@ export class DocumentSearchEngine {
         let vectorScores = new Map<string, number>();
         let vectorRankMap = new Map<string, number>();
         let degraded = false;
+        const metricsBoost = includeMetrics
+            ? Number.parseFloat(process.env.SMART_CONTEXT_METRICS_SCORE_BOOST ?? "0.12")
+            : 0;
 
         if (vectorEnabled) {
             const vectorCandidates = bm25Ranked.slice(0, Math.min(maxVectorCandidates, bm25Ranked.length));
@@ -315,7 +334,10 @@ export class DocumentSearchEngine {
         const scoredSections = chunks.map(chunk => {
             const bm25Score = bm25ScoreMap.get(chunk.id) ?? 0;
             const vectorScore = vectorScores.get(chunk.id);
-            const finalScore = vectorEnabled ? (rrfScores.get(chunk.id) ?? 0) : bm25Score;
+            const baseScore = vectorEnabled ? (rrfScores.get(chunk.id) ?? 0) : bm25Score;
+            const finalScore = (metricsBoost > 0 && isMetricsPath(chunk.filePath))
+                ? baseScore * (1 + metricsBoost)
+                : baseScore;
             return {
                 chunk,
                 scores: {
@@ -618,30 +640,15 @@ export class DocumentSearchEngine {
         return false;
     }
 
-    private async collectCandidateFiles(query: string, maxCandidates: number, includeComments: boolean): Promise<string[]> {
-        const includeGlobs = [
-            "**/*.md",
-            "**/*.mdx",
-            "**/*.txt",
-            "**/*.log",
-            "**/*.docx",
-            "**/*.xlsx",
-            "**/*.pdf",
-            "**/*.html",
-            "**/*.htm",
-            "**/*.css",
-            "**/README",
-            "**/LICENSE",
-            "**/NOTICE",
-            "**/CHANGELOG",
-            "**/CODEOWNERS",
-            "**/.gitignore",
-            "**/.mcpignore",
-            "**/.editorconfig"
-        ];
-        if (includeComments) {
-            includeGlobs.push("**/*.ts", "**/*.tsx", "**/*.js", "**/*.jsx", "**/*.py");
-        }
+    private async collectCandidateFiles(
+        query: string,
+        maxCandidates: number,
+        includeComments: boolean,
+        scope: "docs" | "project" | "all",
+        includeLogs: boolean,
+        includeMetrics: boolean
+    ): Promise<string[]> {
+        const includeGlobs = buildDocScopeGlobs(scope, includeComments, includeLogs, includeMetrics);
 
         const scoutResults = await this.searchEngine.scout({
             query,
@@ -651,7 +658,10 @@ export class DocumentSearchEngine {
             deduplicateByContent: true
         });
 
-        const paths = scoutResults.map(result => result.filePath).filter(Boolean);
+        const paths = scoutResults
+            .map(result => result.filePath)
+            .filter(Boolean)
+            .filter((filePath) => matchesDocScope(filePath, scope, includeComments, includeLogs, includeMetrics));
         const seen = new Set<string>();
         const unique: string[] = [];
         for (const candidate of paths) {
@@ -663,6 +673,7 @@ export class DocumentSearchEngine {
             const extras = this.chunkRepository.listDocumentFiles(maxCandidates * 2);
             for (const extra of extras) {
                 if (seen.has(extra)) continue;
+                if (!matchesDocScope(extra, scope, includeComments, includeLogs, includeMetrics)) continue;
                 seen.add(extra);
                 unique.push(extra);
                 if (unique.length >= maxCandidates) break;
@@ -671,7 +682,13 @@ export class DocumentSearchEngine {
         if (unique.length > 0) return unique;
 
         const filenameFallback = await this.searchEngine.searchFilenames(query, { maxResults: maxCandidates });
-        return Array.from(new Set(filenameFallback.map(result => result.path)));
+        return Array.from(
+            new Set(
+                filenameFallback
+                    .map(result => result.path)
+                    .filter((filePath) => matchesDocScope(filePath, scope, includeComments, includeLogs, includeMetrics))
+            )
+        );
     }
 
     private async collectChunks(filePaths: string[], includeComments: boolean): Promise<StoredDocumentChunk[]> {
@@ -913,6 +930,120 @@ function cosineSimilarity(a: Float32Array, b: Float32Array): number {
 function isCodeFile(filePath: string): boolean {
     const ext = path.extname(filePath).toLowerCase();
     return ext === ".ts" || ext === ".tsx" || ext === ".js" || ext === ".jsx" || ext === ".py";
+}
+
+function buildDocScopeGlobs(
+    scope: "docs" | "project" | "all",
+    includeComments: boolean,
+    includeLogs: boolean,
+    includeMetrics: boolean
+): string[] {
+    let includeGlobs: string[];
+    if (scope === "docs") {
+        includeGlobs = [
+            "docs/**/*.md",
+            "docs/**/*.mdx",
+            "docs/**/README",
+            "docs/**/README.*",
+            "**/README",
+            "**/README.*"
+        ];
+    } else if (scope === "project") {
+        includeGlobs = [
+            "**/*.md",
+            "**/*.mdx",
+            "**/README",
+            "**/README.*"
+        ];
+    } else {
+        includeGlobs = [
+            "**/*.md",
+            "**/*.mdx",
+            "**/*.txt",
+            "**/*.log",
+            "**/*.docx",
+            "**/*.xlsx",
+            "**/*.pdf",
+            "**/*.html",
+            "**/*.htm",
+            "**/*.css",
+            "**/README",
+            "**/LICENSE",
+            "**/NOTICE",
+            "**/CHANGELOG",
+            "**/CODEOWNERS",
+            "**/.gitignore",
+            "**/.mcpignore",
+            "**/.editorconfig"
+        ];
+    }
+
+    if (includeLogs && scope !== "all") {
+        includeGlobs.push("**/*.log", "**/*.txt");
+    }
+    if (includeMetrics) {
+        includeGlobs.push(
+            "**/*.csv",
+            "**/*.json",
+            "**/*.ndjson",
+            "**/metrics/**/*.csv",
+            "**/metrics/**/*.json",
+            "**/metrics/**/*.ndjson",
+            "**/monitoring/**/*.csv",
+            "**/monitoring/**/*.json",
+            "**/monitoring/**/*.ndjson",
+            "**/*metrics*.csv",
+            "**/*metrics*.json",
+            "**/*metrics*.ndjson"
+        );
+    }
+    if (includeComments) {
+        includeGlobs.push("**/*.ts", "**/*.tsx", "**/*.js", "**/*.jsx", "**/*.py");
+    }
+
+    return includeGlobs;
+}
+
+function matchesDocScope(
+    filePath: string,
+    scope: "docs" | "project" | "all",
+    includeComments: boolean,
+    includeLogs: boolean,
+    includeMetrics: boolean
+): boolean {
+    if (!filePath) return false;
+    const normalized = filePath.replace(/\\/g, "/");
+    if (includeComments && isCodeFile(normalized)) return true;
+    if (scope === "all") return true;
+    if (isReadmePath(normalized)) return true;
+    if (includeLogs && isLogPath(normalized)) return true;
+    if (includeMetrics && isMetricsPath(normalized)) return true;
+    if (!isMarkdownPath(normalized)) return false;
+    if (scope === "docs") return isDocsPath(normalized);
+    return true;
+}
+
+function isMarkdownPath(filePath: string): boolean {
+    return /\.(md|mdx)$/i.test(filePath);
+}
+
+function isReadmePath(filePath: string): boolean {
+    const base = filePath.split("/").pop() ?? "";
+    return /^readme(\.|$)/i.test(base);
+}
+
+function isLogPath(filePath: string): boolean {
+    return /\.log$/i.test(filePath) || /\/logs?\//i.test(filePath);
+}
+
+function isMetricsPath(filePath: string): boolean {
+    if (/\.(csv|json|ndjson)$/i.test(filePath)) return true;
+    const base = filePath.split("/").pop() ?? "";
+    return /metrics?/i.test(base);
+}
+
+function isDocsPath(filePath: string): boolean {
+    return filePath.startsWith("docs/") || filePath.includes("/docs/");
 }
 
 function computePackId(query: string, options: unknown): string {

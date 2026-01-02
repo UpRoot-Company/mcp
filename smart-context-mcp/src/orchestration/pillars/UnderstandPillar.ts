@@ -4,6 +4,7 @@ import { OrchestrationContext } from '../OrchestrationContext.js';
 import { ParsedIntent } from '../IntentRouter.js';
 import { BudgetManager } from '../BudgetManager.js';
 import { analyzeQuery, isStrongQuery } from '../../engine/search/QueryMetrics.js';
+import { IntegrityEngine } from '../../integrity/IntegrityEngine.js';
 
 
 export class UnderstandPillar {
@@ -22,6 +23,7 @@ export class UnderstandPillar {
     const progressEnabled = this.shouldLogProgress(constraints);
     const progress = { enabled: progressEnabled, label: 'Understand' };
     const startedAt = Date.now();
+    const integrityOptions = IntegrityEngine.resolveOptions(constraints.integrity, "understand");
 
     this.progressLog(progressEnabled, `Start subject="${subject}" depth=${depth}.`);
 
@@ -165,6 +167,19 @@ export class UnderstandPillar {
     const status = includeCalls && !symbolName ? 'partial_success' : (degraded ? 'partial_success' : 'ok');
     const elapsedMs = Date.now() - startedAt;
     this.progressLog(progressEnabled, `Completed in ${elapsedMs}ms.`);
+    const integrityReport = integrityOptions && integrityOptions.mode !== "off"
+      ? (await IntegrityEngine.run(
+          {
+            query: subject,
+            targetPaths: filePath ? [filePath] : undefined,
+            scope: integrityOptions.scope ?? "auto",
+            sources: integrityOptions.sources ?? [],
+            limits: integrityOptions.limits ?? {},
+            mode: integrityOptions.mode ?? "warn"
+          },
+          (tool, args) => this.runTool(context, tool, args, progress)
+        )).report
+      : undefined;
     return {
       success: true,
       status,
@@ -203,6 +218,7 @@ export class UnderstandPillar {
         risks: [],
         recommendations: []
       },
+      integrity: integrityReport,
 
       guidance: {
         message: includeCalls && !symbolName
