@@ -40,6 +40,19 @@ Smart Context MCP is configured via environment variables. Most users only need 
 
 The local model folder name must match `SMART_CONTEXT_EMBEDDING_MODEL`. See `docs/guides/getting-started.md` for download/prep steps.
 
+## Embeddings pack (P2 optional)
+
+For large repos, persisting embeddings as a binary pack reduces restore time and disk footprint (vs legacy JSON+base64).
+
+| Variable | Purpose |
+|---|---|
+| `SMART_CONTEXT_EMBEDDING_PACK_FORMAT` | Enable pack persistence: `float32`, `q8`, or `both` (unset = disabled/legacy). |
+| `SMART_CONTEXT_EMBEDDING_PACK_REBUILD` | Policy: `auto`, `on_start`, `manual` (migration/rollout control). |
+| `SMART_CONTEXT_EMBEDDING_PACK_INDEX` | Index format: `json` (default) or `bin` (reserved). |
+| `SMART_CONTEXT_VECTOR_CACHE_MB` | Max MB for the on-demand embedding vector cache. |
+
+Use `smart-context-migrate-embeddings-pack` to migrate legacy `.smart-context/storage/embeddings.json` into `.smart-context/storage/v1/embeddings/<provider>/<model>/`.
+
 ## Vector index (P1)
 
 | Variable | Purpose |

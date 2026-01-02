@@ -78,6 +78,23 @@ smart-context-build-vector-index
 - Default `SMART_CONTEXT_VECTOR_INDEX=auto` will fall back to brute-force if no index exists.
 - The index is stored under `.smart-context/vector-index/<provider>/<model>/`.
 
+## Build the embeddings pack (P2 optional)
+
+For large repos, you can migrate legacy embedding persistence (`.smart-context/storage/embeddings.json`) into a binary pack:
+
+```bash
+# float32 (safe default)
+SMART_CONTEXT_EMBEDDING_PACK_FORMAT=float32 \
+smart-context-migrate-embeddings-pack
+
+# or store both float32 + q8 (recommended for future scaling experiments)
+SMART_CONTEXT_EMBEDDING_PACK_FORMAT=both \
+smart-context-migrate-embeddings-pack
+```
+
+- Pass `--force` to overwrite an existing pack.
+- Pack files are stored under `.smart-context/storage/v1/embeddings/<provider>/<model>/`.
+
 ## Use as an MCP server (example config)
 
 Point your MCP host at the built entry:

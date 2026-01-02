@@ -13,6 +13,16 @@ node --import tsx benchmarks/main.ts
 ```
 *Results are automatically generated as Markdown files in the `benchmarks/reports/` directory.*
 
+## 🎛️ Scenarios (P2)
+
+You can run a fixed scenario (stable include/exclude + query set) for more reproducible results:
+
+```bash
+node --import tsx benchmarks/main.ts --scenario p2-m
+```
+
+Scenario files live in `benchmarks/scenarios/` and define include/exclude globs and expected recall targets.
+
 ---
 
 ## 📊 8-Step Diagnostic Metrics

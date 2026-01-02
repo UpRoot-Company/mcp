@@ -1,0 +1,10 @@
+{
+  "name": "p2-l",
+  "includeGlobs": ["src/**"],
+  "excludeGlobs": ["benchmarks/**", "dist/**"],
+  "queries": [
+    { "query": "VectorIndexManager", "expectTop": "src/vector/VectorIndexManager.ts" },
+    { "query": "TrigramIndex", "expectTop": "src/engine/TrigramIndex.ts" },
+    { "query": "EmbeddingPackManager", "expectTop": "src/storage/EmbeddingPack.ts" }
+  ]
+}

@@ -2,6 +2,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { PathManager } from "../utils/PathManager.js";
 import type { DocumentKind, SymbolInfo } from "../types.js";
+import { EmbeddingPackManager, resolveEmbeddingPackConfigFromEnv, type EmbeddingPackConfig } from "./EmbeddingPack.js";
 
 export type StorageMode = "memory" | "file";
 
@@ -117,6 +118,7 @@ export interface IndexStore {
     deleteEmbedding(chunkId: string): void;
     deleteEmbeddingsForFile(filePath: string): void;
     listEmbeddings(key: EmbeddingKey, limit?: number): StoredEmbedding[];
+    iterateEmbeddings(key: EmbeddingKey, visitor: (embedding: StoredEmbedding) => void, options?: { limit?: number }): void;
 
     upsertEvidencePack(packId: string, payload: unknown): void;
     getEvidencePack(packId: string): unknown | null;
@@ -450,6 +452,22 @@ export class MemoryIndexStore implements IndexStore {
         return results;
     }
 
+    public iterateEmbeddings(key: EmbeddingKey, visitor: (embedding: StoredEmbedding) => void, options?: { limit?: number }): void {
+        const mapKey = embeddingKey(key);
+        const max = Number.isFinite(options?.limit) && (options?.limit as number) > 0 ? Math.floor(options?.limit as number) : undefined;
+        let count = 0;
+        for (const variants of this.embeddings.values()) {
+            const entry = variants.get(mapKey);
+            if (!entry) continue;
+            visitor({
+                ...entry,
+                vector: new Float32Array(entry.vector)
+            });
+            count++;
+            if (max && count >= max) break;
+        }
+    }
+
     public upsertEvidencePack(packId: string, payload: unknown): void {
         this.evidencePacks.set(packId, payload);
     }
@@ -559,10 +577,15 @@ export class FileIndexStore extends MemoryIndexStore {
     private readonly packsPath: string;
     private readonly summariesPath: string;
     private readonly transactionsPath: string;
+    private readonly embeddingPackConfig: EmbeddingPackConfig;
+    private readonly embeddingPacks = new Map<string, EmbeddingPackManager>();
+    private readonly hasLegacyEmbeddingsOnDisk: boolean;
+    private readonly hasEmbeddingPackOnDisk: boolean;
 
     constructor(rootPath: string) {
         super(rootPath, "file");
         PathManager.setRoot(rootPath);
+        this.embeddingPackConfig = resolveEmbeddingPackConfigFromEnv();
         this.storageDir = PathManager.getStorageDir();
         this.manifestPath = path.join(this.storageDir, "manifest.json");
         this.filesPath = path.join(this.storageDir, "files.json");
@@ -575,6 +598,8 @@ export class FileIndexStore extends MemoryIndexStore {
         this.summariesPath = path.join(this.storageDir, "summaries.json");
         this.transactionsPath = path.join(this.storageDir, "transactions.json");
         this.ensureStorage();
+        this.hasLegacyEmbeddingsOnDisk = fs.existsSync(this.embeddingsPath) && fs.statSync(this.embeddingsPath).size > 2;
+        this.hasEmbeddingPackOnDisk = this.embeddingPackConfig.enabled && (!this.hasLegacyEmbeddingsOnDisk || this.detectEmbeddingPackOnDisk());
         this.loadFromDisk();
     }
 
@@ -590,7 +615,9 @@ export class FileIndexStore extends MemoryIndexStore {
         this.persistSymbols();
         this.persistDependencies();
         this.persistChunks();
-        this.persistEmbeddings();
+        if (!this.embeddingPackConfig.enabled || !this.hasEmbeddingPackOnDisk) {
+            this.persistEmbeddings();
+        }
     }
 
     public override deleteFilesByPrefix(prefix: string): void {
@@ -599,7 +626,9 @@ export class FileIndexStore extends MemoryIndexStore {
         this.persistSymbols();
         this.persistDependencies();
         this.persistChunks();
-        this.persistEmbeddings();
+        if (!this.embeddingPackConfig.enabled || !this.hasEmbeddingPackOnDisk) {
+            this.persistEmbeddings();
+        }
     }
 
     public override replaceSymbols(args: { relativePath: string; lastModified: number; language?: string | null; symbols: SymbolInfo[] }): void {
@@ -650,18 +679,70 @@ export class FileIndexStore extends MemoryIndexStore {
     }
 
     public override upsertEmbedding(chunkId: string, key: EmbeddingKey, embedding: { dims: number; vector: Float32Array; norm?: number }): void {
+        if (this.embeddingPackConfig.enabled && this.hasEmbeddingPackOnDisk) {
+            const pack = this.getEmbeddingPack(key);
+            pack.upsertEmbedding(chunkId, embedding);
+            pack.markReady();
+            return;
+        }
         super.upsertEmbedding(chunkId, key, embedding);
         this.persistEmbeddings();
     }
 
+    public override getEmbedding(chunkId: string, key: EmbeddingKey): StoredEmbedding | null {
+        if (this.embeddingPackConfig.enabled && this.hasEmbeddingPackOnDisk) {
+            const pack = this.getEmbeddingPack(key);
+            const embedding = pack.getEmbedding(chunkId);
+            if (embedding) return embedding;
+            return null;
+        }
+        return super.getEmbedding(chunkId, key);
+    }
+
     public override deleteEmbedding(chunkId: string): void {
+        if (this.embeddingPackConfig.enabled && this.hasEmbeddingPackOnDisk) {
+            for (const pack of this.embeddingPacks.values()) {
+                pack.deleteEmbedding(chunkId);
+            }
+            return;
+        }
         super.deleteEmbedding(chunkId);
         this.persistEmbeddings();
     }
 
     public override deleteEmbeddingsForFile(filePath: string): void {
+        const normalized = this.normalize(filePath);
+        const chunkIds: string[] = [];
+        for (const [chunkId, meta] of this.chunkIndex.entries()) {
+            if (meta.filePath === normalized) {
+                chunkIds.push(chunkId);
+            }
+        }
+        if (this.embeddingPackConfig.enabled && this.hasEmbeddingPackOnDisk) {
+            for (const chunkId of chunkIds) {
+                for (const pack of this.embeddingPacks.values()) {
+                    pack.deleteEmbedding(chunkId);
+                }
+            }
+            return;
+        }
         super.deleteEmbeddingsForFile(filePath);
         this.persistEmbeddings();
+    }
+
+    public override listEmbeddings(key: EmbeddingKey, limit?: number): StoredEmbedding[] {
+        if (this.embeddingPackConfig.enabled && this.hasEmbeddingPackOnDisk) {
+            return this.getEmbeddingPack(key).listEmbeddings(limit);
+        }
+        return super.listEmbeddings(key, limit);
+    }
+
+    public override iterateEmbeddings(key: EmbeddingKey, visitor: (embedding: StoredEmbedding) => void, options?: { limit?: number }): void {
+        if (this.embeddingPackConfig.enabled && this.hasEmbeddingPackOnDisk) {
+            this.getEmbeddingPack(key).iterateEmbeddings(visitor, options);
+            return;
+        }
+        super.iterateEmbeddings(key, visitor, options);
     }
 
     public override upsertEvidencePack(packId: string, payload: unknown): void {
@@ -694,7 +775,13 @@ export class FileIndexStore extends MemoryIndexStore {
         this.persistTransactions();
     }
 
-    public override close(): void {}
+    public override close(): void {
+        if (this.embeddingPackConfig.enabled && this.hasEmbeddingPackOnDisk) {
+            for (const pack of this.embeddingPacks.values()) {
+                pack.close();
+            }
+        }
+    }
 
     public override dispose(): void {
         this.close();
@@ -745,18 +832,20 @@ export class FileIndexStore extends MemoryIndexStore {
             super.upsertDocumentChunks(filePath, entries ?? []);
         }
 
-        const embeddings = this.readJson<Record<string, Record<string, PersistedEmbedding>>>(this.embeddingsPath, {});
-        for (const [chunkId, variants] of Object.entries(embeddings)) {
-            for (const [variantKey, payload] of Object.entries(variants ?? {})) {
-                if (!payload?.vector) continue;
-                const vector = decodeVector(payload.vector);
-                const [provider, model] = variantKey.split("::", 2);
-                if (!provider || !model) continue;
-                super.upsertEmbedding(chunkId, { provider, model }, {
-                    dims: payload.dims,
-                    vector,
-                    norm: payload.norm
-                });
+        if (!this.embeddingPackConfig.enabled || !this.hasEmbeddingPackOnDisk) {
+            const embeddings = this.readJson<Record<string, Record<string, PersistedEmbedding>>>(this.embeddingsPath, {});
+            for (const [chunkId, variants] of Object.entries(embeddings)) {
+                for (const [variantKey, payload] of Object.entries(variants ?? {})) {
+                    if (!payload?.vector) continue;
+                    const vector = decodeVector(payload.vector);
+                    const [provider, model] = variantKey.split("::", 2);
+                    if (!provider || !model) continue;
+                    super.upsertEmbedding(chunkId, { provider, model }, {
+                        dims: payload.dims,
+                        vector,
+                        norm: payload.norm
+                    });
+                }
             }
         }
 
@@ -815,6 +904,12 @@ export class FileIndexStore extends MemoryIndexStore {
     }
 
     private persistEmbeddings(): void {
+        if (this.embeddingPackConfig.enabled && this.hasEmbeddingPackOnDisk) {
+            for (const pack of this.embeddingPacks.values()) {
+                pack.flush();
+            }
+            return;
+        }
         const payload: Record<string, Record<string, PersistedEmbedding>> = {};
         for (const [chunkId, variants] of this.embeddings.entries()) {
             payload[chunkId] = {};
@@ -829,6 +924,37 @@ export class FileIndexStore extends MemoryIndexStore {
             }
         }
         this.writeJson(this.embeddingsPath, payload);
+    }
+
+    private getEmbeddingPack(key: EmbeddingKey): EmbeddingPackManager {
+        const mapKey = embeddingKey(key);
+        const existing = this.embeddingPacks.get(mapKey);
+        if (existing) return existing;
+        const pack = new EmbeddingPackManager(key, this.embeddingPackConfig);
+        this.embeddingPacks.set(mapKey, pack);
+        return pack;
+    }
+
+    private detectEmbeddingPackOnDisk(): boolean {
+        const v1Dir = path.join(this.storageDir, "v1", "embeddings");
+        if (!fs.existsSync(v1Dir)) return false;
+        try {
+            const providers = fs.readdirSync(v1Dir);
+            for (const provider of providers) {
+                const providerDir = path.join(v1Dir, provider);
+                if (!fs.statSync(providerDir).isDirectory()) continue;
+                const models = fs.readdirSync(providerDir);
+                for (const model of models) {
+                    const dir = path.join(providerDir, model);
+                    if (!fs.statSync(dir).isDirectory()) continue;
+                    const readyPath = path.join(dir, "ready.json");
+                    if (fs.existsSync(readyPath)) return true;
+                }
+            }
+        } catch {
+            return false;
+        }
+        return false;
     }
 
     private persistPacks(): void {

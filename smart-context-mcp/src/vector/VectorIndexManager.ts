@@ -212,9 +212,10 @@ export class VectorIndexManager {
         if (this.config.mode === "bruteforce") return null;
         const stop = metrics.startTimer("vector_index.build_ms");
         try {
-            const embeddings = this.embeddingRepository.listEmbeddings(provider, model, this.config.maxPoints);
-            if (embeddings.length === 0) return null;
-            const dims = embeddings[0]?.dims ?? 0;
+            let dims = 0;
+            this.embeddingRepository.iterateEmbeddings(provider, model, (embedding) => {
+                dims = embedding.dims;
+            }, { limit: 1 });
             if (!dims) return null;
             const index = new HnswVectorIndex({
                 dims,
@@ -224,17 +225,19 @@ export class VectorIndexManager {
                 efSearch: this.config.efSearch
             });
             await index.initializeEmpty();
-            for (const embedding of embeddings) {
-                if (embedding.vector.length !== dims) continue;
+            let count = 0;
+            this.embeddingRepository.iterateEmbeddings(provider, model, (embedding) => {
+                if (embedding.vector.length !== dims) return;
                 index.upsert(embedding.chunkId, embedding.vector);
-            }
+                count++;
+            }, { limit: this.config.maxPoints });
             await index.save(this.indexDir(provider, model));
             const meta: VectorIndexMeta = {
                 version: 1,
                 provider,
                 model,
                 dims,
-                count: embeddings.length,
+                count,
                 rootFingerprint: this.rootFingerprint,
                 backend: "hnsw",
                 hnsw: { m: this.config.m, efConstruction: this.config.efConstruction, efSearch: this.config.efSearch },
@@ -250,14 +253,19 @@ export class VectorIndexManager {
     }
 
     private searchBruteforce(query: Float32Array, provider: string, model: string, k: number): VectorIndexResult[] {
-        const embeddings = this.embeddingRepository.listEmbeddings(provider, model, this.config.maxPoints);
-        if (embeddings.length === 0) return [];
-        const dims = embeddings[0]?.dims ?? 0;
+        let dims = 0;
+        this.embeddingRepository.iterateEmbeddings(provider, model, (embedding) => {
+            dims = embedding.dims;
+        }, { limit: 1 });
         if (!dims || query.length !== dims) return [];
         const index = new BruteforceVectorIndex(dims);
-        for (const embedding of embeddings) {
+        let count = 0;
+        this.embeddingRepository.iterateEmbeddings(provider, model, (embedding) => {
+            if (embedding.vector.length !== dims) return;
             index.upsert(embedding.chunkId, embedding.vector);
-        }
+            count++;
+        }, { limit: this.config.maxPoints });
+        if (count === 0) return [];
         return index.search(query, k);
     }
 }

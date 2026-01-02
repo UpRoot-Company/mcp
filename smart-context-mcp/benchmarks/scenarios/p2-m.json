@@ -1,0 +1,9 @@
+{
+  "name": "p2-m",
+  "includeGlobs": ["src/**"],
+  "excludeGlobs": ["benchmarks/**", "dist/**"],
+  "queries": [
+    { "query": "class QueryIntentDetector", "expectTop": "src/engine/search/QueryIntent.ts" },
+    { "query": "EmbeddingPackManager", "expectTop": "src/storage/EmbeddingPack.ts" }
+  ]
+}

@@ -36,4 +36,13 @@ export class EmbeddingRepository {
     public listEmbeddings(provider: string, model: string, limit?: number): StoredEmbedding[] {
         return this.indexDb.listEmbeddings({ provider, model }, limit);
     }
+
+    public iterateEmbeddings(
+        provider: string,
+        model: string,
+        visitor: (embedding: StoredEmbedding) => void,
+        options?: { limit?: number }
+    ): void {
+        this.indexDb.iterateEmbeddings({ provider, model }, visitor, options);
+    }
 }

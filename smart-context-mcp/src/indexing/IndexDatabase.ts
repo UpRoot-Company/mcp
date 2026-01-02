@@ -164,6 +164,10 @@ export class IndexDatabase implements IndexStore {
         return this.store.listEmbeddings(key, limit);
     }
 
+    public iterateEmbeddings(key: EmbeddingKey, visitor: (embedding: StoredEmbedding) => void, options?: { limit?: number }): void {
+        this.store.iterateEmbeddings(key, visitor, options);
+    }
+
     public upsertEvidencePack(packId: string, payload: unknown): void {
         this.store.upsertEvidencePack(packId, payload);
     }

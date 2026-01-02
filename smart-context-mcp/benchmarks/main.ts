@@ -23,15 +23,84 @@ interface Metric {
     status: '✅' | '⚠️' | '🚀';
 }
 
+type BenchmarkScenario = {
+    name?: string;
+    rootPath?: string;
+    includeGlobs?: string[];
+    excludeGlobs?: string[];
+    queries?: Array<{ query: string; expectTop: string }>;
+};
+
+function getArgValue(argv: string[], name: string): string | null {
+    const idx = argv.indexOf(name);
+    if (idx === -1) return null;
+    const value = argv[idx + 1];
+    return value ? String(value) : null;
+}
+
+function readScenario(rootPath: string, scenarioName: string): BenchmarkScenario {
+    const safeName = scenarioName.replace(/[^a-zA-Z0-9._-]/g, "");
+    const scenarioPath = path.join(rootPath, "benchmarks", "scenarios", `${safeName}.json`);
+    if (!fs.existsSync(scenarioPath)) {
+        throw new Error(`Scenario not found: ${scenarioPath}`);
+    }
+    const raw = fs.readFileSync(scenarioPath, "utf8");
+    return JSON.parse(raw) as BenchmarkScenario;
+}
+
+function bytesToMb(bytes: number): number {
+    return bytes / (1024 * 1024);
+}
+
+function directorySizeBytes(dir: string): number {
+    if (!fs.existsSync(dir)) return 0;
+    let total = 0;
+    const stack: string[] = [dir];
+    while (stack.length > 0) {
+        const current = stack.pop()!;
+        let entries: fs.Dirent[];
+        try {
+            entries = fs.readdirSync(current, { withFileTypes: true });
+        } catch {
+            continue;
+        }
+        for (const entry of entries) {
+            const absPath = path.join(current, entry.name);
+            try {
+                if (entry.isDirectory()) {
+                    stack.push(absPath);
+                } else if (entry.isFile()) {
+                    total += fs.statSync(absPath).size;
+                }
+            } catch {
+                // ignore unreadable entries
+            }
+        }
+    }
+    return total;
+}
+
 async function runBenchmark() {
     console.log("==========================================================");
     console.log("🏅 Smart-Context-MCP 8-Step Optimized Diagnostics");
     console.log("==========================================================");
 
+    const argv = process.argv.slice(2);
     const rootPath = process.cwd();
     const nfs = new NodeFileSystem(rootPath);
     const sg = new SkeletonGenerator();
     const metrics: Metric[] = [];
+
+    const scenarioName = getArgValue(argv, "--scenario");
+    const scenario: BenchmarkScenario = scenarioName
+        ? readScenario(rootPath, scenarioName)
+        : {
+              name: "default",
+              rootPath,
+              includeGlobs: ["src/**"],
+              excludeGlobs: ["benchmarks/**"],
+              queries: [{ query: "class QueryIntentDetector", expectTop: "src/engine/search/QueryIntent.ts" }]
+          };
 
     // STEP 1: Cold Start Speed
     console.log("\n[Step 1] Cold Start Performance...");
@@ -75,20 +144,31 @@ async function runBenchmark() {
     const intentAcc = (intents[0] === 'symbol' && intents[1] === 'file') ? 100 : 0;
     metrics.push({ step: 5, name: "Intent Accuracy", value: intentAcc, unit: "%", status: '✅' });
 
-    // STEP 6: Search Recall@1
-    console.log("[Step 6] Search Recall@1 (Precision)...");
+    // STEP 6: Search Recall@K (scenario)
+    console.log("[Step 6] Search Recall (scenario)...");
     const searchEngine = new SearchEngine(rootPath, nfs);
     await searchEngine.warmup();
-    const targetFile = "src/engine/search/QueryIntent.ts";
-    const results = await searchEngine.scout({
-        query: "class QueryIntentDetector",
-        includeGlobs: ["src/**"],
-        excludeGlobs: ["benchmarks/**"],
-        groupByFile: true,
-        deduplicateByContent: true
-    });
-    const recall = results[0]?.filePath === targetFile ? 100 : 0;
-    metrics.push({ step: 6, name: "Recall@1 (Top Match)", value: recall, unit: "%", status: '✅' });
+    const queries = scenario.queries ?? [];
+    let hitsAt1 = 0;
+    let hitsAt10 = 0;
+    const s6 = performance.now();
+    for (const q of queries) {
+        const results = await searchEngine.scout({
+            query: q.query,
+            includeGlobs: scenario.includeGlobs,
+            excludeGlobs: scenario.excludeGlobs,
+            groupByFile: true,
+            deduplicateByContent: true
+        });
+        if (results[0]?.filePath === q.expectTop) hitsAt1++;
+        if (results.slice(0, 10).some(r => r.filePath === q.expectTop)) hitsAt10++;
+    }
+    const elapsed6 = performance.now() - s6;
+    const recallAt1 = queries.length > 0 ? (hitsAt1 / queries.length) * 100 : 0;
+    const recallAt10 = queries.length > 0 ? (hitsAt10 / queries.length) * 100 : 0;
+    metrics.push({ step: 6, name: "Recall@1 (scenario)", value: recallAt1, unit: "%", status: '✅' });
+    metrics.push({ step: 6, name: "Recall@10 (scenario)", value: recallAt10, unit: "%", status: '✅' });
+    metrics.push({ step: 6, name: "Search Time (scenario)", value: elapsed6, unit: "ms", status: '🚀' });
 
     // STEP 7: Relationship Analysis Latency
     console.log("[Step 7] Relationship Analysis Latency...");
@@ -112,6 +192,12 @@ async function runBenchmark() {
 
     const reportPath = path.resolve(process.cwd(), `benchmarks/reports/full-report-${Date.now()}.md`);
     if (!fs.existsSync(path.dirname(reportPath))) fs.mkdirSync(path.dirname(reportPath), { recursive: true });
+
+    const mem = process.memoryUsage();
+    const smartContextDir = path.join(rootPath, ".smart-context");
+    const smartContextBytes = directorySizeBytes(smartContextDir);
+    reportMd += `\n\n## Scenario\n\n- name: ${scenario.name ?? scenarioName ?? "default"}\n- includeGlobs: ${(scenario.includeGlobs ?? []).join(", ")}\n- excludeGlobs: ${(scenario.excludeGlobs ?? []).join(", ")}\n- queries: ${queries.length}\n`;
+    reportMd += `\n## System Metrics\n\n- rssMB: ${bytesToMb(mem.rss).toFixed(1)}\n- heapUsedMB: ${bytesToMb(mem.heapUsed).toFixed(1)}\n- smartContextDirMB: ${bytesToMb(smartContextBytes).toFixed(1)}\n`;
     fs.writeFileSync(reportPath, reportMd);
 
     console.log("\n==========================================================");
