@@ -17,6 +17,54 @@ npm run build
 node dist/index.js
 ```
 
+## Prepare the local embedding model (offline)
+
+Runtime downloads are disabled, so you must prepare a local model before bundling or running in a closed environment.
+
+Recommended source: `Xenova/multilingual-e5-small` (ONNX + tokenizer files compatible with `@xenova/transformers`).
+
+```bash
+# On a machine with internet access (example using Hugging Face CLI)
+huggingface-cli download Xenova/multilingual-e5-small \
+  --local-dir /tmp/models/multilingual-e5-small \
+  --local-dir-use-symlinks false
+
+# Alternative (git-lfs)
+# git lfs clone https://huggingface.co/Xenova/multilingual-e5-small /tmp/models/multilingual-e5-small
+```
+
+Copy the folder to your offline machine. The model directory should look like:
+
+```
+models/
+  multilingual-e5-small/
+    config.json
+    tokenizer.json
+    tokenizer_config.json
+    special_tokens_map.json    (optional)
+    onnx/
+      model.onnx
+      model_quantized.onnx     (recommended)
+```
+
+- The folder name must match `SMART_CONTEXT_EMBEDDING_MODEL` (default: `multilingual-e5-small`).
+- If you use a different model, ensure it ships ONNX + tokenizer assets compatible with `@xenova/transformers`.
+
+## Bundle the offline embedding model (packaging)
+
+When creating a release artifact, bundle the local model into `dist/models`:
+
+```bash
+# Point to a local model folder (either the model root, or a parent containing it)
+SMART_CONTEXT_MODEL_SOURCE=/path/to/models \
+SMART_CONTEXT_EMBEDDING_MODEL=multilingual-e5-small \
+npm run bundle:models
+```
+
+- `npm pack` / `npm publish` runs the bundling automatically via `prepack`.
+- Set `SMART_CONTEXT_SKIP_MODEL_BUNDLE=true` to skip bundling (dev-only).
+- If you override `SMART_CONTEXT_MODEL_DIR`, keep it inside `dist/models` so it ships with the package.
+
 ## Use as an MCP server (example config)
 
 Point your MCP host at the built entry:

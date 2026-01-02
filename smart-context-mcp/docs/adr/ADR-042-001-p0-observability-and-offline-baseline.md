@@ -247,6 +247,8 @@ multilingual-e5-small/
 - 개발(레포) 환경에서는:
   - 기본적으로 원격 모델 로딩을 차단(`env.allowRemoteModels=false`)하므로,
   - 로컬에서 실행/테스트하려면 별도 “모델 준비 스크립트(prepack/prepare)”로 `SMART_CONTEXT_MODEL_DIR`에 모델을 배치해야 한다.
+  - 예: `SMART_CONTEXT_MODEL_SOURCE=/path/to/models npm run bundle:models`
+  - `SMART_CONTEXT_SKIP_MODEL_BUNDLE=true`로 번들링을 생략할 수 있다(개발 전용).
 - 패키지 내부 경로는 `SMART_CONTEXT_MODEL_DIR` 기본값으로 해석 가능해야 한다(예: `dist/models/` 또는 `models/`).
 
 응답 표준:

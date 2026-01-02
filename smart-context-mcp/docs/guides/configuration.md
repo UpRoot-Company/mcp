@@ -32,6 +32,15 @@ Smart Context MCP is configured via environment variables. Most users only need 
 | `SMART_CONTEXT_MODEL_CACHE_DIR` | Local model cache directory override. |
 | `SMART_CONTEXT_EMBEDDING_E5_PREFIX` | Enable E5 `query:`/`passage:` prefixing (default: true). |
 
+The local model folder name must match `SMART_CONTEXT_EMBEDDING_MODEL`. See `docs/guides/getting-started.md` for download/prep steps.
+
+## Packaging (model bundle)
+
+| Variable | Purpose |
+|---|---|
+| `SMART_CONTEXT_MODEL_SOURCE` | Source directory used by `npm run bundle:models` (model root or parent). |
+| `SMART_CONTEXT_SKIP_MODEL_BUNDLE` | Skip bundling in `prepack` (`true` to skip). |
+
 ## Integrity audit (ADR-041)
 
 | Variable | Purpose |

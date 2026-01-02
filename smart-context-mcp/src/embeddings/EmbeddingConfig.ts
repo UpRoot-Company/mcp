@@ -60,5 +60,10 @@ export function resolveEmbeddingProviderEnv(config: EmbeddingConfig): { provider
 function normalizeLocalModel(providerRaw: string | undefined, localModelRaw: string | undefined): string | undefined {
     const provider = providerRaw?.trim().toLowerCase() ?? "";
     if (provider === "hash") return "hash";
-    return localModelRaw?.trim() || undefined;
+    const raw = localModelRaw?.trim();
+    if (!raw) return undefined;
+    if (raw.toLowerCase().startsWith("bundled:")) {
+        return raw.slice("bundled:".length).trim();
+    }
+    return raw;
 }

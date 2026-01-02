@@ -6,6 +6,12 @@
 - Increase `SMART_CONTEXT_QUERY_TIMEOUT` (ms).
 - Give Node more heap for indexing: `NODE_OPTIONS=--max-old-space-size=4096`.
 
+## Bundled model not found
+
+- Ensure the local model files exist (see `docs/guides/getting-started.md`).
+- Run `npm run bundle:models` with `SMART_CONTEXT_MODEL_SOURCE` set.
+- Or set `SMART_CONTEXT_EMBEDDING_PROVIDER=hash` to avoid model loading.
+
 ## “My MCP host can’t parse responses / protocol errors”
 
 Stdout must be reserved for MCP protocol frames. Keep stdout logging disabled:

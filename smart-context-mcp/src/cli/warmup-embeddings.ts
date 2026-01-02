@@ -19,7 +19,7 @@ function usage(): string {
         "",
         "Notes:",
         "- Uses SMART_CONTEXT_* embedding env config (provider/model/cache/timeout/concurrency).",
-        "- Intended to download/initialize local embedding models ahead of first MCP call."
+        "- Intended to initialize bundled/local embedding models ahead of first MCP call."
     ].join("\n");
 }
 

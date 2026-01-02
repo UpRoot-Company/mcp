@@ -9,3 +9,6 @@ coverage/
 
 # build output
 dist/
+
+# bundled models (local only)
+models/
