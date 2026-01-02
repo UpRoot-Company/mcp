@@ -105,8 +105,32 @@ export class SearchEngine {
             ? new CallGraphMetricsBuilder(options.callGraphBuilder)
             : undefined;
         this.queryTokenizer = new QueryTokenizer();
+
+        const trigramEnabledEnv = (process.env.SMART_CONTEXT_TRIGRAM_ENABLED ?? '').trim().toLowerCase();
+        const trigramModeEnv = (process.env.SMART_CONTEXT_TRIGRAM_INDEX ?? '').trim().toLowerCase();
+        const trigramEnabled = trigramModeEnv === 'disabled'
+            ? false
+            : (trigramEnabledEnv === 'false' ? false : true);
+
+        const trigramMaxFileBytesRaw = (process.env.SMART_CONTEXT_TRIGRAM_MAX_FILE_BYTES ?? '').trim();
+        const trigramMaxFileBytes = trigramMaxFileBytesRaw.length > 0
+            ? Number.parseInt(trigramMaxFileBytesRaw, 10)
+            : undefined;
+
+        const trigramExtensionsRaw = (process.env.SMART_CONTEXT_TRIGRAM_INCLUDE_EXTENSIONS ?? '').trim();
+        const trigramIncludeExtensions = trigramExtensionsRaw.length > 0
+            ? trigramExtensionsRaw.split(',').map(s => s.trim()).filter(Boolean)
+            : undefined;
+
         this.trigramIndex = new TrigramIndex(this.rootPath, this.fileSystem, {
             ignoreGlobs: this.defaultExcludeGlobs,
+            enabled: trigramEnabled,
+            ...(Number.isFinite(trigramMaxFileBytes as any) && (trigramMaxFileBytes as number) > 0
+                ? { maxFileBytes: trigramMaxFileBytes as number }
+                : {}),
+            ...(Array.isArray(trigramIncludeExtensions) && trigramIncludeExtensions.length > 0
+                ? { includeExtensions: trigramIncludeExtensions }
+                : {}),
             ...options.trigram
         });
 

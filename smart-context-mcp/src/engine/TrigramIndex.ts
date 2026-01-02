@@ -12,6 +12,7 @@ export interface TrigramIndexOptions {
     ignoreGlobs?: string[];
     maxFileBytes?: number;
     includeExtensions?: string[];
+    enabled?: boolean;
 }
 
 type IgnoreInstance = ReturnType<typeof createIgnore>;
@@ -60,6 +61,17 @@ export class TrigramIndex {
     private isBuilding = false;
     private needsPersistAfterBuild = false;
 
+    // Trigram strings are short and come from a small alphabet after normalizeQuery.
+    // Interning them significantly reduces memory pressure across many Maps.
+    private static readonly trigramPool = new Map<string, string>();
+
+    private static internTrigram(value: string): string {
+        const existing = TrigramIndex.trigramPool.get(value);
+        if (existing) return existing;
+        TrigramIndex.trigramPool.set(value, value);
+        return value;
+    }
+
     constructor(rootPath: string, fileSystem: IFileSystem, options: TrigramIndexOptions = {}) {
         this.rootPath = path.resolve(rootPath);
         this.fileSystem = fileSystem;
@@ -73,7 +85,8 @@ export class TrigramIndex {
                 ".json", ".yaml", ".yml", ".toml",
                 ".md", ".txt", ".log", ".css", ".scss", ".less",
                 ".html", ".astro"
-            ]
+            ],
+            enabled: options.enabled ?? true
         };
         this.ignoreFilter = createIgnore().add(this.options.ignoreGlobs);
         this.cacheDir = PathManager.getIndexDir();
@@ -81,6 +94,10 @@ export class TrigramIndex {
     }
 
     public async ensureReady(): Promise<void> {
+        if (!this.options.enabled) {
+            this.isReady = true;
+            return;
+        }
         if (!this.isReady && !this.isBuilding && !this.buildPromise) {
             this.buildPromise = this.buildIndex();
         }
@@ -90,6 +107,10 @@ export class TrigramIndex {
     }
 
     public async rebuild(options: { logEvery?: number; logger?: (message: string) => void; logTotals?: boolean } = {}): Promise<void> {
+        if (!this.options.enabled) {
+            this.isReady = true;
+            return;
+        }
         this.isReady = false;
         this.fileEntries.clear();
         this.postings.clear();
@@ -104,10 +125,12 @@ export class TrigramIndex {
     }
 
     public listFiles(): string[] {
+        if (!this.options.enabled) return [];
         return Array.from(this.fileEntries.keys());
     }
 
     public async refreshFile(absPath: string): Promise<void> {
+        if (!this.options.enabled) return;
         const relPath = this.normalizeRelative(absPath);
         if (!relPath || this.ignoreFilter.ignores(relPath)) return;
 
@@ -127,6 +150,7 @@ export class TrigramIndex {
     }
 
     public async removeFile(absPath: string): Promise<void> {
+        if (!this.options.enabled) return;
         const relPath = this.normalizeRelative(absPath);
         if (relPath && this.fileEntries.has(relPath)) {
             this.removeEntry(relPath);
@@ -135,12 +159,14 @@ export class TrigramIndex {
     }
 
     public async refreshDirectory(absDir: string): Promise<void> {
+        if (!this.options.enabled) return;
         // Simple strategy: re-walk the directory
         await this.walk(absDir);
         this.schedulePersist();
     }
 
     public async search(term: string, limit: number = 200): Promise<SearchCandidate[]> {
+        if (!this.options.enabled) return [];
         await this.ensureReady();
         
         const query = TrigramIndex.normalizeQuery(term);
@@ -401,7 +427,10 @@ export class TrigramIndex {
             console.info(`[TrigramIndex] Restored ${serialized.entries.length} files from persisted index`);
 
             for (const entry of serialized.entries) {
-                const freqMap = new Map(entry.trigramFreq);
+                const freqMap = new Map<string, number>();
+                for (const [trigram, count] of entry.trigramFreq) {
+                    freqMap.set(TrigramIndex.internTrigram(trigram), count);
+                }
                 this.fileEntries.set(entry.path, {
                     path: entry.path,
                     mtime: entry.mtime,
@@ -410,7 +439,7 @@ export class TrigramIndex {
                     trigramFreq: freqMap
                 });
 
-                for (const [trigram, count] of entry.trigramFreq) {
+                for (const [trigram, count] of freqMap.entries()) {
                     let postings = this.postings.get(trigram);
                     if (!postings) {
                         postings = new Map();
@@ -503,7 +532,7 @@ export class TrigramIndex {
         if (query.length < 3) return counts;
 
         for (let i = 0; i <= query.length - 3; i++) {
-            const trigram = query.substring(i, i + 3);
+            const trigram = TrigramIndex.internTrigram(query.substring(i, i + 3));
             counts.set(trigram, (counts.get(trigram) || 0) + 1);
         }
         return counts;

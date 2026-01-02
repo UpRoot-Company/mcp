@@ -15,6 +15,7 @@ export class CandidateCollector {
 
     public async collectHybridCandidates(keywords: string[]): Promise<Set<string>> {
         const candidates = new Set<string>();
+        const debug = process.env.SMART_CONTEXT_DEBUG === 'true';
 
         // Source 1: Trigram index
         const trigramQuery = keywords.join(' ');
@@ -22,14 +23,18 @@ export class CandidateCollector {
         for (const result of trigramResults) {
             candidates.add(result.filePath);
         }
-        console.log(`[Search] Trigram candidates: ${trigramResults.length}`);
+        if (debug) {
+            console.log(`[Search] Trigram candidates: ${trigramResults.length}`);
+        }
 
         // Source 2: Filename matching
         const filenameMatches = this.findByFilename(keywords);
         for (const path of filenameMatches) {
             candidates.add(path);
         }
-        console.log(`[Search] Filename matches: ${filenameMatches.length}`);
+        if (debug) {
+            console.log(`[Search] Filename matches: ${filenameMatches.length}`);
+        }
 
         // Source 3: Symbol index
         if (this.symbolIndex) {
@@ -37,7 +42,9 @@ export class CandidateCollector {
             for (const path of symbolMatches) {
                 candidates.add(path);
             }
-            console.log(`[Search] Symbol matches: ${symbolMatches.length}`);
+            if (debug) {
+                console.log(`[Search] Symbol matches: ${symbolMatches.length}`);
+            }
         }
 
         // Source 4: Fallback
@@ -47,7 +54,9 @@ export class CandidateCollector {
             for (const file of fallback) {
                 candidates.add(file);
             }
-            console.log(`[Search] Added ${fallback.length} fallback candidates, total: ${candidates.size}`);
+            if (debug) {
+                console.log(`[Search] Added ${fallback.length} fallback candidates, total: ${candidates.size}`);
+            }
         }
 
         return candidates;

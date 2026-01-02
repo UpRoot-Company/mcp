@@ -11,6 +11,17 @@ npm run build
 node dist/index.js
 ```
 
+## Memory tuning (search)
+
+The project search uses an in-memory trigram index for fast candidate selection. On very large repos this can consume multiple GB of RAM.
+
+- Disable trigram indexing (lowest memory, slower candidate selection):
+	- `SMART_CONTEXT_TRIGRAM_INDEX=disabled` (or `SMART_CONTEXT_TRIGRAM_ENABLED=false`)
+- Reduce per-file indexing cost:
+	- `SMART_CONTEXT_TRIGRAM_MAX_FILE_BYTES=131072` (example: 128KB)
+- Restrict indexed extensions (comma-separated):
+	- `SMART_CONTEXT_TRIGRAM_INCLUDE_EXTENSIONS=.ts,.tsx,.js,.jsx,.py,.md`
+
 If you see `better-sqlite3 ... NODE_MODULE_VERSION ...`, run `npm rebuild better-sqlite3` (Node native module rebuild).
 
 ## Five Pillars (agent-facing API)
