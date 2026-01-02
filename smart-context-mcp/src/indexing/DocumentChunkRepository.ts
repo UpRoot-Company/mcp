@@ -21,6 +21,7 @@ export class DocumentChunkRepository {
     private readonly insertChunkStmt: Database.Statement;
     private readonly selectChunksForFileStmt: Database.Statement;
     private readonly selectContentHashByChunkIdStmt: Database.Statement;
+    private readonly selectDocumentFilesStmt: Database.Statement;
 
     constructor(private readonly indexDb: IndexDatabase) {
         this.db = indexDb.getHandle();
@@ -66,6 +67,13 @@ export class DocumentChunkRepository {
             SELECT content_hash as content_hash
             FROM document_chunks
             WHERE id = ?
+        `);
+        this.selectDocumentFilesStmt = this.db.prepare(`
+            SELECT DISTINCT f.path as path
+            FROM document_chunks c
+            JOIN files f ON f.id = c.file_id
+            ORDER BY f.path ASC
+            LIMIT ?
         `);
     }
 
@@ -145,6 +153,12 @@ export class DocumentChunkRepository {
         const row = this.selectContentHashByChunkIdStmt.get(chunkId) as { content_hash?: string } | undefined;
         const value = row?.content_hash;
         return typeof value === "string" && value.length > 0 ? value : null;
+    }
+
+    public listDocumentFiles(limit: number = 500): string[] {
+        const safeLimit = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : 500;
+        const rows = this.selectDocumentFilesStmt.all(safeLimit) as Array<{ path?: string }>;
+        return rows.map(row => row?.path).filter((value): value is string => typeof value === "string" && value.length > 0);
     }
 }
 

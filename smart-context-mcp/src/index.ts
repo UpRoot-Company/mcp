@@ -42,7 +42,7 @@ import { PathNormalizer } from "./utils/PathNormalizer.js";
 import { AstAwareDiff } from "./engine/AstAwareDiff.js";
 import { NodeFileSystem } from "./platform/FileSystem.js";
 import { ErrorEnhancer } from "./errors/ErrorEnhancer.js";
-import { ResourceUsage } from "./types.js";
+import { ResourceUsage, DocumentKind } from "./types.js";
 import { GhostInterfaceBuilder } from "./resolution/GhostInterfaceBuilder.js";
 import { FallbackResolver } from "./resolution/FallbackResolver.js";
 import { CallSiteAnalyzer } from "./ast/analysis/CallSiteAnalyzer.js";
@@ -52,6 +52,9 @@ import { DocumentProfiler } from "./documents/DocumentProfiler.js";
 import { extractHtmlTextPreserveLines } from "./documents/html/HtmlTextExtractor.js";
 import { buildDeterministicPreview, buildDeterministicSummary } from "./documents/summary/DeterministicSummarizer.js";
 import { DocumentSearchEngine } from "./documents/search/DocumentSearchEngine.js";
+import { extractDocxAsHtml, DocxExtractError } from "./documents/extractors/DocxExtractor.js";
+import { extractXlsxAsText, XlsxExtractError } from "./documents/extractors/XlsxExtractor.js";
+import { extractPdfAsText, PdfExtractError } from "./documents/extractors/PdfExtractor.js";
 import { EmbeddingProviderFactory } from "./embeddings/EmbeddingProviderFactory.js";
 import { resolveEmbeddingConfigFromEnv } from "./embeddings/EmbeddingConfig.js";
 
@@ -1019,14 +1022,17 @@ export class SmartContextServer {
 
     private async docTocRaw(args: any) {
         const filePath = this.resolveRelativePath(args.filePath);
-        const content = await this.fileSystem.readFile(filePath);
+        const extracted = await this.readDocumentContentForProfile(filePath);
         const profile = this.documentProfiler.profile({
             filePath,
-            content,
-            kind: this.inferDocumentKind(filePath),
+            content: extracted.content,
+            kind: extracted.kind,
             options: args?.options
         });
-        const degradation = buildDegradation(profile.parser?.reason ? [profile.parser.reason] : []);
+        const degradation = buildDegradation([
+            ...(profile.parser?.reason ? [profile.parser.reason] : []),
+            ...extracted.reasons
+        ]);
         return {
             filePath,
             kind: profile.kind,
@@ -1037,14 +1043,17 @@ export class SmartContextServer {
 
     private async docSkeletonRaw(args: any) {
         const filePath = this.resolveRelativePath(args.filePath);
-        const content = await this.fileSystem.readFile(filePath);
+        const extracted = await this.readDocumentContentForProfile(filePath);
         const profile = this.documentProfiler.profile({
             filePath,
-            content,
-            kind: this.inferDocumentKind(filePath),
+            content: extracted.content,
+            kind: extracted.kind,
             options: args?.options
         });
-        const degradation = buildDegradation(profile.parser?.reason ? [profile.parser.reason] : []);
+        const degradation = buildDegradation([
+            ...(profile.parser?.reason ? [profile.parser.reason] : []),
+            ...extracted.reasons
+        ]);
         return {
             filePath,
             kind: profile.kind,
@@ -1056,14 +1065,17 @@ export class SmartContextServer {
 
     private async docAnalyzeRaw(args: any) {
         const filePath = this.resolveRelativePath(args.filePath);
-        const content = await this.fileSystem.readFile(filePath);
+        const extracted = await this.readDocumentContentForProfile(filePath);
         const profile = this.documentProfiler.profile({
             filePath,
-            content,
-            kind: this.inferDocumentKind(filePath),
+            content: extracted.content,
+            kind: extracted.kind,
             options: args?.options
         });
-        const degradation = buildDegradation(profile.parser?.reason ? [profile.parser.reason] : []);
+        const degradation = buildDegradation([
+            ...(profile.parser?.reason ? [profile.parser.reason] : []),
+            ...extracted.reasons
+        ]);
         return {
             filePath,
             profile,
@@ -1074,16 +1086,19 @@ export class SmartContextServer {
 
     private async docReferencesRaw(args: any) {
         const filePath = this.resolveRelativePath(args.filePath);
-        const content = await this.fileSystem.readFile(filePath);
+        const extracted = await this.readDocumentContentForProfile(filePath);
         const profile = this.documentProfiler.profile({
             filePath,
-            content,
-            kind: this.inferDocumentKind(filePath),
+            content: extracted.content,
+            kind: extracted.kind,
             options: args?.options
         });
         const links = profile.links ?? [];
         const categorized = categorizeDocumentLinks(links);
-        const degradation = buildDegradation(profile.parser?.reason ? [profile.parser.reason] : []);
+        const degradation = buildDegradation([
+            ...(profile.parser?.reason ? [profile.parser.reason] : []),
+            ...extracted.reasons
+        ]);
         return {
             filePath,
             kind: profile.kind,
@@ -1095,11 +1110,11 @@ export class SmartContextServer {
 
     private async docSectionRaw(args: any) {
         const filePath = this.resolveRelativePath(args.filePath);
-        const content = await this.fileSystem.readFile(filePath);
+        const extracted = await this.readDocumentContentForProfile(filePath);
         const profile = this.documentProfiler.profile({
             filePath,
-            content,
-            kind: this.inferDocumentKind(filePath),
+            content: extracted.content,
+            kind: extracted.kind,
             options: args?.options
         });
         const outline = profile.outline;
@@ -1114,7 +1129,7 @@ export class SmartContextServer {
             : (typeof maxCharsRaw === "string" ? Number.parseInt(maxCharsRaw, 10) : maxCharsDefault);
         const effectiveMaxChars = Number.isFinite(maxChars) && maxChars > 0 ? maxChars : maxCharsDefault;
         const queryHint = typeof args?.query === "string" ? args.query : undefined;
-        const reasons: string[] = [];
+        const reasons: string[] = [...extracted.reasons];
         if (profile.parser?.reason) {
             reasons.push(profile.parser.reason);
         }
@@ -1159,7 +1174,7 @@ export class SmartContextServer {
 
         const section = outline[sectionIndex];
         const range = computeSectionRange(outline, sectionIndex, includeSubsections);
-        const lines = content.split(/\r?\n/);
+        const lines = extracted.content.split(/\r?\n/);
         const rawSectionContent = lines.slice(range.startLine - 1, range.endLine).join("\n");
         const sectionContent = profile.kind === "html"
             ? extractHtmlTextPreserveLines(rawSectionContent)
@@ -1263,6 +1278,53 @@ export class SmartContextServer {
         });
     }
 
+    private async readDocumentContentForProfile(
+        filePath: string
+    ): Promise<{ content: string; kind: DocumentKind; reasons: string[] }> {
+        const ext = path.extname(filePath).toLowerCase();
+        if (ext === ".docx") {
+            try {
+                const absPath = this.resolveAbsolutePath(filePath);
+                const extracted = await extractDocxAsHtml(absPath);
+                const reasons = extracted.warnings.length > 0 ? ["docx_warnings"] : [];
+                return { content: extracted.html ?? "", kind: "html", reasons };
+            } catch (error: any) {
+                const reason = error instanceof DocxExtractError
+                    ? error.reason
+                    : "docx_parse_failed";
+                return { content: "", kind: "html", reasons: [reason] };
+            }
+        }
+        if (ext === ".xlsx") {
+            try {
+                const absPath = this.resolveAbsolutePath(filePath);
+                const extracted = await extractXlsxAsText(absPath);
+                const reasons = extracted.warnings.length > 0 ? extracted.warnings : [];
+                return { content: extracted.text ?? "", kind: "text", reasons };
+            } catch (error: any) {
+                const reason = error instanceof XlsxExtractError
+                    ? error.reason
+                    : "xlsx_parse_failed";
+                return { content: "", kind: "text", reasons: [reason] };
+            }
+        }
+        if (ext === ".pdf") {
+            try {
+                const absPath = this.resolveAbsolutePath(filePath);
+                const extracted = await extractPdfAsText(absPath);
+                const reasons = extracted.warnings.length > 0 ? extracted.warnings : [];
+                return { content: extracted.text ?? "", kind: "text", reasons };
+            } catch (error: any) {
+                const reason = error instanceof PdfExtractError
+                    ? error.reason
+                    : "pdf_parse_failed";
+                return { content: "", kind: "text", reasons: [reason] };
+            }
+        }
+        const content = await this.fileSystem.readFile(filePath);
+        return { content, kind: this.inferDocumentKind(filePath), reasons: [] };
+    }
+
     private inferDocumentKind(filePath: string): "markdown" | "mdx" | "html" | "css" | "text" | "unknown" {
         const base = path.basename(filePath);
         if (base === "README" || base === "LICENSE" || base === "NOTICE" || base === "CHANGELOG" || base === "CODEOWNERS") {
@@ -1276,7 +1338,10 @@ export class SmartContextServer {
         if (ext === ".md") return "markdown";
         if (ext === ".html" || ext === ".htm") return "html";
         if (ext === ".css") return "css";
-        if (ext === ".txt") return "text";
+        if (ext === ".txt" || ext === ".log") return "text";
+        if (ext === ".docx") return "html";
+        if (ext === ".xlsx") return "text";
+        if (ext === ".pdf") return "text";
         return "unknown";
     }
 

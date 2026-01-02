@@ -1,5 +1,6 @@
 import * as path from "path";
 import * as fs from "fs";
+import * as crypto from "crypto";
 import ignore from "ignore";
 import { IFileSystem } from "../platform/FileSystem.js";
 import { IndexDatabase } from "./IndexDatabase.js";
@@ -10,8 +11,11 @@ import { DocumentKind, DocumentOutlineOptions } from "../types.js";
 import { EmbeddingRepository } from "./EmbeddingRepository.js";
 import { EmbeddingProviderFactory } from "../embeddings/EmbeddingProviderFactory.js";
 import { extractHtmlTextPreserveLines } from "../documents/html/HtmlTextExtractor.js";
+import { extractDocxAsHtml, DocxExtractError } from "../documents/extractors/DocxExtractor.js";
+import { extractXlsxAsText, XlsxExtractError } from "../documents/extractors/XlsxExtractor.js";
+import { extractPdfAsText, PdfExtractError } from "../documents/extractors/PdfExtractor.js";
 
-const SUPPORTED_DOC_EXTENSIONS = new Set<string>([".md", ".mdx", ".txt", ".html", ".htm", ".css"]);
+const SUPPORTED_DOC_EXTENSIONS = new Set<string>([".md", ".mdx", ".txt", ".log", ".html", ".htm", ".css", ".docx", ".xlsx", ".pdf"]);
 const WELL_KNOWN_TEXT_FILES = new Set<string>([
     "README",
     "LICENSE",
@@ -79,25 +83,67 @@ export class DocumentIndexer {
         if (this.shouldIgnore(relativePath)) return;
 
         const stats = await this.fileSystem.stat(relativePath);
-        const kind = inferKind(relativePath);
-        const rawContent = await this.readDocumentContent(relativePath, stats.size);
+        const ext = path.extname(relativePath).toLowerCase();
+        const isDocx = ext === ".docx";
+        const isXlsx = ext === ".xlsx";
+        const isPdf = ext === ".pdf";
+        const isLog = ext === ".log";
+        const kind = isDocx ? "html" : (isXlsx || isPdf ? "text" : inferKind(relativePath));
+        let rawContent = "";
+        if (isDocx) {
+            const absPath = path.resolve(this.rootPath, relativePath);
+            try {
+                const extracted = await extractDocxAsHtml(absPath);
+                rawContent = extracted.html ?? "";
+            } catch (error: any) {
+                const reason = error instanceof DocxExtractError ? error.reason : "docx_parse_failed";
+                console.warn(`[DocumentIndexer] Failed to extract DOCX (${relativePath}): ${reason}`);
+                return;
+            }
+        } else if (isXlsx) {
+            const absPath = path.resolve(this.rootPath, relativePath);
+            try {
+                const extracted = await extractXlsxAsText(absPath);
+                rawContent = extracted.text ?? "";
+            } catch (error: any) {
+                const reason = error instanceof XlsxExtractError ? error.reason : "xlsx_parse_failed";
+                console.warn(`[DocumentIndexer] Failed to extract XLSX (${relativePath}): ${reason}`);
+                return;
+            }
+        } else if (isPdf) {
+            const absPath = path.resolve(this.rootPath, relativePath);
+            try {
+                const extracted = await extractPdfAsText(absPath);
+                rawContent = extracted.text ?? "";
+            } catch (error: any) {
+                const reason = error instanceof PdfExtractError ? error.reason : "pdf_parse_failed";
+                console.warn(`[DocumentIndexer] Failed to extract PDF (${relativePath}): ${reason}`);
+                return;
+            }
+        } else {
+            rawContent = await this.readDocumentContent(relativePath, stats.size);
+        }
         const contentForChunking = kind === "html" ? extractHtmlTextPreserveLines(rawContent) : rawContent;
 
         const fileRecord = this.indexDatabase.getOrCreateFile(relativePath, stats.mtime, kind);
         this.embeddingRepository?.deleteEmbeddingsForFileId(fileRecord.id);
+        let stored: StoredDocumentChunk[];
+        if (isLog) {
+            stored = this.buildLogChunks(relativePath, contentForChunking);
+        } else {
+            const profile = this.profiler.profile({
+                filePath: relativePath,
+                content: rawContent,
+                kind,
+                options: this.outlineOptions
+            });
 
-        const profile = this.profiler.profile({
-            filePath: relativePath,
-            content: rawContent,
-            kind,
-            options: this.outlineOptions
-        });
-
-        const chunks = this.chunker.chunk(relativePath, kind, profile.outline, contentForChunking, this.outlineOptions);
-        const stored = chunks.map(chunk => ({
-            ...chunk,
-            filePath: relativePath
-        })) as StoredDocumentChunk[];
+            const chunks = this.chunker.chunk(relativePath, kind, profile.outline, contentForChunking, this.outlineOptions);
+            stored = chunks.map(chunk => ({
+                ...chunk,
+                filePath: relativePath
+            })) as StoredDocumentChunk[];
+        }
 
         this.chunkRepo.upsertChunksForFile(relativePath, stored);
         if (this.shouldEagerEmbed()) {
@@ -190,6 +236,52 @@ export class DocumentIndexer {
         return process.env.SMART_CONTEXT_DOCS_EMBEDDINGS_EAGER === "true";
     }
 
+    private buildLogChunks(filePath: string, content: string): StoredDocumentChunk[] {
+        const lines = content.split(/\r?\n/);
+        const lineOffsets: number[] = [];
+        let offset = 0;
+        for (const line of lines) {
+            lineOffsets.push(offset);
+            offset += line.length + 1;
+        }
+
+        const chunks: StoredDocumentChunk[] = [];
+        const sectionPath = [path.basename(filePath)];
+        const now = Date.now();
+
+        for (let index = 0; index < lines.length; index += 1) {
+            const line = lines[index] ?? "";
+            if (!line.trim()) continue;
+            const startLine = index + 1;
+            const startByte = lineOffsets[index] ?? 0;
+            const endByte = startByte + line.length;
+            const text = line;
+            chunks.push({
+                id: this.hash(`${filePath}\nlog\n${startLine}:${startLine}`),
+                filePath,
+                kind: "text",
+                sectionPath,
+                heading: null,
+                headingLevel: null,
+                range: {
+                    startLine,
+                    endLine: startLine,
+                    startByte,
+                    endByte
+                },
+                text,
+                contentHash: this.hash(text),
+                updatedAt: now
+            });
+        }
+
+        return chunks;
+    }
+
+    private hash(value: string): string {
+        return crypto.createHash("sha256").update(value).digest("hex");
+    }
+
     private async embedChunks(chunks: StoredDocumentChunk[]): Promise<void> {
         if (!this.embeddingRepository || !this.embeddingProviderFactory) return;
         if (chunks.length === 0) return;
@@ -226,6 +318,10 @@ function inferKind(filePath: string): DocumentKind {
     if (ext === ".mdx") return "mdx";
     if (ext === ".md") return "markdown";
     if (ext === ".txt") return "text";
+    if (ext === ".log") return "text";
+    if (ext === ".docx") return "html";
+    if (ext === ".xlsx") return "text";
+    if (ext === ".pdf") return "text";
     const base = path.basename(filePath);
     if (WELL_KNOWN_TEXT_FILES.has(base)) return "text";
     return "unknown";
