@@ -2,8 +2,8 @@
 
 This guide shows safe permission patterns for using Smart Context MCP with agents/IDEs.
 
-Smart Context’s default MCP tool surface is the **Six Pillars**:
-`navigate`, `read`, `understand`, `change`, `write`, `manage`.
+Smart Context’s default MCP tool surface is the **Five Pillars**:
+`explore`, `understand`, `change`, `write`, `manage`.
 
 ---
 
@@ -21,8 +21,7 @@ Use when you want analysis/documentation with no edits.
       "Bash(find:*)",
       "Bash(pwd:*)",
       "Bash(cat:*)",
-      "mcp__smart-context-mcp__navigate",
-      "mcp__smart-context-mcp__read",
+      "mcp__smart-context-mcp__explore",
       "mcp__smart-context-mcp__understand"
     ],
     "deny": [
@@ -72,8 +71,7 @@ Allow analysis plus running tests/build, but keep edits disabled.
       "Bash(git:*)",
       "Bash(npm test:*)",
       "Bash(npm run build:*)",
-      "mcp__smart-context-mcp__navigate",
-      "mcp__smart-context-mcp__read",
+      "mcp__smart-context-mcp__explore",
       "mcp__smart-context-mcp__understand"
     ],
     "deny": [

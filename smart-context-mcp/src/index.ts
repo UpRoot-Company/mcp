@@ -237,6 +237,9 @@ export class SmartContextServer {
     private registerInternalTools(): void {
         this.internalRegistry.register('read_code', (args) => this.readCodeRaw(args));
         this.internalRegistry.register('search_project', (args) => this.searchProjectRaw(args));
+        this.internalRegistry.register('search_files', (args) => this.searchFilesRaw(args));
+        this.internalRegistry.register('list_files', (args) => this.listFilesRaw(args));
+        this.internalRegistry.register('stat_file', (args) => this.statFileRaw(args));
         this.internalRegistry.register('analyze_relationship', (args) => this.analyzeRelationshipRaw(args));
         this.internalRegistry.register('edit_code', (args) => this.editCodeRaw(args));
         this.internalRegistry.register('manage_project', (args) => this.manageProjectRaw(args));
@@ -357,6 +360,10 @@ export class SmartContextServer {
 
     private initProcessDiagnostics(): void {
         if (this.diagnosticsInitialized) return;
+        if (this.isTestEnv()) {
+            this.diagnosticsInitialized = true;
+            return;
+        }
         this.diagnosticsInitialized = true;
 
         const logMemory = (label: string) => {
@@ -652,6 +659,58 @@ export class SmartContextServer {
                 }
             },
             {
+                name: 'explore',
+                description: 'Unified discovery for docs/code with previews, sections, and controlled full reads.',
+                inputSchema: {
+                    type: 'object',
+                    properties: {
+                        query: { type: 'string' },
+                        paths: { type: 'array', items: { type: 'string' } },
+                        view: { type: 'string', enum: ['auto', 'preview', 'section', 'full'] },
+                        include: {
+                            type: 'object',
+                            properties: {
+                                docs: { type: 'boolean' },
+                                code: { type: 'boolean' },
+                                comments: { type: 'boolean' },
+                                logs: { type: 'boolean' }
+                            }
+                        },
+                        section: {
+                            type: 'object',
+                            properties: {
+                                sectionId: { type: 'string' },
+                                headingPath: { type: 'array', items: { type: 'string' } },
+                                includeSubsections: { type: 'boolean' }
+                            }
+                        },
+                        packId: { type: 'string' },
+                        cursor: {
+                            type: 'object',
+                            properties: {
+                                items: { type: 'string' },
+                                content: { type: 'string' }
+                            }
+                        },
+                        limits: {
+                            type: 'object',
+                            properties: {
+                                maxResults: { type: 'number' },
+                                maxChars: { type: 'number' },
+                                maxItemChars: { type: 'number' },
+                                maxBytes: { type: 'number' },
+                                maxFiles: { type: 'number' },
+                                timeoutMs: { type: 'number' }
+                            }
+                        },
+                        fullPaths: { type: 'array', items: { type: 'string' } },
+                        allowSensitive: { type: 'boolean' },
+                        allowBinary: { type: 'boolean' },
+                        allowGlobs: { type: 'boolean' }
+                    }
+                }
+            },
+            {
                 name: 'change',
                 description: 'Safely modifies code with impact analysis.',
                 inputSchema: {
@@ -672,56 +731,6 @@ export class SmartContextServer {
                         }
                     },
                     required: ['intent']
-                }
-            },
-            {
-                name: 'navigate',
-                description: 'Locates symbols and files across the project.',
-                inputSchema: {
-                    type: 'object',
-                    properties: {
-                        target: { type: 'string' },
-                        context: { type: 'string', enum: ['definitions', 'usages', 'tests', 'docs', 'all'] },
-                        limit: { type: 'number' },
-                        include: {
-                            type: 'object',
-                            properties: {
-                                hotSpots: { type: 'boolean' },
-                                pageRank: { type: 'boolean' },
-                                relatedSymbols: { type: 'boolean' }
-                            }
-                        }
-                    },
-                    required: ['target']
-                }
-            },
-            {
-                name: 'read',
-                description: 'Reads file content efficiently.',
-                inputSchema: {
-                    type: 'object',
-                    properties: {
-                        target: { type: 'string' },
-                        view: { type: 'string', enum: ['full', 'skeleton', 'fragment'] },
-                        lineRange: {
-                            oneOf: [
-                                { type: 'string' },
-                                {
-                                    type: 'array',
-                                    items: { type: 'number' },
-                                    minItems: 2,
-                                    maxItems: 2
-                                }
-                            ]
-                        },
-                        sectionId: { type: 'string' },
-                        headingPath: { type: 'array', items: { type: 'string' } },
-                        includeSubsections: { type: 'boolean' },
-                        outlineOptions: { type: 'object' },
-                        includeProfile: { type: 'boolean' },
-                        includeHash: { type: 'boolean' }
-                    },
-                    required: ['target']
                 }
             },
             {
@@ -799,7 +808,7 @@ export class SmartContextServer {
 
     private async handleCallTool(name: string, args: any): Promise<any> {
         try {
-            const pillarTools = new Set(['understand', 'change', 'navigate', 'read', 'write', 'manage']);
+            const pillarTools = new Set(['understand', 'explore', 'change', 'write', 'manage']);
             const legacyTools = new Set([
                 'read_code',
                 'search_project',
@@ -890,7 +899,7 @@ export class SmartContextServer {
         console.warn(JSON.stringify({
             code: "TOOL_DEPRECATED",
             tool: toolName,
-            message: `${toolName} is deprecated. Prefer Six Pillars tools.`,
+            message: `${toolName} is deprecated. Prefer Five Pillars tools.`,
         }));
     }
 
@@ -910,9 +919,8 @@ export class SmartContextServer {
             write_file: ['filePath', 'content'],
             analyze_file: ['filePath'],
             understand: ['goal'],
+            explore: [],
             change: ['intent'],
-            navigate: ['target'],
-            read: ['target'],
             write: ['intent'],
             manage: ['command']
         };
@@ -1477,6 +1485,88 @@ export class SmartContextServer {
             maxResults: args?.maxResults
         });
         return results;
+    }
+
+    private async listFilesRaw(args: any) {
+        const basePath = typeof args?.basePath === "string" ? args.basePath : ".";
+        const depth = Number.isFinite(args?.depth) ? Math.max(0, args.depth) : 5;
+        const maxFiles = Number.isFinite(args?.maxFiles) ? Math.max(1, args.maxFiles) : 200;
+        const ignoreFilter = this.createIgnoreFilter(this.configurationManager.getIgnoreGlobs());
+        const results: Array<{ path: string; mtime?: number; size?: number }> = [];
+
+        let resolvedBase: string;
+        try {
+            resolvedBase = this.resolveRelativePath(basePath);
+        } catch {
+            return results;
+        }
+
+        try {
+            const baseStats = await this.fileSystem.stat(resolvedBase);
+            if (!baseStats.isDirectory()) {
+                const relativeBase = resolvedBase.replace(/\\/g, "/");
+                if (!ignoreFilter.ignores(relativeBase)) {
+                    results.push({ path: relativeBase, mtime: baseStats.mtime, size: baseStats.size });
+                }
+                return results;
+            }
+        } catch {
+            return results;
+        }
+
+        const walk = async (current: string, currentDepth: number) => {
+            if (results.length >= maxFiles) return;
+            const currentRelative = this.resolveRelativePath(current).replace(/\\/g, "/");
+            if (ignoreFilter.ignores(currentRelative)) return;
+
+            let entries: string[] = [];
+            try {
+                entries = await this.fileSystem.readDir(current);
+            } catch {
+                return;
+            }
+
+            for (const entry of entries) {
+                if (results.length >= maxFiles) break;
+                const fullPath = path.join(current, entry);
+                const relative = this.resolveRelativePath(fullPath);
+                const relativeNormalized = relative.replace(/\\/g, "/");
+                if (ignoreFilter.ignores(relativeNormalized)) continue;
+
+                let stats: { size: number; mtime: number; isDirectory: () => boolean };
+                try {
+                    stats = await this.fileSystem.stat(fullPath);
+                } catch {
+                    continue;
+                }
+
+                if (stats.isDirectory()) {
+                    if (currentDepth < depth) {
+                        await walk(fullPath, currentDepth + 1);
+                    }
+                } else {
+                    results.push({ path: relativeNormalized, mtime: stats.mtime, size: stats.size });
+                }
+            }
+        };
+
+        await walk(resolvedBase, 0);
+        return results;
+    }
+
+    private async statFileRaw(args: any) {
+        const inputPath = args?.path ?? args?.filePath;
+        if (!inputPath) {
+            throw new Error("Missing path for stat_file.");
+        }
+        const relative = this.resolveRelativePath(inputPath);
+        const stats = await this.fileSystem.stat(relative);
+        return {
+            path: relative.replace(/\\/g, "/"),
+            size: stats.size,
+            mtime: stats.mtime,
+            isDirectory: stats.isDirectory()
+        };
     }
 
     private inferSearchType(query: string, declared: string): "file" | "symbol" | "directory" | "filename" {

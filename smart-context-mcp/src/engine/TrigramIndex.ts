@@ -361,7 +361,10 @@ export class TrigramIndex {
                 trigramFreq: counts,
                 trigramCount: totalTrigrams
             });
-        } catch (error) {
+        } catch (error: any) {
+            if (error?.code === "ENOENT") {
+                return;
+            }
             console.warn(`[TrigramIndex] Failed to index ${relativePath}:`, error);
         }
     }

@@ -73,7 +73,7 @@ Optimize Smart Context MCP for different AI models by:
 - **Gemini:** Bulk operations - maxResults: 150-200, batch 100+ files, MCP + built-in tools
 
 **Gemini Tool Systems:**
-1. **MCP tools** (`includeTools`/`excludeTools`): navigate, read, understand, change, write, manage
+1. **MCP tools** (`includeTools`/`excludeTools`): explore, understand, change, write, manage
 2. **Built-in tools** (`tools.core`/`tools.exclude`): run_shell_command, read_file
 
 **For complete environment variable reference:** See [configuration.md](./configuration.md)
@@ -84,14 +84,14 @@ Optimize Smart Context MCP for different AI models by:
 
 ### Analysis-Only (Read-Only)
 
-**Tools:** navigate, read, understand
+**Tools:** explore, understand
 
 **Workflow:**
 ```
-1. navigate (find entry points)
-2. read(skeleton) (structure)
+1. explore (find entry points)
+2. explore(preview) (structure)
 3. understand (synthesis; enable include flags if needed)
-4. read(fragment/full) (details)
+4. explore(section/full) (details)
 ```
 
 **Permission:** Read-only tools only. See [permissions.md](./permissions.md#read-only-pattern)
@@ -100,12 +100,12 @@ Optimize Smart Context MCP for different AI models by:
 
 ### Auto-Fix (Automated Remediation)
 
-**Tools:** navigate, read, change, manage + test commands
+**Tools:** explore, change, manage + test commands
 
 **Workflow:**
 ```
-1. navigate (find problem)
-2. read(skeleton) (understand context)
+1. explore (find problem)
+2. explore(preview) (understand context)
 3. change(dryRun: true) (preview fix)
 4. change(dryRun: false) (apply)
 5. Run tests
@@ -127,7 +127,7 @@ SMART_CONTEXT_QUERY_TIMEOUT=15000
 ```
 
 **Tool Priority:**
-- ⚡⚡⚡ navigate, read(view="fragment"), read(view="skeleton")
+- ⚡⚡⚡ explore(view="section"), explore(view="preview")
 - ⚡⚡ understand (only when needed)
 - AVOID: deep `understand(include=...)` unless required
 
@@ -135,7 +135,7 @@ SMART_CONTEXT_QUERY_TIMEOUT=15000
 
 ### Security-Hardened (Locked Down)
 
-**Tools:** navigate, read, understand (read-only)
+**Tools:** explore, understand (read-only)
 
 **Restrictions:**
 - ✅ Code analysis only
@@ -210,9 +210,9 @@ Testing results from 10,000-file project:
 ```
 What do you need?
 
-├─ Find code/files → navigate
-├─ Read structure → read(view="skeleton")
-├─ Read specific lines → read(view="fragment")
+├─ Find/read code/files → explore
+├─ Read structure → explore(view="preview")
+├─ Read specific lines → explore(view="section")
 ├─ Relationships/impact → understand (enable include flags as needed)
 ├─ Make changes → change (use dryRun first)
 ├─ Undo mistake → manage undo
@@ -246,8 +246,7 @@ What do you need?
 
 | Tool | Target | Acceptable | Slow |
 |------|--------|-----------|------|
-| navigate | 300ms | <1000ms | >2000ms |
-| read | 300ms | <1000ms | >2000ms |
+| explore | 300ms | <1000ms | >2000ms |
 | understand | 800ms | <3000ms | >5000ms |
 | change | 500ms | <2000ms | >5000ms |
 
@@ -255,9 +254,9 @@ What do you need?
 
 **Pattern 1: Safe Single-File Edit**
 ```
-1. navigate (find file)
-2. read(skeleton) (understand structure)
-3. read(fragment) (get exact location)
+1. explore (find file)
+2. explore(preview) (understand structure)
+3. explore(section) (get exact location)
 4. change(dryRun: true) (preview)
 5. change(dryRun: false) (apply)
 
@@ -266,7 +265,7 @@ Token cost: ~2,000
 
 **Pattern 2: Bulk Refactoring (50+ files)**
 ```
-1. navigate (find entry points + usages)
+1. explore (find entry points + usages)
 2. change(dryRun: true) with clear intent + constraints (e.g., targetFiles)
 3. Split into batches if the dry-run diff is too large
 4. change(dryRun: false) to apply
@@ -277,10 +276,10 @@ Token cost: ~15,000-25,000
 
 **Pattern 3: Architecture Analysis**
 ```
-1. navigate (entry point)
-2. read(skeleton) (overview)
+1. explore (entry point)
+2. explore(preview) (overview)
 3. understand(include=...) (relationships/impact as needed)
-4. read(fragment) (details)
+4. explore(section) (details)
 
 Token cost: ~8,000-15,000
 ```

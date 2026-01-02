@@ -12,24 +12,31 @@ export class LegacyToolAdapter {
   public adapt(toolName: string, args: any): { category: string; args: any } | null {
     const mappings: Record<string, (a: any) => { category: string; args: any }> = {
       'read_code': (a) => ({
-        category: 'read',
-        args: { target: a.filePath, view: a.view || 'skeleton', lineRange: a.lineRange }
+        category: 'explore',
+        args: (() => {
+          const limits = a.view === 'fragment' ? { maxItemChars: 800 } : undefined;
+          return {
+            paths: [a.filePath],
+            view: a.view === 'full' ? 'full' : 'preview',
+            ...(limits ? { limits } : {})
+          };
+        })()
       }),
       'read_file': (a) => ({
-        category: 'read',
-        args: { target: a.filePath, view: a.full ? 'full' : 'skeleton', includeProfile: true }
+        category: 'explore',
+        args: { paths: [a.filePath], view: a.full ? 'full' : 'preview' }
       }),
       'read_fragment': (a) => ({
-        category: 'read',
-        args: { target: a.filePath, view: 'fragment', lineRange: a.lineRange }
+        category: 'explore',
+        args: { paths: [a.filePath], view: 'preview', limits: { maxItemChars: 800 } }
       }),
       'search_project': (a) => ({
-        category: 'navigate',
-        args: { target: a.query, limit: a.maxResults }
+        category: 'explore',
+        args: { query: a.query, limits: { maxResults: a.maxResults } }
       }),
       'search_files': (a) => ({
-        category: 'navigate',
-        args: { target: a.query || a.keywords?.join?.(' ') || a.patterns?.join?.(' ') || '' }
+        category: 'explore',
+        args: { query: a.query || a.keywords?.join?.(' ') || a.patterns?.join?.(' ') || '' }
       }),
       'analyze_relationship': (a) => ({
         category: 'understand',
@@ -55,16 +62,16 @@ export class LegacyToolAdapter {
         args: { intent: 'Write file content', targetPath: a.filePath, content: a.content }
       }),
       'analyze_file': (a) => ({
-        category: 'read',
-        args: { target: a.filePath, view: 'skeleton', includeProfile: true }
+        category: 'explore',
+        args: { paths: [a.filePath], view: 'preview' }
       }),
       'list_directory': (a) => ({
-        category: 'navigate',
-        args: { target: a.path || a.target }
+        category: 'explore',
+        args: { paths: [a.path || a.target], view: 'preview' }
       }),
       'get_hierarchy': (a) => ({
-        category: 'navigate',
-        args: { target: a.path || a.target }
+        category: 'explore',
+        args: { paths: [a.path || a.target], view: 'preview' }
       }),
       'get_batch_guidance': (a) => ({
         category: 'change',

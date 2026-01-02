@@ -6,6 +6,8 @@ All ADRs live in `smart-context-mcp/docs/adr/`. This index is intentionally **cu
 
 - **ADR-033 — Six Pillars Architecture**: `../adr/ADR-033-Six-Pillars-Architecture.md`  
   Maps to: `01-system-overview.md`, `03-tools-and-workflows.md`, `../agent/TOOL_REFERENCE.md`
+- **ADR-040 — Five Pillars (Explore-first) consolidation**: `../adr/ADR-040-five-pillars-explore-consolidation.md`  
+  Maps to: `03-tools-and-workflows.md`
 - **ADR-022 — Scalable Architecture (SQLite / WAL)**: `../adr/ADR-022-scalable-architecture.md`  
   Maps to: `02-core-engine.md`, `06-reliability-engineering.md`
 - **ADR-014 — Smart File Profile (Skeleton-first)**: `../adr/ADR-014-smart-file-profile.md`  
@@ -33,4 +35,4 @@ All ADRs live in `smart-context-mcp/docs/adr/`. This index is intentionally **cu
 
 ## Notes
 
-- Some older ADRs reference legacy tool names (`search_project`, `read_code`, `edit_code`). The recommended interface is the Six Pillars (ADR-033).
+- Some older ADRs reference legacy tool names (`search_project`, `read_code`, `edit_code`). The recommended interface is the Five Pillars (ADR-040).

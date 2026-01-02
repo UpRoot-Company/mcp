@@ -262,8 +262,8 @@ Let's verify the installation with three progressive examples.
 > "Find the main entry points (package.json, server entry, config). Show me the structure of the main entry file."
 
 **What happens:**
-1. AI calls `navigate` to locate entry/config files
-2. AI calls `read(view="skeleton")` (or `full` for small/non-code files)
+1. AI calls `explore({ query: ... })` to locate entry/config files
+2. AI uses preview/section results (or `view="full"` for small/non-code files)
 3. AI summarizes structure and next places to look
 
 **Success if:** You see actual directories from your project
@@ -276,9 +276,9 @@ Let's verify the installation with three progressive examples.
 > "Find the authentication code. Show me the structure of the main auth file without reading the whole implementation."
 
 **What happens:**
-1. AI calls `navigate(context="definitions")` to find auth-related symbols/files
-2. AI calls `read(view="skeleton")` on the auth file
-3. You see function signatures but **no implementation bodies** (Skeleton view compresses 95% of tokens!)
+1. AI calls `explore({ query: "auth", view: "preview" })` to find auth-related symbols/files
+2. AI uses preview/section output for the auth file
+3. You see structure without full implementations (token-efficient previews)
 
 **Expected output (skeleton):**
 ```typescript
@@ -303,7 +303,7 @@ export class AuthService {
 > "I want to rename the `validateUser` function to `authenticateUser`. What files will this affect? Is it safe?"
 
 **What happens:**
-1. AI calls `navigate` to locate definitions/usages
+1. AI calls `explore({ query: "validateUser" })` to locate definitions/usages
 2. AI uses `change(options.dryRun=true)` to propose a safe multi-file plan
 3. You review the diff and impact summary
 4. (Optional) You approve and AI applies with `change(options.dryRun=false)`
@@ -380,7 +380,7 @@ Result: Agent can work while indexing happens!
 
 If a `change` dry-run plan doesn’t match what you intended:
 
-- Re-run `read(view="fragment")` on the exact area you want changed (the code may have drifted).
+- Re-run `explore({ paths: ["..."], view: "preview" })` on the exact area you want changed (the code may have drifted).
 - Re-run `change` with tighter constraints (e.g., specify `targetFiles`, or mention “only change X, keep public API unchanged”).
 - If you already applied a bad change: `manage({ command: "undo" })`, then try again with a clearer intent.
 

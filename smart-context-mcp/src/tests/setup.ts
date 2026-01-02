@@ -11,5 +11,10 @@ console.warn = (...args: any[]) => {
       // fall through
     }
   }
+  if (args.length >= 1 && typeof args[0] === "string") {
+    if (args[0].startsWith("[LanguageConfig] Failed to parse ")) {
+      return;
+    }
+  }
   originalWarn(...args);
 };

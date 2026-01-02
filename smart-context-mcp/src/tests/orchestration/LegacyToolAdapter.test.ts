@@ -4,33 +4,33 @@ import { LegacyToolAdapter } from "../../orchestration/LegacyToolAdapter.js";
 describe("LegacyToolAdapter", () => {
   const adapter = new LegacyToolAdapter();
 
-  it("maps read_code to read pillar", () => {
+  it("maps read_code to explore pillar", () => {
     const result = adapter.adapt("read_code", { filePath: "src/demo.ts", view: "full" });
     expect(result).toEqual({
-      category: "read",
-      args: { target: "src/demo.ts", view: "full", lineRange: undefined }
+      category: "explore",
+      args: { paths: ["src/demo.ts"], view: "full" }
     });
   });
 
-  it("maps read_file and read_fragment to read pillar", () => {
+  it("maps read_file and read_fragment to explore pillar", () => {
     const readFile = adapter.adapt("read_file", { filePath: "src/demo.ts", full: false });
     expect(readFile).toEqual({
-      category: "read",
-      args: { target: "src/demo.ts", view: "skeleton", includeProfile: true }
+      category: "explore",
+      args: { paths: ["src/demo.ts"], view: "preview" }
     });
 
     const fragment = adapter.adapt("read_fragment", { filePath: "src/demo.ts", lineRange: "1-5" });
     expect(fragment).toEqual({
-      category: "read",
-      args: { target: "src/demo.ts", view: "fragment", lineRange: "1-5" }
+      category: "explore",
+      args: { paths: ["src/demo.ts"], view: "preview", limits: { maxItemChars: 800 } }
     });
   });
 
-  it("maps search_files to navigate pillar", () => {
+  it("maps search_files to explore pillar", () => {
     const result = adapter.adapt("search_files", { keywords: ["alpha", "beta"] });
     expect(result).toEqual({
-      category: "navigate",
-      args: { target: "alpha beta" }
+      category: "explore",
+      args: { query: "alpha beta" }
     });
   });
 

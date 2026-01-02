@@ -1,22 +1,22 @@
-# Prompt Engineering Guide (Six Pillars)
+# Prompt Engineering Guide (Five Pillars)
 
-This guide shows how to get high-quality results from Smart Context MCP using the **Six Pillars** (ADR-033). Focus on **“What”** you want; the system chooses **“How”**.
+This guide shows how to get high-quality results from Smart Context MCP using the **Five Pillars** (ADR-040). Focus on **“What”** you want; the system chooses **“How”**.
 
 ---
 
 ## 1) Three rules that cover most cases
 
-### Rule 1: Navigate before you read
+### Rule 1: Explore before you go deep
 Instead of guessing file paths, ask the system to locate likely targets first.
 
-- `navigate({ target: "AuthService", context: "definitions" })`
-- then `read({ target: "...", view: "skeleton" })`
+- `explore({ query: "AuthService" })`
+- then `explore({ paths: ["..."], view: "full" })` if needed
 
-### Rule 2: Skeleton-first, then narrow
-Start with `read(view="skeleton")`, then use `fragment` for the exact section you care about.
+### Rule 2: Preview-first, then expand
+Start with `explore(view="preview")` or `explore(view="section")`, then expand to full only when needed.
 
-- `read({ target: "src/auth/AuthService.ts", view: "skeleton" })`
-- `read({ target: "src/auth/AuthService.ts", view: "fragment", lineRange: "80-140" })`
+- `explore({ paths: ["src/auth/AuthService.ts"], view: "preview" })`
+- `explore({ paths: ["src/auth/AuthService.ts"], view: "full" })`
 
 ### Rule 3: Make edits as intent + constraints
 Prefer describing the change, plus constraints/acceptance criteria, over low-level string replacement.
@@ -40,14 +40,14 @@ Ask:
 - “Find the entry points for `<subsystem>` and explain the flow end-to-end.”
 
 Expected tool shape:
-- `navigate` → `read(skeleton)` → `understand`
+- `explore` → `understand`
 
 ### Template B: Rename a symbol safely
 Ask:
 - “Rename `<old>` to `<new>` across the repo. Keep behavior identical. Update imports/exports and tests if needed. Show a dry-run diff first.”
 
 Expected tool shape:
-- `navigate` (optional) → `change(dryRun=true)` → apply
+- `explore` (optional) → `change(dryRun=true)` → apply
 
 ### Template C: Fix a bug with minimal blast radius
 Ask:
@@ -58,9 +58,9 @@ Tips:
 
 ---
 
-## 3) When to use `understand` vs `read`
+## 3) When to use `understand` vs `explore`
 
-- Use `read` when you need **verbatim code** (or a skeleton/fragment).
+- Use `explore` when you need **verbatim code or documents** (preview/section/full).
 - Use `understand` when you need **synthesis** (summary, relationships, impact).
 - If `understand` feels too shallow, re-run with `include` flags enabled.
 

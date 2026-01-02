@@ -59,6 +59,11 @@ export class IndexDatabase {
     private readonly statements: StatementMap;
 
     constructor(private readonly rootPath: string) {
+        // Ensure all PathManager-resolved storage paths are scoped to the intended project root.
+        // This matters for tests (isolated temp roots) and for any embedding scenario where the
+        // process cwd is not the project root.
+        PathManager.setRoot(this.rootPath);
+
         let dbPath: string = ':memory:';
         try {
             dbPath = this.ensureDataDir();

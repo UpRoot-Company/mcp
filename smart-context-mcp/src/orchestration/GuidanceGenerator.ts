@@ -73,13 +73,13 @@ export class GuidanceGenerator {
       message = `Codebase structure for "${context.lastResult.summary}" has been analyzed.`;
       suggestedActions.push({
         priority: 1,
-        pillar: 'read',
+        pillar: 'explore',
         action: 'examine',
         description: `Deep dive into "${context.lastResult.primaryFile}"`,
         rationale: 'Reviewing the actual implementation is the best next step before making changes.',
         toolCall: {
-          tool: 'read',
-          args: { target: context.lastResult.primaryFile, view: 'fragment' }
+          tool: 'explore',
+          args: { paths: [context.lastResult.primaryFile], view: 'preview' }
         }
       });
     }
@@ -90,29 +90,29 @@ export class GuidanceGenerator {
       if (target) {
         suggestedActions.push({
           priority: 2,
-          pillar: 'navigate',
+          pillar: 'explore',
           action: 'find_tests',
           description: 'Locate related tests for the analyzed module.',
           rationale: 'Reviewing tests reduces regression risk before changes.',
           toolCall: {
-            tool: 'navigate',
-            args: { target, context: 'tests' }
+            tool: 'explore',
+            args: { query: `${target} test` }
           }
         });
       }
     }
 
-    // Rule 1b: No results -> broaden navigate
+    // Rule 1b: No results -> broaden explore
     if ((context.lastResult?.results?.length === 0 || context.lastResult?.locations?.length === 0)) {
       suggestedActions.push({
         priority: 1,
-        pillar: 'navigate',
+        pillar: 'explore',
         action: 'retry',
         description: 'No results found. Broaden the search scope.',
         rationale: 'A wider search improves discovery when exact matches fail.',
         toolCall: {
-          tool: 'navigate',
-          args: { target: context.lastResult?.target ?? context.lastResult?.query ?? 'all', context: 'all' }
+          tool: 'explore',
+          args: { query: context.lastResult?.target ?? context.lastResult?.query ?? 'all' }
         }
       });
     }
@@ -137,13 +137,13 @@ export class GuidanceGenerator {
       } else {
         suggestedActions.push({
           priority: 1,
-          pillar: 'read',
+          pillar: 'explore',
           action: 'verify',
           description: 'High risk detected. Review impacted files before applying.',
           rationale: 'Impact analysis suggests elevated risk.',
           toolCall: {
-            tool: 'read',
-            args: { target: impactRisk.primaryTarget, view: 'skeleton' }
+            tool: 'explore',
+            args: { paths: [impactRisk.primaryTarget], view: 'preview' }
           }
         });
       }
@@ -156,11 +156,11 @@ export class GuidanceGenerator {
       if (target) {
         suggestedActions.push({
           priority: 1,
-          pillar: 'read',
+          pillar: 'explore',
           action: 'verify',
           description: 'Verify the updated file content.',
           rationale: 'Confirm the change was applied as intended.',
-          toolCall: { tool: 'read', args: { target, view: 'skeleton' } }
+          toolCall: { tool: 'explore', args: { paths: [target], view: 'preview' } }
         });
         suggestedActions.push({
           priority: 2,
@@ -282,8 +282,8 @@ export class GuidanceGenerator {
         name: 'Refresh Context',
         description: 'Inspect the exact target block before retrying.',
         toolCall: {
-          tool: 'read',
-          args: { target: error.target, view: 'fragment', lineRange: error.suggestedLineRange }
+          tool: 'explore',
+          args: { paths: [error.target], view: 'section' }
         }
       });
     }
@@ -291,7 +291,7 @@ export class GuidanceGenerator {
       strategies.push({
         name: 'Reload File',
         description: 'Reload the file to sync with latest content.',
-        toolCall: { tool: 'read', args: { target: error.target, view: 'full' } }
+        toolCall: { tool: 'explore', args: { paths: [error.target], view: 'full' } }
       });
     }
     if (code === 'INDEX_STALE') {

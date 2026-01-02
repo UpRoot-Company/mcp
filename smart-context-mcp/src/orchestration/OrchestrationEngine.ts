@@ -7,6 +7,7 @@ import { UnderstandPillar } from './pillars/UnderstandPillar.js';
 import { ChangePillar } from './pillars/ChangePillar.js';
 import { NavigatePillar } from './pillars/NavigatePillar.js';
 import { ReadPillar, WritePillar } from './pillars/BasePillars.js';
+import { ExplorePillar } from './pillars/ExplorePillar.js';
 import { ManagePillar } from './pillars/ManagePillar.js';
 import { InsightSynthesizer } from './InsightSynthesizer.js';
 import { GuidanceGenerator } from './GuidanceGenerator.js';
@@ -30,6 +31,7 @@ export class OrchestrationEngine {
   ) {
     this.pillars.set('understand', new UnderstandPillar(registry));
     this.pillars.set('change', new ChangePillar(registry));
+    this.pillars.set('explore', new ExplorePillar(registry));
     this.pillars.set('navigate', new NavigatePillar(registry));
     this.pillars.set('read', new ReadPillar(registry));
     this.pillars.set('write', new WritePillar(registry));
@@ -433,7 +435,7 @@ export class OrchestrationEngine {
   private isCacheable(category: string, args: any): boolean {
     if (!args || typeof args !== 'object') return false;
     if (category === 'change' || category === 'write' || category === 'manage') return false;
-    return category === 'read' || category === 'navigate' || category === 'understand';
+    return category === 'explore' || category === 'read' || category === 'navigate' || category === 'understand';
   }
 
 }

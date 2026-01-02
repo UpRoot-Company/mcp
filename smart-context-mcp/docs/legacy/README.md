@@ -1,12 +1,12 @@
 # Legacy Interface (Opt-in)
 
-Smart Context MCP’s primary agent-facing interface is the **Six Pillars** (`understand`, `change`, `navigate`, `read`, `write`, `manage`) per ADR-033.
+Smart Context MCP’s primary agent-facing interface is the **Five Pillars** (`explore`, `understand`, `change`, `write`, `manage`) per ADR-040.
 
 This folder documents **legacy/compat tools** that may still exist for backwards compatibility, debugging, or migration. New integrations should **not** depend on them.
 
 ## Enabling legacy/compat tools
 
-By default, the MCP server exposes only the Six Pillars.
+By default, the MCP server exposes only the Five Pillars.
 
 - Expose legacy tool names (e.g. `search_project`, `read_code`, `edit_code`):
   - `SMART_CONTEXT_EXPOSE_LEGACY_TOOLS=true`

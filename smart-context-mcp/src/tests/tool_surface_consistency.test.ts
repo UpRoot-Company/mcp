@@ -35,9 +35,8 @@ describe("Tool surface consistency", () => {
 
         const expectedIntentTools = [
             "understand",
+            "explore",
             "change",
-            "navigate",
-            "read",
             "write",
             "manage",
         ].sort();
@@ -92,9 +91,8 @@ describe("Tool surface consistency", () => {
                 "manage_project",
                 "reconstruct_interface",
                 "understand",
+                "explore",
                 "change",
-                "navigate",
-                "read",
                 "write",
                 "manage",
                 "read_file",
