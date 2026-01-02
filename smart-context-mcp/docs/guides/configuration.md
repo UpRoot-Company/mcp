@@ -34,6 +34,26 @@ Smart Context MCP is configured via environment variables. Most users only need 
 
 The local model folder name must match `SMART_CONTEXT_EMBEDDING_MODEL`. See `docs/guides/getting-started.md` for download/prep steps.
 
+## Vector index (P1)
+
+| Variable | Purpose |
+|---|---|
+| `SMART_CONTEXT_VECTOR_INDEX` | Vector index backend (`auto`, `off`, `bruteforce`, `hnsw`). |
+| `SMART_CONTEXT_VECTOR_INDEX_REBUILD` | Rebuild policy (`auto`, `on_start`, `manual`). |
+| `SMART_CONTEXT_VECTOR_INDEX_MAX_POINTS` | Index size cap for ANN builds. |
+| `SMART_CONTEXT_VECTOR_INDEX_M` | HNSW M parameter. |
+| `SMART_CONTEXT_VECTOR_INDEX_EF_CONSTRUCTION` | HNSW build parameter. |
+| `SMART_CONTEXT_VECTOR_INDEX_EF_SEARCH` | HNSW search parameter. |
+
+When `SMART_CONTEXT_VECTOR_INDEX_REBUILD=manual`, use the CLI `smart-context-build-vector-index`.
+
+## Trigram memory guard rails (P1)
+
+| Variable | Purpose |
+|---|---|
+| `SMART_CONTEXT_TRIGRAM_MAX_DOC_FREQ` | Drop trigrams above document frequency threshold (0-1). |
+| `SMART_CONTEXT_TRIGRAM_MAX_TERMS_PER_FILE` | Per-file trigram cap to limit memory. |
+
 ## Packaging (model bundle)
 
 | Variable | Purpose |
