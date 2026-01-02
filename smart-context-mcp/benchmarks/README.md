@@ -7,6 +7,10 @@ This directory contains the integrated benchmark engine designed to precisely me
 ```bash
 npm exec tsx benchmarks/main.ts
 ```
+If `npm exec` is blocked by sandbox/permissions, run:
+```bash
+node --import tsx benchmarks/main.ts
+```
 *Results are automatically generated as Markdown files in the `benchmarks/reports/` directory.*
 
 ---

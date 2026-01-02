@@ -203,8 +203,9 @@ export class HybridScorer {
             for (const symbol of symbols) {
                 for (const regex of regexes) {
                     if (regex.test(symbol.name)) {
-                        const isExact = symbol.name.toLowerCase() === regex.source.replace(/\\b/g, '').toLowerCase();
-                        score += isExact ? 32 : 16;
+                        const normalized = regex.source.replace(/\\b/g, '').toLowerCase();
+                        const isExact = symbol.name.toLowerCase() === normalized;
+                        score += isExact ? 64 : 16;
                     }
                 }
             }

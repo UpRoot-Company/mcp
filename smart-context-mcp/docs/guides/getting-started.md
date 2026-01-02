@@ -65,6 +65,19 @@ npm run bundle:models
 - Set `SMART_CONTEXT_SKIP_MODEL_BUNDLE=true` to skip bundling (dev-only).
 - If you override `SMART_CONTEXT_MODEL_DIR`, keep it inside `dist/models` so it ships with the package.
 
+## Build the vector index (P1 optional)
+
+When ANN is enabled and you want to avoid rebuild at startup, generate the vector index once:
+
+```bash
+SMART_CONTEXT_VECTOR_INDEX=hnsw \
+SMART_CONTEXT_VECTOR_INDEX_REBUILD=manual \
+smart-context-build-vector-index
+```
+
+- Default `SMART_CONTEXT_VECTOR_INDEX=auto` will fall back to brute-force if no index exists.
+- The index is stored under `.smart-context/vector-index/<provider>/<model>/`.
+
 ## Use as an MCP server (example config)
 
 Point your MCP host at the built entry:

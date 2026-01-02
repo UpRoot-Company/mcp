@@ -97,7 +97,10 @@ export class BM25FRanking {
     }
 
     private tokenize(text: string): string[] {
-        return text.toLowerCase().split(/[^a-z0-9]+/).filter(t => t.length > 0);
+        return text
+            .toLowerCase()
+            .split(/[^\p{L}\p{N}]+/u)
+            .filter(t => t.length > 0);
     }
 
     private extractFilePathFromId(id: string): string | undefined {

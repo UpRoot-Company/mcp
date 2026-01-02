@@ -12,6 +12,11 @@
 - Run `npm run bundle:models` with `SMART_CONTEXT_MODEL_SOURCE` set.
 - Or set `SMART_CONTEXT_EMBEDDING_PROVIDER=hash` to avoid model loading.
 
+## Vector index unavailable
+
+- Run `smart-context-build-vector-index` (see `docs/guides/getting-started.md`).
+- Or disable ANN: `SMART_CONTEXT_VECTOR_INDEX=off` (fallback to brute-force).
+
 ## “My MCP host can’t parse responses / protocol errors”
 
 Stdout must be reserved for MCP protocol frames. Keep stdout logging disabled:

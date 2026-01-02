@@ -22,6 +22,12 @@ Smart Context MCP is configured via environment variables. Most users only need 
 |---|---|
 | `SMART_CONTEXT_WASM_DIR` | Where tree-sitter WASM assets are resolved (including custom Markdown WASM). |
 
+## Skeleton (large files)
+
+| Variable | Purpose |
+|---|---|
+| `SMART_CONTEXT_SKELETON_AUTO_MINIMAL_LINES` | Auto-switch to `detailLevel=minimal` when line count exceeds threshold (0 disables). |
+
 ## Embeddings (optional)
 
 | Variable | Purpose |

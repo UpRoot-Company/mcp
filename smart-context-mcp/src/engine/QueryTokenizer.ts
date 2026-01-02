@@ -35,7 +35,7 @@ export class QueryTokenizer {
    */
   normalize(query: string): string {
     return query
-      .replace(/[^a-zA-Z0-9\s]/g, ' ') // Remove punctuation
+      .replace(/[^\p{L}\p{N}\s]+/gu, ' ') // Remove punctuation
       .replace(/([a-z])([A-Z])/g, '$1 $2') // Split CamelCase
       .replace(/\s+/g, ' ') // Normalize whitespace
       .trim()

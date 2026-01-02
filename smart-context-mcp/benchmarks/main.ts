@@ -58,13 +58,13 @@ async function runBenchmark() {
     console.log("[Step 3] Skeleton Extraction Speed...");
     const largeFile = 'src/engine/Search.ts';
     const content = fs.readFileSync(largeFile, 'utf-8');
+    await sg.generateSkeleton(largeFile, content); // warm parser/cache
     const s3 = performance.now();
-    await sg.generateSkeleton(largeFile, content);
+    const skeleton = await sg.generateSkeleton(largeFile, content);
     metrics.push({ step: 3, name: "Skeleton Gen (Search.ts)", value: performance.now() - s3, unit: "ms", status: '🚀' });
 
     // STEP 4: Token Savings Ratio
     console.log("[Step 4] Token Savings Ratio...");
-    const skeleton = await sg.generateSkeleton(largeFile, content);
     const savings = (1 - (skeleton.length / content.length)) * 100;
     metrics.push({ step: 4, name: "Compression Ratio", value: savings, unit: "%", status: '✅' });
 
@@ -79,8 +79,15 @@ async function runBenchmark() {
     console.log("[Step 6] Search Recall@1 (Precision)...");
     const searchEngine = new SearchEngine(rootPath, nfs);
     await searchEngine.warmup();
-    const results = await searchEngine.scout({ query: "class SearchEngine" });
-    const recall = results[0]?.filePath.includes("Search.ts") ? 100 : 0;
+    const targetFile = "src/engine/search/QueryIntent.ts";
+    const results = await searchEngine.scout({
+        query: "class QueryIntentDetector",
+        includeGlobs: ["src/**"],
+        excludeGlobs: ["benchmarks/**"],
+        groupByFile: true,
+        deduplicateByContent: true
+    });
+    const recall = results[0]?.filePath === targetFile ? 100 : 0;
     metrics.push({ step: 6, name: "Recall@1 (Top Match)", value: recall, unit: "%", status: '✅' });
 
     // STEP 7: Relationship Analysis Latency

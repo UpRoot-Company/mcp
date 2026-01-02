@@ -76,7 +76,8 @@ export class SkeletonGenerator {
             const config = this.getLanguageConfig(filePath);
             if (!config || !lang) return content;
 
-            const resolvedOptions = this.resolveOptions(options);
+            let resolvedOptions = this.resolveOptions(options);
+            resolvedOptions = this.applyAutoDetailLevel(resolvedOptions, options, content);
             const rootNode: any | null = doc.rootNode;
 
             if (!rootNode) return content;
@@ -149,6 +150,24 @@ export class SkeletonGenerator {
         } finally {
             doc?.dispose?.();
         }
+    }
+
+    private applyAutoDetailLevel(
+        resolved: ResolvedSkeletonOptions,
+        options: SkeletonOptions,
+        content: string
+    ): ResolvedSkeletonOptions {
+        if (options.detailLevel !== undefined) return resolved;
+        const thresholdRaw = process.env.SMART_CONTEXT_SKELETON_AUTO_MINIMAL_LINES;
+        const threshold = thresholdRaw ? Number.parseInt(thresholdRaw, 10) : 500;
+        if (!Number.isFinite(threshold) || threshold <= 0) return resolved;
+        const lineCount = content.split(/\r?\n/).length;
+        if (lineCount < threshold) return resolved;
+        return {
+            ...resolved,
+            detailLevel: "minimal",
+            includeMemberVars: options.includeMemberVars ?? false
+        };
     }
 
     private async generateSemanticSummary(node: any, lang: any, langId: string): Promise<string | null> {

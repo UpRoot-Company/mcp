@@ -251,7 +251,7 @@ export class SearchEngine {
 
         const smartCase = args.smartCase ?? true;
         const caseSensitive = Boolean(args.caseSensitive);
-        const wordBoundary = Boolean(args.wordBoundary);
+        let wordBoundary = Boolean(args.wordBoundary);
 
         const keywordSource = query && query.trim().length > 0
             ? this.queryTokenizer.tokenize(query)
@@ -264,6 +264,9 @@ export class SearchEngine {
         const effectiveQuery = query || keywordSource.join(' ');
         const normalizedQuery = effectiveQuery ? this.queryTokenizer.normalize(effectiveQuery) : '';
         const intent = this.queryIntentDetector.detect(effectiveQuery);
+        if (intent === "symbol" && args.wordBoundary === undefined) {
+            wordBoundary = true;
+        }
 
         this.logger.debug(`[Search] Hybrid search for query: "${effectiveQuery}" (intent: ${intent}, keywords: ${keywordLabels.join(', ')})`);
 

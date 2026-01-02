@@ -6,7 +6,7 @@ import { PathManager } from "../utils/PathManager.js";
 
 const createIgnore = () => (ignore as any).default ? (ignore as any).default() : (ignore as any)();
 
-const TRIGRAM_INDEX_VERSION = 1;
+const TRIGRAM_INDEX_VERSION = 2;
 
 export interface TrigramIndexOptions {
     ignoreGlobs?: string[];
@@ -63,8 +63,7 @@ export class TrigramIndex {
     private isBuilding = false;
     private needsPersistAfterBuild = false;
 
-    // Trigram strings are short and come from a small alphabet after normalizeQuery.
-    // Interning them significantly reduces memory pressure across many Maps.
+    // Trigram strings are short and normalized; interning them reduces memory pressure across many Maps.
     private static readonly trigramPool = new Map<string, string>();
 
     private static internTrigram(value: string): string {
@@ -591,7 +590,11 @@ export class TrigramIndex {
     }
 
     public static normalizeQuery(input: string): string {
-        return input.toLowerCase().replace(/[^a-z0-9]/g, ' ').replace(/\s+/g, ' ').trim();
+        return input
+            .toLowerCase()
+            .replace(/[^\p{L}\p{N}]+/gu, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
     }
 
     private normalizeRelative(absPath: string): string | null {
