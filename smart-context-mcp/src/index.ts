@@ -731,7 +731,8 @@ export class SmartContextServer {
                                 dryRun: { type: 'boolean' },
                                 includeImpact: { type: 'boolean' },
                                 autoRollback: { type: 'boolean' },
-                                batchMode: { type: 'boolean' }
+                                batchMode: { type: 'boolean' },
+                                suggestDocs: { type: 'boolean' }
                             }
                         }
                     },
@@ -747,7 +748,13 @@ export class SmartContextServer {
                         intent: { type: 'string' },
                         targetPath: { type: 'string' },
                         template: { type: 'string' },
-                        content: { type: 'string' }
+                        content: { type: 'string' },
+                        options: {
+                            type: 'object',
+                            properties: {
+                                safeWrite: { type: 'boolean' }
+                            }
+                        }
                     },
                     required: ['intent']
                 }

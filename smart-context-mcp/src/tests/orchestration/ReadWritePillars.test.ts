@@ -35,7 +35,7 @@ describe("ReadPillar", () => {
 });
 
 describe("WritePillar", () => {
-  it("resolves filename-only targetPath before writing", async () => {
+  it("uses write_file fast-path when content is provided", async () => {
     const registry = new InternalToolRegistry();
     const writeCalls: any[] = [];
     const editCalls: any[] = [];
@@ -63,6 +63,42 @@ describe("WritePillar", () => {
       targets: ["draft.md"],
       originalIntent: "create draft",
       constraints: { content: "# Draft" },
+      confidence: 1
+    } as any, new OrchestrationContext());
+
+    expect(result.success).toBe(true);
+    expect(writeCalls[0].filePath).toBe("docs/draft.md");
+    expect(editCalls.length).toBe(0);
+  });
+
+  it("uses edit_coordinator when safeWrite is true", async () => {
+    const registry = new InternalToolRegistry();
+    const writeCalls: any[] = [];
+    const editCalls: any[] = [];
+
+    registry.register("search_project", async () => ({
+      results: [{ path: "docs/draft.md" }]
+    } as any));
+    registry.register("read_code", async () => {
+      throw new Error("missing");
+    });
+    registry.register("write_file", async (args: any) => {
+      writeCalls.push(args);
+      return { success: true } as any;
+    });
+    registry.register("edit_code", async () => ({ success: true } as any));
+    registry.register("edit_coordinator", async (args: any) => {
+      editCalls.push(args);
+      return { success: true, operation: { id: "tx-1" } } as any;
+    });
+
+    const pillar = new WritePillar(registry);
+    const result = await pillar.execute({
+      category: "write",
+      action: "create",
+      targets: ["draft.md"],
+      originalIntent: "create draft",
+      constraints: { content: "# Draft", safeWrite: true },
       confidence: 1
     } as any, new OrchestrationContext());
 

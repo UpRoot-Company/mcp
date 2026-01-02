@@ -7,18 +7,34 @@ import { analyzeQuery } from '../../engine/search/QueryMetrics.js';
 import * as path from 'path';
 import { IntegrityEngine } from '../../integrity/IntegrityEngine.js';
 import type { IntegrityFinding, IntegrityReport } from '../../integrity/IntegrityTypes.js';
+import { metrics } from '../../utils/MetricsCollector.js';
 
 
 export class ChangePillar {
   constructor(private readonly registry: InternalToolRegistry) {}
 
   public async execute(intent: ParsedIntent, context: OrchestrationContext): Promise<any> {
-    const { targets, constraints, originalIntent, action } = intent;
-    const { dryRun = true, includeImpact = false } = constraints;
-    const integrityOptions = IntegrityEngine.resolveOptions(constraints.integrity, "change");
+    const stopTotal = metrics.startTimer("change.total_ms");
+    try {
+      const { targets, constraints, originalIntent, action } = intent;
+      const { dryRun = true, includeImpact = false } = constraints;
+      const integrityOptions = IntegrityEngine.resolveOptions(constraints.integrity, "change");
 
-    const rawEdits = Array.isArray(constraints.edits) ? constraints.edits : [];
-    let targetPath: string | undefined = constraints.targetPath || targets[0] || this.extractTargetFromEdits(rawEdits);
+      const rawEdits = Array.isArray(constraints.edits) ? constraints.edits : [];
+      const targetFiles = this.resolveTargetFiles(constraints, targets);
+      const editPaths = this.collectEditPaths(rawEdits);
+      const shouldBatch = this.shouldUseBatch(constraints, targetFiles, editPaths);
+      if (shouldBatch) {
+        return this.executeBatchChange({
+          intent,
+          context,
+          rawEdits,
+          targetFiles,
+          dryRun
+        });
+      }
+
+      let targetPath: string | undefined = constraints.targetPath || targets[0] || this.extractTargetFromEdits(rawEdits);
 
     // 1. 타겟 파일이 명시되지 않은 경우 검색 시도
     let candidates: Array<{ path: string; score?: number; reason: string }> = [];
@@ -64,7 +80,9 @@ export class ChangePillar {
       intentText: originalIntent,
       targetSample: edits[0]?.targetString,
       includeImpact,
-      dryRun
+      dryRun,
+      editCount: edits.length,
+      batchMode: Boolean(constraints?.batchMode)
     });
     const allowImpactPreview = includeImpact === true;
 
@@ -114,15 +132,21 @@ export class ChangePillar {
       ? this.runTool(context, 'hotspot_detector', {})
       : Promise.resolve([]);
 
-    // 3. Execute Edit (Includes DryRun)
-    const editResult = await this.runTool(context, 'edit_coordinator', {
-      filePath: targetPath,
-      edits,
-      dryRun,
-      options: {
-        skipImpactPreview: dryRun && !allowImpactPreview
+      // 3. Execute Edit (Includes DryRun)
+      const stopEdit = metrics.startTimer("change.edit_coordinator_ms");
+      let editResult: any;
+      try {
+        editResult = await this.runTool(context, 'edit_coordinator', {
+          filePath: targetPath,
+          edits,
+          dryRun,
+          options: {
+            skipImpactPreview: dryRun && !allowImpactPreview
+          }
+        });
+      } finally {
+        stopEdit();
       }
-    });
 
     let finalResult = editResult;
     let autoCorrected = false;
@@ -144,11 +168,17 @@ export class ChangePillar {
       const limitedAttempts = attempts.slice(0, maxAttempts);
       autoCorrectionAttempts.push(...limitedAttempts.map(attempt => attempt.label));
       for (const attempt of limitedAttempts) {
-        const correctedResult = await this.runTool(context, 'edit_coordinator', {
-          filePath: targetPath,
-          edits: attempt.edits,
-          dryRun
-        });
+        const stopCorrect = metrics.startTimer("change.edit_coordinator_ms");
+        let correctedResult: any;
+        try {
+          correctedResult = await this.runTool(context, 'edit_coordinator', {
+            filePath: targetPath,
+            edits: attempt.edits,
+            dryRun
+          });
+        } finally {
+          stopCorrect();
+        }
         if (correctedResult.success) {
           finalResult = correctedResult;
           autoCorrected = true;
@@ -207,48 +237,59 @@ export class ChangePillar {
       ? 'fuzzy'
       : (autoCorrectionAttempts.length > 0 ? 'normalized' : 'exact');
 
-    const relatedDocs = await this.suggestDocUpdates(context, targetPath, edits, originalIntent);
-    if (relatedDocs && successGuidance?.suggestedActions && relatedDocs.length > 0) {
-      const top = relatedDocs[0];
-      if (top?.filePath) {
-        successGuidance.suggestedActions.push({
-          pillar: 'doc_section',
-          action: 'preview',
-          target: top.filePath,
-          headingPath: top.sectionPath
-        });
-        successGuidance.message = `${successGuidance.message} Related docs may need updates: ${top.filePath}.`;
-      }
-    }
-
-    return {
-      success: finalResult.success,
-      message: finalResult.success ? undefined : (finalResult.message ?? finalResult.details?.message),
-      operation: dryRun ? 'plan' : 'apply',
-      targetFile: targetPath,
-      diff: truncatedDiff,
-      plan,
-      impactReport,
-      editResult: dryRun ? undefined : finalResult,
-      transactionId: finalResult.operation?.id ?? '',
-      rollbackAvailable: !dryRun && Boolean(finalResult.success),
-      autoCorrected,
-      autoCorrectionAttempts: autoCorrectionAttempts.length > 0 ? autoCorrectionAttempts : undefined,
-      guidance: failureGuidance ?? successGuidance,
-      relatedDocs,
-      integrity: integrityReport,
-      degraded: !finalResult.success && autoCorrectionAttempts.length === 0,
-      refinement: {
-        stage: refinementStage,
-        reason: autoCorrected ? 'low_confidence' : undefined
-      },
-      budget: {
-        ...budget,
-        used: {
-          attempts: 1 + autoCorrectionAttempts.length
+      let relatedDocs: Array<any> | undefined;
+      if (!dryRun && finalResult.success && this.shouldSuggestDocs(constraints)) {
+        const stopDocs = metrics.startTimer("change.doc_suggest_ms");
+        try {
+          relatedDocs = await this.suggestDocUpdates(context, targetPath, edits, originalIntent);
+        } finally {
+          stopDocs();
+        }
+        if (relatedDocs && successGuidance?.suggestedActions && relatedDocs.length > 0) {
+          const top = relatedDocs[0];
+          if (top?.filePath) {
+            successGuidance.suggestedActions.push({
+              pillar: 'doc_section',
+              action: 'preview',
+              target: top.filePath,
+              headingPath: top.sectionPath
+            });
+            successGuidance.message = `${successGuidance.message} Related docs may need updates: ${top.filePath}.`;
+          }
         }
       }
-    };
+
+      return {
+        success: finalResult.success,
+        message: finalResult.success ? undefined : (finalResult.message ?? finalResult.details?.message),
+        operation: dryRun ? 'plan' : 'apply',
+        targetFile: targetPath,
+        diff: truncatedDiff,
+        plan,
+        impactReport,
+        editResult: dryRun ? undefined : finalResult,
+        transactionId: finalResult.operation?.id ?? '',
+        rollbackAvailable: !dryRun && Boolean(finalResult.success),
+        autoCorrected,
+        autoCorrectionAttempts: autoCorrectionAttempts.length > 0 ? autoCorrectionAttempts : undefined,
+        guidance: failureGuidance ?? successGuidance,
+        relatedDocs,
+        integrity: integrityReport,
+        degraded: !finalResult.success && autoCorrectionAttempts.length === 0,
+        refinement: {
+          stage: refinementStage,
+          reason: autoCorrected ? 'low_confidence' : undefined
+        },
+        budget: {
+          ...budget,
+          used: {
+            attempts: 1 + autoCorrectionAttempts.length
+          }
+        }
+      };
+    } finally {
+      stopTotal();
+    }
 
 
   }
@@ -411,6 +452,293 @@ export class ChangePillar {
     return undefined;
   }
 
+  private resolveTargetFiles(constraints: any, targets: string[]): string[] {
+    const fromConstraints = Array.isArray(constraints?.targetFiles) ? constraints.targetFiles : [];
+    const fallback = Array.isArray(targets) ? targets : [];
+    const raw = fromConstraints.length > 0 ? fromConstraints : fallback;
+    return raw
+      .filter((value: any) => typeof value === 'string' && value.trim().length > 0)
+      .map((value: string) => value.trim());
+  }
+
+  private extractEditFilePath(edit: any): string | undefined {
+    const candidate = edit?.filePath ?? edit?.path;
+    if (typeof candidate === 'string' && candidate.trim().length > 0) {
+      return candidate.trim();
+    }
+    const targetCandidate = edit?.target;
+    if (this.isLikelyFilePath(targetCandidate)) {
+      return targetCandidate.trim();
+    }
+    return undefined;
+  }
+
+  private collectEditPaths(edits: any[]): string[] {
+    const paths = new Set<string>();
+    for (const edit of edits) {
+      const filePath = this.extractEditFilePath(edit);
+      if (filePath) {
+        paths.add(filePath);
+      }
+    }
+    return Array.from(paths);
+  }
+
+  private shouldUseBatch(constraints: any, targetFiles: string[], editPaths: string[]): boolean {
+    const hasBatchFlag = Boolean(constraints?.batchMode);
+    const hasMultipleTargets = targetFiles.length > 1;
+    const hasMultipleEditPaths = editPaths.length > 1;
+    if (hasMultipleTargets || hasMultipleEditPaths) {
+      return true;
+    }
+    if (hasBatchFlag && (targetFiles.length > 0 || editPaths.length > 0)) {
+      return true;
+    }
+    return false;
+  }
+
+  private mapEditsToFiles(args: {
+    targetFiles: string[];
+    rawEdits: any[];
+    fallbackTarget?: string;
+  }): { fileEdits?: Map<string, any[]>; error?: { errorCode: string; message: string } } {
+    const { targetFiles, rawEdits, fallbackTarget } = args;
+    const fileEdits = new Map<string, any[]>();
+
+    const hasExplicitFile = rawEdits.some(edit => Boolean(this.extractEditFilePath(edit)));
+    const canIndexMap = !hasExplicitFile && targetFiles.length > 0 && targetFiles.length === rawEdits.length;
+
+    for (let i = 0; i < rawEdits.length; i++) {
+      const edit = rawEdits[i];
+      const explicitPath = this.extractEditFilePath(edit);
+      const filePath = explicitPath ?? (canIndexMap ? targetFiles[i] : fallbackTarget);
+      if (!filePath) {
+        return {
+          error: {
+            errorCode: "MULTI_FILE_MAPPING_REQUIRED",
+            message: "멀티파일 변경에서 각 edit의 filePath가 필요하거나, targetFiles와 edits 길이가 동일해야 합니다."
+          }
+        };
+      }
+      if (!fileEdits.has(filePath)) {
+        fileEdits.set(filePath, []);
+      }
+      fileEdits.get(filePath)!.push(edit);
+    }
+
+    return { fileEdits };
+  }
+
+  private async executeBatchChange(args: {
+    intent: ParsedIntent;
+    context: OrchestrationContext;
+    rawEdits: any[];
+    targetFiles: string[];
+    dryRun: boolean;
+  }): Promise<any> {
+    const { intent, context, rawEdits, targetFiles, dryRun } = args;
+    const originalIntent = intent.originalIntent;
+
+    if (rawEdits.length === 0) {
+      return {
+        success: false,
+        message: "No edits provided for batch change.",
+        guidance: {
+          message: "Provide edits with explicit filePath or targetFiles mapping.",
+          suggestedActions: []
+        }
+      };
+    }
+
+    const fallbackTarget = targetFiles.length === 1 ? targetFiles[0] : undefined;
+    const mapped = this.mapEditsToFiles({ targetFiles, rawEdits, fallbackTarget });
+    if (mapped.error || !mapped.fileEdits) {
+      return {
+        success: false,
+        message: mapped.error?.message ?? "Batch mapping failed.",
+        errorCode: mapped.error?.errorCode,
+        guidance: {
+          message: mapped.error?.message ?? "Provide filePath for each edit or align targetFiles with edits.",
+          suggestedActions: []
+        }
+      };
+    }
+
+    const normalizedByFile = new Map<string, { edits: any[]; invalidEdits: any[] }>();
+    for (const [filePath, editsForFile] of mapped.fileEdits.entries()) {
+      const normalization = this.normalizeEdits(editsForFile, filePath);
+      if (normalization.edits.length === 0) {
+        return {
+          success: false,
+          message: `No valid edits provided for ${filePath}. Ensure targetContent/targetString and replacement/template are set.`,
+          invalidEdits: normalization.invalidEdits,
+          guidance: {
+            message: `Use read to copy exact text or provide a shorter targetString for ${filePath}.`,
+            suggestedActions: [
+              { pillar: 'read', action: 'view_fragment', target: filePath },
+              { pillar: 'change', action: 'retry', intent: originalIntent, target: filePath }
+            ]
+          }
+        };
+      }
+      normalizedByFile.set(filePath, normalization);
+    }
+
+    if (dryRun) {
+      return this.executeBatchDryRun({
+        context,
+        originalIntent,
+        rawEdits,
+        targetFiles,
+        normalizedByFile
+      });
+    }
+
+    return this.executeBatchApply({
+      context,
+      originalIntent,
+      rawEdits,
+      targetFiles,
+      normalizedByFile
+    });
+  }
+
+  private async executeBatchDryRun(args: {
+    context: OrchestrationContext;
+    originalIntent: string;
+    rawEdits: any[];
+    targetFiles: string[];
+    normalizedByFile: Map<string, { edits: any[] }>;
+  }): Promise<any> {
+    const { context, originalIntent, rawEdits, targetFiles, normalizedByFile } = args;
+    const results: Array<{ filePath: string; success: boolean; diff?: string; error?: string }> = [];
+    const planSteps: Array<{ action: 'modify'; file: string; description: string; diff?: string }> = [];
+    const diffBlocks: string[] = [];
+
+    for (const [filePath, normalization] of normalizedByFile.entries()) {
+      const stopEdit = metrics.startTimer("change.edit_coordinator_ms");
+      let editResult: any;
+      try {
+        editResult = await this.runTool(context, 'edit_coordinator', {
+          filePath,
+          edits: normalization.edits,
+          dryRun: true,
+          options: { skipImpactPreview: true }
+        });
+      } finally {
+        stopEdit();
+      }
+      if (!editResult.success) {
+        const failureMessage = editResult.message ?? editResult.details?.message ?? "Batch dry run failed.";
+        const failureGuidance = this.buildFailureGuidance({
+          intent: originalIntent,
+          targetPath: filePath,
+          edits: normalization.edits,
+          dryRun: true,
+          failureMessage,
+          autoCorrectionAttempts: []
+        });
+        results.push({ filePath, success: false, error: failureMessage });
+        return {
+          success: false,
+          message: `Dry run failed for file ${filePath}: ${failureMessage}`,
+          operation: "plan",
+          results,
+          guidance: failureGuidance
+        };
+      }
+
+      results.push({ filePath, success: true, diff: editResult.diff });
+      planSteps.push({
+        action: 'modify' as const,
+        file: filePath,
+        description: originalIntent,
+        diff: editResult.diff
+      });
+      if (typeof editResult.diff === "string" && editResult.diff.length > 0) {
+        diffBlocks.push(this.formatBatchDiff(filePath, editResult.diff));
+      }
+    }
+
+    const successGuidance = {
+      message: "Batch change plan generated. Review the diffs before applying.",
+      suggestedActions: [
+        {
+          pillar: "change",
+          action: "apply",
+          intent: originalIntent,
+          targetFiles,
+          edits: rawEdits,
+          options: { dryRun: false, batchMode: true }
+        }
+      ]
+    };
+
+    return {
+      success: true,
+      operation: "plan",
+      diff: diffBlocks.join("\n\n"),
+      plan: { steps: planSteps },
+      results,
+      guidance: successGuidance
+    };
+  }
+
+  private async executeBatchApply(args: {
+    context: OrchestrationContext;
+    originalIntent: string;
+    rawEdits: any[];
+    targetFiles: string[];
+    normalizedByFile: Map<string, { edits: any[] }>;
+  }): Promise<any> {
+    const { context, originalIntent, rawEdits, targetFiles, normalizedByFile } = args;
+    const batchEdits: any[] = [];
+    for (const [filePath, normalization] of normalizedByFile.entries()) {
+      for (const edit of normalization.edits) {
+        batchEdits.push({ ...edit, filePath });
+      }
+    }
+
+    const editResult = await this.runTool(context, "edit_code", {
+      edits: batchEdits,
+      dryRun: false
+    });
+    const success = editResult?.success !== false;
+    const results = Array.isArray(editResult?.results) ? editResult.results.map((entry: any) => ({
+      filePath: entry.filePath,
+      success: entry.applied ?? entry.success ?? false,
+      error: entry.error
+    })) : undefined;
+
+    const message = success ? undefined : (editResult?.message ?? "Batch apply failed.");
+    const guidance = success
+      ? {
+          message: "Batch changes successfully applied.",
+          suggestedActions: [{ pillar: "manage", action: "test" }]
+        }
+      : {
+          message: message ?? "Batch apply failed.",
+          suggestedActions: [
+            { pillar: "change", action: "retry", intent: originalIntent, targetFiles, edits: rawEdits }
+          ]
+        };
+
+    return {
+      success,
+      message,
+      operation: "apply",
+      results,
+      editResult,
+      transactionId: editResult?.operation?.id ?? "",
+      rollbackAvailable: success,
+      guidance
+    };
+  }
+
+  private formatBatchDiff(filePath: string, diff: string): string {
+    return `# ${filePath}\n${diff}`;
+  }
+
   private async suggestDocUpdates(
     context: OrchestrationContext,
     targetPath: string,
@@ -511,6 +839,11 @@ export class ChangePillar {
       output.push(next);
     }
     return output;
+  }
+
+  private shouldSuggestDocs(constraints: any): boolean {
+    if (constraints?.suggestDocs === true) return true;
+    return process.env.SMART_CONTEXT_CHANGE_SUGGEST_DOCS === "true";
   }
 
   private normalizeEdits(

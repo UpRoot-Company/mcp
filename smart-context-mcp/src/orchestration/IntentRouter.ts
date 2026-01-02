@@ -10,6 +10,7 @@ export interface IntentConstraints {
   scope?: 'symbol' | 'file' | 'module' | 'project';
   includeImpact?: boolean;
   dryRun?: boolean;
+  batchMode?: boolean;
   limit?: number;
   edits?: any[];
   view?: 'auto' | 'preview' | 'section' | 'full' | 'skeleton' | 'fragment';
@@ -25,6 +26,8 @@ export interface IntentConstraints {
   targetPath?: string;
   content?: string;
   template?: string;
+  safeWrite?: boolean;
+  suggestDocs?: boolean;
   context?: "definitions" | "usages" | "tests" | "docs" | "all";
   include?: {
     callGraph?: boolean;

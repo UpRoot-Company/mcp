@@ -4,6 +4,7 @@ import path from 'path';
 import { InternalToolRegistry } from '../InternalToolRegistry.js';
 import { OrchestrationContext } from '../OrchestrationContext.js';
 import { ParsedIntent } from '../IntentRouter.js';
+import { metrics } from '../../utils/MetricsCollector.js';
 
 
 export class ReadPillar {
@@ -164,94 +165,124 @@ export class WritePillar {
   constructor(private readonly registry: InternalToolRegistry) {}
 
   public async execute(intent: ParsedIntent, context: OrchestrationContext): Promise<any> {
-    const { constraints, targets, originalIntent } = intent;
-    const targetPath = constraints.targetPath || targets[0];
-    const template = constraints.template;
-    let content = constraints.content ?? '';
-
-    if (!targetPath) {
-      return {
-        success: false,
-        status: 'failure',
-        createdFiles: [],
-        transactionId: null,
-        guidance: {
-          message: 'Missing targetPath. Provide a file path to create.',
-          suggestedActions: []
-        }
-      };
-    }
-
-    const resolvedPath = await this.resolveTargetPath(targetPath);
-
-    let existingContent: string | null = null;
+    const stopTotal = metrics.startTimer("write.total_ms");
     try {
-      existingContent = await this.runTool(context, 'read_code', { filePath: resolvedPath, view: 'full' });
-    } catch {
-      existingContent = null;
-    }
+      const { constraints, targets, originalIntent } = intent;
+      const targetPath = constraints.targetPath || targets[0];
+      const template = constraints.template;
+      let content = constraints.content ?? '';
+      const hasExplicitContent = constraints.content !== undefined;
+      const safeWrite = Boolean((constraints as any).safeWrite);
 
-    if (existingContent === null) {
-      // Ensure file exists (creates directories if needed).
+      if (!targetPath) {
+        return {
+          success: false,
+          status: 'failure',
+          createdFiles: [],
+          transactionId: null,
+          guidance: {
+            message: 'Missing targetPath. Provide a file path to create.',
+            suggestedActions: []
+          }
+        };
+      }
+
+      const resolvedPath = await this.resolveTargetPath(targetPath);
+
+      if (hasExplicitContent && !safeWrite) {
+        try {
+          await this.runTool(context, 'write_file', { filePath: resolvedPath, content });
+        } catch {
+          await this.runTool(context, 'edit_code', {
+            edits: [{ filePath: resolvedPath, operation: 'create', replacementString: content }],
+            dryRun: false,
+            createMissingDirectories: true
+          });
+        }
+
+        return {
+          success: true,
+          status: 'success',
+          createdFiles: [{ path: resolvedPath, description: `Written from intent: ${originalIntent}` }],
+          transactionId: '',
+          guidance: {
+            message: 'File written.',
+            suggestedActions: [{ pillar: 'read', action: 'view_full', target: resolvedPath }]
+          }
+        };
+      }
+
+      let existingContent: string | null = null;
       try {
-        await this.runTool(context, 'write_file', { filePath: resolvedPath, content: '' });
+        existingContent = await this.runTool(context, 'read_code', { filePath: resolvedPath, view: 'full' });
       } catch {
-        await this.runTool(context, 'edit_code', {
-          edits: [{ filePath: resolvedPath, operation: 'create', replacementString: '' }],
-          dryRun: false,
-          createMissingDirectories: true
-        });
+        existingContent = null;
       }
-    }
 
-    if (content === '' && template) {
-      const templated = await this.resolveTemplateContent(template, resolvedPath, originalIntent, context);
-      if (typeof templated === 'string') {
-        content = templated;
+      if (existingContent === null) {
+        // Ensure file exists (creates directories if needed).
+        try {
+          await this.runTool(context, 'write_file', { filePath: resolvedPath, content: '' });
+        } catch {
+          await this.runTool(context, 'edit_code', {
+            edits: [{ filePath: resolvedPath, operation: 'create', replacementString: '' }],
+            dryRun: false,
+            createMissingDirectories: true
+          });
+        }
       }
-    }
 
-    if (content === '' && existingContent === null) {
+      if (content === '' && template) {
+        const templated = await this.resolveTemplateContent(template, resolvedPath, originalIntent, context);
+        if (typeof templated === 'string') {
+          content = templated;
+        }
+      }
+
+      if (content === '' && existingContent === null) {
+        return {
+          success: true,
+          status: 'success',
+          createdFiles: [{ path: resolvedPath, description: `Created from intent: ${originalIntent}` }],
+          transactionId: null,
+          guidance: {
+            message: 'Empty file created.',
+            suggestedActions: [{ pillar: 'read', action: 'view_full', target: resolvedPath }]
+          }
+        };
+      }
+
+      const edit = existingContent === null
+        ? {
+            targetString: '',
+            replacementString: content,
+            insertMode: 'at' as const,
+            insertLineRange: { start: 1 }
+          }
+        : {
+            targetString: existingContent,
+            replacementString: content
+          };
+
+      const editResult = await this.runTool(context, 'edit_coordinator', {
+        filePath: resolvedPath,
+        edits: [edit],
+        dryRun: false
+      });
+
       return {
-        success: true,
-        status: 'success',
-        createdFiles: [{ path: resolvedPath, description: `Created from intent: ${originalIntent}` }],
-        transactionId: null,
+        success: editResult.success ?? true,
+        status: editResult.success === false ? 'failure' : 'success',
+        createdFiles: [{ path: resolvedPath, description: `Written from intent: ${originalIntent}` }],
+        transactionId: editResult.operation?.id ?? '',
         guidance: {
-          message: 'Empty file created.',
-          suggestedActions: [{ pillar: 'read', action: 'view_full', target: resolvedPath }]
+          message: editResult.success ? 'File written.' : 'File write failed.',
+          suggestedActions: editResult.success ? [{ pillar: 'read', action: 'view_full', target: resolvedPath }] : []
         }
       };
+    } finally {
+      stopTotal();
     }
-
-    const edit = existingContent === null
-      ? {
-          targetString: '',
-          replacementString: content,
-          insertMode: 'at' as const,
-          insertLineRange: { start: 1 }
-        }
-      : {
-          targetString: existingContent,
-          replacementString: content
-        };
-
-    const editResult = await this.runTool(context, 'edit_coordinator', {
-      filePath: resolvedPath,
-      edits: [edit],
-      dryRun: false
-    });
-
-    return {
-      success: editResult.success ?? true,
-      status: editResult.success === false ? 'failure' : 'success',
-      createdFiles: [{ path: resolvedPath, description: `Written from intent: ${originalIntent}` }],
-      transactionId: editResult.operation?.id ?? '',
-      guidance: {
-        message: editResult.success ? 'File written.' : 'File write failed.',
-        suggestedActions: editResult.success ? [{ pillar: 'read', action: 'view_full', target: resolvedPath }] : []
-      }
-    };
   }
 
   private async resolveTargetPath(targetPath: string): Promise<string> {
