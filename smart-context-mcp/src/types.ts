@@ -381,7 +381,7 @@ export interface DocumentOutlineOptions {
     maxBlockChars?: number;
 }
 
-export type EmbeddingProvider = "openai" | "local" | "disabled";
+export type EmbeddingProvider = "local" | "disabled";
 
 export interface EmbeddingVector {
     provider: EmbeddingProvider;
@@ -392,17 +392,14 @@ export interface EmbeddingVector {
 }
 
 export interface EmbeddingConfig {
-    provider?: "auto" | EmbeddingProvider;
+    provider?: "auto" | EmbeddingProvider | "hash";
     normalize?: boolean;
     batchSize?: number;
     timeoutMs?: number;
     concurrency?: number;
     maxQueueSize?: number;
     modelCacheDir?: string;
-    openai?: {
-        apiKeyEnv?: string;
-        model?: string;
-    };
+    modelDir?: string;
     local?: {
         model?: string;
         dims?: number;

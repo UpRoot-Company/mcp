@@ -25,9 +25,11 @@ Smart Context MCP is configured via environment variables. Most users only need 
 
 | Variable | Purpose |
 |---|---|
-| `SMART_CONTEXT_EMBEDDING_PROVIDER` | Select embedding backend (`openai` vs `local`). |
-| `SMART_CONTEXT_LOCAL_EMBEDDING_MODEL` | Local model identifier when using `@xenova/transformers`. |
+| `SMART_CONTEXT_EMBEDDING_PROVIDER` | Select embedding backend (`local`, `hash`, `disabled`). |
+| `SMART_CONTEXT_EMBEDDING_MODEL` | Bundled/local model identifier (default: `multilingual-e5-small`). |
+| `SMART_CONTEXT_MODEL_DIR` | Bundled model directory override (no remote downloads). |
 | `SMART_CONTEXT_MODEL_CACHE_DIR` | Local model cache directory override. |
+| `SMART_CONTEXT_EMBEDDING_E5_PREFIX` | Enable E5 `query:`/`passage:` prefixing (default: true). |
 
 ## Integrity audit (ADR-041)
 

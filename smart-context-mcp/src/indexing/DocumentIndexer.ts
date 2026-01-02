@@ -10,6 +10,7 @@ import { HeadingChunker } from "../documents/chunking/HeadingChunker.js";
 import { DocumentKind, DocumentOutlineOptions } from "../types.js";
 import { EmbeddingRepository } from "./EmbeddingRepository.js";
 import { EmbeddingProviderFactory } from "../embeddings/EmbeddingProviderFactory.js";
+import { applyEmbeddingPrefix } from "../embeddings/EmbeddingText.js";
 import { extractHtmlTextPreserveLines } from "../documents/html/HtmlTextExtractor.js";
 import { extractDocxAsHtml, DocxExtractError } from "../documents/extractors/DocxExtractor.js";
 import { extractXlsxAsText, XlsxExtractError } from "../documents/extractors/XlsxExtractor.js";
@@ -305,7 +306,9 @@ export class DocumentIndexer {
         const batchSize = this.embeddingProviderFactory.getConfig().batchSize ?? 16;
         for (let i = 0; i < chunks.length; i += batchSize) {
             const batch = chunks.slice(i, i + batchSize);
-            const vectors = await provider.embed(batch.map(chunk => chunk.text));
+            const batchTexts = batch.map(chunk => chunk.text);
+            const prefixed = applyEmbeddingPrefix(batchTexts, "passage", provider.model);
+            const vectors = await provider.embed(prefixed);
             for (let idx = 0; idx < batch.length; idx += 1) {
                 const chunk = batch[idx];
                 const vector = vectors[idx];

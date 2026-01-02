@@ -58,6 +58,7 @@ import { extractXlsxAsText, XlsxExtractError } from "./documents/extractors/Xlsx
 import { extractPdfAsText, PdfExtractError } from "./documents/extractors/PdfExtractor.js";
 import { EmbeddingProviderFactory } from "./embeddings/EmbeddingProviderFactory.js";
 import { resolveEmbeddingConfigFromEnv } from "./embeddings/EmbeddingConfig.js";
+import { metrics } from "./utils/MetricsCollector.js";
 
 // Orchestration Imports
 import { OrchestrationEngine } from "./orchestration/OrchestrationEngine.js";
@@ -544,16 +545,10 @@ export class SmartContextServer {
                         embedding: {
                             type: 'object',
                             properties: {
-                                provider: { type: 'string', enum: ['auto', 'openai', 'local', 'disabled'] },
+                                provider: { type: 'string', enum: ['auto', 'local', 'hash', 'disabled'] },
                                 normalize: { type: 'boolean' },
                                 batchSize: { type: 'number' },
-                                openai: {
-                                    type: 'object',
-                                    properties: {
-                                        apiKeyEnv: { type: 'string' },
-                                        model: { type: 'string' }
-                                    }
-                                },
+                                modelDir: { type: 'string' },
                                 local: {
                                     type: 'object',
                                     properties: {
@@ -2020,6 +2015,55 @@ export class SmartContextServer {
                             this.dependencyGraph.setLoggingEnabled(true);
                         }
                     }
+                }
+            case 'metrics':
+                {
+                    return {
+                        success: true,
+                        output: "Metrics snapshot.",
+                        metrics: metrics.snapshot()
+                    };
+                }
+            case 'metrics_reset':
+                {
+                    metrics.reset();
+                    return {
+                        success: true,
+                        output: "Metrics reset."
+                    };
+                }
+            case 'config':
+                {
+                    const embeddingConfig = resolveEmbeddingConfigFromEnv();
+                    const maxSamplesRaw = Number.parseInt(process.env.SMART_CONTEXT_METRICS_HIST_MAX_SAMPLES ?? "", 10);
+                    const metricsMaxSamples = Number.isFinite(maxSamplesRaw) && maxSamplesRaw > 0 ? maxSamplesRaw : 1024;
+                    const storageMode = process.env.SMART_CONTEXT_STORAGE_MODE ?? "auto";
+                    const embeddingProvider = embeddingConfig.provider ?? "auto";
+                    const embeddingModel = embeddingConfig.local?.model;
+                    return {
+                        success: true,
+                        output: "Config snapshot.",
+                        config: {
+                            metrics: {
+                                mode: process.env.SMART_CONTEXT_METRICS_MODE ?? "basic",
+                                maxSamples: metricsMaxSamples
+                            },
+                            storage: {
+                                mode: storageMode
+                            },
+                            embedding: {
+                                provider: embeddingProvider,
+                                model: embeddingModel,
+                                normalize: embeddingConfig.normalize !== false,
+                                batchSize: embeddingConfig.batchSize,
+                                concurrency: embeddingConfig.concurrency,
+                                timeoutMs: embeddingConfig.timeoutMs,
+                                modelCacheDir: embeddingConfig.modelCacheDir,
+                                modelDir: embeddingConfig.modelDir,
+                                e5Prefix: process.env.SMART_CONTEXT_EMBEDDING_E5_PREFIX ?? "true"
+                            }
+                        }
+                    };
                 }
             case 'reindex':
                 {

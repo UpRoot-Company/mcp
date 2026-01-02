@@ -1,6 +1,8 @@
 import type { EmbeddingProvider } from "../types.js";
 import type { EmbeddingProviderClient } from "./EmbeddingProviderFactory.js";
 import type { EmbeddingQueue } from "./EmbeddingQueue.js";
+import path from "path";
+import url from "url";
 
 type TransformersPipeline = (inputs: string[] | string, options?: Record<string, unknown>) => Promise<any>;
 
@@ -14,14 +16,16 @@ export class TransformersEmbeddingProvider implements EmbeddingProviderClient {
     private readonly timeoutMs?: number;
     private readonly queue?: EmbeddingQueue;
     private readonly modelCacheDir?: string;
+    private readonly modelDir?: string;
 
-    constructor(options: { model: string; dims?: number; normalize: boolean; timeoutMs?: number; queue?: EmbeddingQueue; modelCacheDir?: string }) {
+    constructor(options: { model: string; dims?: number; normalize: boolean; timeoutMs?: number; queue?: EmbeddingQueue; modelCacheDir?: string; modelDir?: string }) {
         this.model = options.model;
         this.dims = options.dims ?? 0;
         this.normalize = options.normalize;
         this.timeoutMs = options.timeoutMs;
         this.queue = options.queue;
         this.modelCacheDir = options.modelCacheDir;
+        this.modelDir = options.modelDir;
     }
 
     public async embed(texts: string[]): Promise<Float32Array[]> {
@@ -52,6 +56,7 @@ export class TransformersEmbeddingProvider implements EmbeddingProviderClient {
     private async loadPipeline(): Promise<TransformersPipeline> {
         this.applyModelCacheEnv();
         const module: any = await import("@xenova/transformers");
+        this.applyBundledModelEnv(module);
         const pipeline = module.pipeline ?? module.default?.pipeline;
         if (!pipeline) {
             throw new Error("Failed to load transformers pipeline");
@@ -69,6 +74,28 @@ export class TransformersEmbeddingProvider implements EmbeddingProviderClient {
         if (!process.env.HF_HOME) {
             process.env.HF_HOME = normalized;
         }
+    }
+
+    private applyBundledModelEnv(module: any): void {
+        const env = module?.env ?? module?.default?.env;
+        if (!env) return;
+        env.allowRemoteModels = false;
+        env.allowLocalModels = true;
+        const modelDir = this.resolveModelDir();
+        if (modelDir) {
+            env.localModelPath = modelDir;
+        }
+    }
+
+    private resolveModelDir(): string | undefined {
+        const explicit = this.modelDir || process.env.SMART_CONTEXT_MODEL_DIR;
+        if (explicit && explicit.trim()) {
+            return explicit.trim();
+        }
+        const currentDir = path.dirname(url.fileURLToPath(import.meta.url));
+        const distRoot = path.resolve(currentDir, "..");
+        const candidate = path.join(distRoot, "models");
+        return candidate;
     }
 }
 

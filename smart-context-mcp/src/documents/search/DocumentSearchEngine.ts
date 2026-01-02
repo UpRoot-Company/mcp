@@ -12,6 +12,7 @@ import * as crypto from "crypto";
 import { EvidencePackRepository, computeRootFingerprint, type StoredEvidencePack } from "../../indexing/EvidencePackRepository.js";
 import { buildDeterministicPreview } from "../summary/DeterministicSummarizer.js";
 import { metrics } from "../../utils/MetricsCollector.js";
+import { applyEmbeddingPrefix } from "../../embeddings/EmbeddingText.js";
 
 export interface DocumentSearchOptions {
     scope?: "docs" | "project" | "all";
@@ -734,7 +735,8 @@ export class DocumentSearchEngine {
         let queryVector: Float32Array | undefined;
         const stopQueryEmbed = metrics.startTimer("docs.search.embedding_query_ms");
         try {
-            [queryVector] = await provider.embed([query]);
+            const queryInput = applyEmbeddingPrefix([query], "query", provider.model);
+            [queryVector] = await provider.embed(queryInput);
         } catch (err: any) {
             if (err instanceof EmbeddingTimeoutError) {
                 return { scores: new Map(), degraded: true, reasons: ["embedding_timeout"] };
@@ -791,7 +793,9 @@ export class DocumentSearchEngine {
             try {
                 const stopBatchEmbed = metrics.startTimer("docs.search.embedding_chunks_ms");
                 try {
-                    vectors = await provider.embed(batch.map(chunk => chunk.text));
+                    const batchTexts = batch.map(chunk => chunk.text);
+                    const prefixed = applyEmbeddingPrefix(batchTexts, "passage", provider.model);
+                    vectors = await provider.embed(prefixed);
                 } finally {
                     stopBatchEmbed();
                 }
@@ -1119,10 +1123,6 @@ function mergeEmbeddingConfig(base: EmbeddingConfig, override: EmbeddingConfig):
     return {
         ...base,
         ...override,
-        openai: {
-            ...base.openai,
-            ...override.openai
-        },
         local: {
             ...base.local,
             ...override.local

@@ -67,6 +67,12 @@ export class MetricsCollector {
         };
     }
 
+    public reset(): void {
+        this.counters.clear();
+        this.gauges.clear();
+        this.histograms.clear();
+    }
+
     private shouldRecord(level: MetricsLevel): boolean {
         if (this.mode === "off") return false;
         if (this.mode === "basic" && level === "detailed") return false;

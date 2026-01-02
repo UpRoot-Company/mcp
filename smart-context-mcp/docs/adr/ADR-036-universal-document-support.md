@@ -163,7 +163,7 @@ export interface DocumentOutlineOptions {
 ### 5.2 Embedding Types
 
 ```ts
-export type EmbeddingProvider = "openai" | "local" | "disabled";
+export type EmbeddingProvider = "local" | "disabled";
 
 export interface EmbeddingVector {
   provider: EmbeddingProvider;
@@ -175,17 +175,17 @@ export interface EmbeddingVector {
 }
 
 export interface EmbeddingConfig {
-  provider?: "auto" | EmbeddingProvider;
+  provider?: "auto" | EmbeddingProvider | "hash";
   normalize?: boolean;
   batchSize?: number;
-  openai?: {
-    apiKeyEnv?: string; // default: OPENAI_API_KEY
-    model: string;
-  };
+  timeoutMs?: number;
+  concurrency?: number;
+  maxQueueSize?: number;
+  modelCacheDir?: string;
+  modelDir?: string;
   local?: {
-    model: string;      // e.g. Xenova/all-MiniLM-L6-v2
-    device?: "cpu" | "auto";
-    quantized?: boolean;
+    model?: string;      // e.g. multilingual-e5-small
+    dims?: number;
   };
 }
 ```
@@ -273,9 +273,9 @@ Phase 1에서는 성능/정확성보다 “기능 제공”이 우선이므로, 
 `EmbeddingProviderFactory`:
 
 - `provider=auto`일 때:
-  - `OPENAI_API_KEY`(또는 설정된 env) 존재 → OpenAI Provider
-  - 없으면 Local Provider
+  - 로컬 모델 로딩 성공 → Local Provider
   - 로컬 모델 로딩 실패 → Disabled Provider
+  - `provider=hash`는 해시 기반 임베딩으로 강제(저비용, 정확도 낮음)
 
 ### 7.1.1 임베딩 기본값(auto vs disabled)의 차이
 
@@ -285,8 +285,8 @@ Phase 1에서는 성능/정확성보다 “기능 제공”이 우선이므로, 
   - 장점: 인덱싱/시작이 빠르고(모델 로딩/네트워크 호출 없음), 비용·프라이버시 리스크가 최소화됨
   - 단점: 자연어형 질의(“이 개념 설명한 섹션 찾아줘”) 정확도가 BM25 중심으로 제한됨
 - 기본값이 `auto`일 때:
-  - 장점: OpenAI(가능 시) 또는 로컬 임베딩을 활용해 섹션 단위 검색 정확도 상승(semantic)
-  - 단점: 프로젝트 전체 `.md/.mdx` 대상에 대해 임베딩을 eager 생성하면 CPU/시간/DB 사용량이 커질 수 있고, OpenAI 사용 시 비용/키 관리가 필요함
+  - 장점: 로컬 임베딩을 활용해 섹션 단위 검색 정확도 상승(semantic)
+  - 단점: 프로젝트 전체 `.md/.mdx` 대상에 대해 임베딩을 eager 생성하면 CPU/시간/DB 사용량이 커질 수 있음
 
 권장(본 ADR): 기본 provider는 `auto`를 유지하되, Phase 3에서는 **임베딩 생성은 “lazy(요청 시 생성) + 캐시”를 기본**으로 두고, 운영자가 명시적으로 eager를 선택할 수 있게 한다.
 
@@ -699,7 +699,7 @@ async function indexFile(absPath: string) {
   - 입력: `{ filePath }`
   - 출력: outbound 링크 목록(+ resolvedPath) + 분류(categorized)
 - `doc_search` (Phase 3)
-  - 입력: `{ query, maxResults?, includeGlobs?, embedding?: { provider?: "auto"|"openai"|"local"|"disabled" } }`
+  - 입력: `{ query, maxResults?, includeGlobs?, embedding?: { provider?: "auto"|"local"|"hash"|"disabled" } }`
   - 출력: section TopK (filePath, sectionId, scores, preview)
 
 #### 10.1.1 Internal Tool Args/Result (구현용 TS 스펙)
@@ -757,10 +757,10 @@ export interface DocSearchArgs {
   maxResults?: number;
   includeGlobs?: string[];          // default: ["**/*.md","**/*.mdx"]
   embedding?: {
-    provider?: "auto" | "openai" | "local" | "disabled";
+    provider?: "auto" | "local" | "hash" | "disabled";
     normalize?: boolean;
     batchSize?: number;
-    openai?: { apiKeyEnv?: string; model?: string };
+    modelDir?: string;
     local?: { model?: string; dims?: number };
   };
 }
@@ -917,7 +917,7 @@ export interface DocReferencesResult {
 
 ### 16.3 Acceptance Criteria (Phase 3 완료 기준)
 
-- provider=auto에서 OpenAI 키가 없으면 로컬 임베딩으로 폴백한다.
+- provider=auto에서 로컬 모델 로딩에 실패하면 disabled로 폴백한다.
 - lazy 생성 기본: 문서 전체 임베딩을 강제 생성하지 않고도 검색 요청에서 필요한 chunk만 임베딩한다.
 - 하이브리드 검색 결과가 “파일”이 아니라 “섹션(chunk)” TopK로 반환된다.
 
@@ -947,16 +947,15 @@ export interface DocReferencesResult {
   - `gray-matter` (frontmatter)
 - 로컬 임베딩:
   - `@xenova/transformers`
-- OpenAI 임베딩(옵션):
-  - `openai` (optional dependency) 또는 직접 HTTP
 
 ### 12.2 Runtime Config (예시)
 
 - `SMART_CONTEXT_WASM_DIR`: 커스텀 wasm 로드 경로(우선순위 1)
 - 기본 wasm 검색 경로: `smart-context-mcp/wasm/` (배포용 기본 위치)
-- `SMART_CONTEXT_EMBEDDING_PROVIDER=auto|openai|local|disabled`
-- `OPENAI_API_KEY`(또는 `EmbeddingConfig.openai.apiKeyEnv`)
-- `SMART_CONTEXT_EMBEDDING_MODEL_OPENAI`, `SMART_CONTEXT_EMBEDDING_MODEL_LOCAL`(선택)
+- `SMART_CONTEXT_EMBEDDING_PROVIDER=auto|local|hash|disabled`
+- `SMART_CONTEXT_EMBEDDING_MODEL` 또는 `SMART_CONTEXT_EMBEDDING_MODEL_LOCAL`(선택)
+- `SMART_CONTEXT_MODEL_DIR`(번들 모델 경로)
+- `SMART_CONTEXT_MODEL_CACHE_DIR`(로컬 모델 캐시 경로)
 
 ---
 
@@ -964,8 +963,8 @@ export interface DocReferencesResult {
 
 - **WASM 빌드 실패/환경 제약**
   - Mitigation: remark 폴백(Phase 1 유지), `SMART_CONTEXT_WASM_DIR` 기반 배포 경로 단순화
-- **임베딩 비용/네트워크 불가**
-  - Mitigation: OpenAI 우선이지만 로컬 폴백 제공, provider=disabled 옵션 제공, chunk 캐싱으로 호출 최소화
+- **임베딩 부하/오프라인 제약**
+  - Mitigation: 로컬 임베딩 전용 + provider=disabled 옵션 제공, chunk 캐싱으로 계산 최소화
 - **DB 크기 증가**
   - Mitigation: chunk 크기 제한/압축(선택), 오래된 임베딩 prune, 모델별 1개 유지 정책
 - **검색 지연(벡터 선형 스캔)**

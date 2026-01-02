@@ -2,7 +2,6 @@ import { EmbeddingConfig, EmbeddingProvider } from "../types.js";
 import { resolveEmbeddingProviderEnv } from "./EmbeddingConfig.js";
 import { DisabledEmbeddingProvider } from "./DisabledEmbeddingProvider.js";
 import { HashEmbeddingProvider } from "./HashEmbeddingProvider.js";
-import { OpenAIEmbeddingProvider } from "./OpenAIEmbeddingProvider.js";
 import { TransformersEmbeddingProvider } from "./TransformersEmbeddingProvider.js";
 import { EmbeddingQueue } from "./EmbeddingQueue.js";
 
@@ -24,18 +23,8 @@ export class EmbeddingProviderFactory {
         if (this.cached) return this.cached;
         const resolved = resolveEmbeddingProviderEnv(this.config);
 
-        if (resolved.provider === "openai" && resolved.apiKey) {
-            this.cached = new OpenAIEmbeddingProvider({
-                apiKey: resolved.apiKey,
-                model: this.config.openai?.model ?? "text-embedding-3-small",
-                normalize: this.config.normalize !== false,
-                timeoutMs: this.config.timeoutMs
-            });
-            return this.cached;
-        }
-
         if (resolved.provider === "local") {
-            const model = this.config.local?.model ?? "Xenova/all-MiniLM-L6-v2";
+            const model = this.config.local?.model ?? "multilingual-e5-small";
             if (isHashModel(model)) {
                 const dims = this.config.local?.dims ?? 384;
                 this.cached = new HashEmbeddingProvider({
@@ -51,7 +40,8 @@ export class EmbeddingProviderFactory {
                     normalize: this.config.normalize !== false,
                     timeoutMs: this.config.timeoutMs,
                     queue,
-                    modelCacheDir: this.config.modelCacheDir
+                    modelCacheDir: this.config.modelCacheDir,
+                    modelDir: this.config.modelDir
                 });
             }
             return this.cached;
