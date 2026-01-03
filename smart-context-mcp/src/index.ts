@@ -37,6 +37,8 @@ import { DocumentChunkRepository } from "./indexing/DocumentChunkRepository.js";
 import { EvidencePackRepository } from "./indexing/EvidencePackRepository.js";
 import { TransactionLog } from "./engine/TransactionLog.js";
 import { ConfigurationManager } from "./config/ConfigurationManager.js";
+import { FeatureFlags, FeatureFlagContext } from "./config/FeatureFlags.js";
+import { RolloutController } from "./config/RolloutController.js";
 import { PathManager } from "./utils/PathManager.js";
 import { FileVersionManager } from "./engine/FileVersionManager.js";
 import { PathNormalizer } from "./utils/PathNormalizer.js";
@@ -61,6 +63,7 @@ import { resolveEmbeddingConfigFromEnv } from "./embeddings/EmbeddingConfig.js";
 import { metrics } from "./utils/MetricsCollector.js";
 import { VectorIndexManager } from "./vector/VectorIndexManager.js";
 import { AdaptiveFlowReporter } from "./utils/AdaptiveFlowReporter.js";
+import { AlertDispatcher } from "./utils/AlertDispatcher.js";
 
 // Orchestration Imports
 import { OrchestrationEngine } from "./orchestration/OrchestrationEngine.js";
@@ -122,6 +125,7 @@ export class SmartContextServer {
     private shutdownRequested = false;
     private shutdownTimer?: NodeJS.Timeout;
     private metricsReporter?: AdaptiveFlowReporter;
+    private alertDispatcher?: AlertDispatcher;
 
     constructor(rootPath: string) {
         this.server = new Server({
@@ -132,8 +136,21 @@ export class SmartContextServer {
         });
 
         this.rootPath = path.resolve(rootPath);
+        RolloutController.applyFromEnv();
         PathManager.setRoot(this.rootPath);
         this.fileSystem = new NodeFileSystem(this.rootPath);
+        this.alertDispatcher = new AlertDispatcher({
+            rootPath: this.rootPath,
+            logDir: process.env.SMART_CONTEXT_ALERT_LOG_DIR
+                ?? process.env.SMART_CONTEXT_METRICS_DIR
+                ?? path.join(this.rootPath, ".smart-context", "logs"),
+            webhookUrl: process.env.SMART_CONTEXT_ALERT_WEBHOOK,
+            command: process.env.SMART_CONTEXT_ALERT_COMMAND,
+            pagerDutyRoutingKey: process.env.SMART_CONTEXT_PAGERDUTY_ROUTING_KEY,
+            severity: this.resolveAlertSeverity(),
+            channel: process.env.SMART_CONTEXT_ALERT_CHANNEL ?? undefined,
+            label: process.env.SMART_CONTEXT_ALERT_LABEL ?? undefined
+        });
         this.initFileLogger();
         this.initProcessDiagnostics();
         this.astManager = AstManager.getInstance();
@@ -451,7 +468,8 @@ export class SmartContextServer {
         if (!enabled) return;
         const reporter = new AdaptiveFlowReporter({
             rootPath: this.rootPath,
-            exportDir: process.env.SMART_CONTEXT_METRICS_DIR ?? path.join(this.rootPath, "logs"),
+            exportDir: process.env.SMART_CONTEXT_METRICS_DIR
+                ?? path.join(this.rootPath, ".smart-context", "logs"),
             exportIntervalMs: this.parseNumberEnv(process.env.SMART_CONTEXT_METRICS_INTERVAL_MS, 60_000),
             alertThresholds: {
                 topologySuccessRate: this.parseNumberEnv(process.env.SMART_CONTEXT_TOPOLOGY_SUCCESS_MIN, 0.95),
@@ -460,6 +478,11 @@ export class SmartContextServer {
             },
             onAlert: payload => {
                 console.warn(`[AdaptiveFlowReporter] ${payload.type}: ${payload.message}`);
+                if (this.alertDispatcher) {
+                    void this.alertDispatcher.dispatch(payload).catch(error => {
+                        console.warn('[AdaptiveFlowReporter] Failed to forward alert', error);
+                    });
+                }
             }
         });
         reporter.start();
@@ -470,6 +493,14 @@ export class SmartContextServer {
         if (!raw) return fallback;
         const value = Number(raw);
         return Number.isFinite(value) ? value : fallback;
+    }
+
+    private resolveAlertSeverity(): 'info' | 'warning' | 'error' | 'critical' {
+        const raw = (process.env.SMART_CONTEXT_ALERT_SEVERITY ?? 'warning').toLowerCase();
+        if (raw === 'info' || raw === 'warning' || raw === 'error' || raw === 'critical') {
+            return raw;
+        }
+        return 'warning';
     }
 
     private setupShutdownHooks(): void {
@@ -854,92 +885,93 @@ export class SmartContextServer {
     }
 
     private async handleCallTool(name: string, args: any): Promise<any> {
-        try {
-            const pillarTools = new Set(['understand', 'explore', 'change', 'write', 'manage']);
-            const legacyTools = new Set([
-                'read_code',
-                'search_project',
-                'search_files',
-                'read_file',
-                'read_fragment',
-                'analyze_relationship',
-                'edit_code',
-                'edit_file',
-                'get_batch_guidance',
-                'manage_project',
-                'reconstruct_interface'
-            ]);
-            const compatTools = new Set(['read_file', 'write_file', 'analyze_file']);
+        const rolloutContext = this.buildRolloutContext(args);
+        return FeatureFlags.withContext(rolloutContext, async () => {
+            try {
+                const pillarTools = new Set(['understand', 'explore', 'change', 'write', 'manage']);
+                const legacyTools = new Set([
+                    'read_code',
+                    'search_project',
+                    'search_files',
+                    'read_file',
+                    'read_fragment',
+                    'analyze_relationship',
+                    'edit_code',
+                    'edit_file',
+                    'get_batch_guidance',
+                    'manage_project',
+                    'reconstruct_interface'
+                ]);
+                const compatTools = new Set(['read_file', 'write_file', 'analyze_file']);
 
-            if (pillarTools.has(name)) {
-                const missing = this.validateRequiredArgs(name, args);
-                if (missing.length > 0) {
-                    return this.errorResponse("MissingParameter", `Missing required parameter(s): ${missing.join(', ')}`);
-                }
-                const result = await this.orchestrationEngine.executePillar(name, args);
-                return this.jsonResponse(result);
-            }
-
-            if (legacyTools.has(name) || (compatTools.has(name) && process.env.SMART_CONTEXT_EXPOSE_COMPAT_TOOLS === "true")) {
-                const missing = this.validateRequiredArgs(name, args);
-                if (missing.length > 0) {
-                    return this.errorResponse("MissingParameter", `Missing required parameter(s): ${missing.join(', ')}`);
-                }
-                this.warnLegacyTool(name);
-                switch (name) {
-                    case 'read_code':
-                        return this.textResponse(await this.readCodeRaw(args));
-                    case 'search_project':
-                        return this.jsonResponse(await this.searchProjectRaw(args));
-                    case 'search_files':
-                        return this.jsonResponse(await this.searchFilesRaw(args));
-                    case 'read_file':
-                        return this.jsonResponse(await this.readFileRaw(args));
-                    case 'read_fragment':
-                        return this.jsonResponse(await this.readFragmentRaw(args));
-                    case 'analyze_relationship':
-                        return this.jsonResponse(await this.analyzeRelationshipRaw(args));
-                    case 'edit_code':
-                        return this.jsonResponse(await this.editCodeRaw(args));
-                    case 'edit_file': {
-                        const result = await this.editFileRaw(args);
-                        return {
-                            isError: !result.success,
-                            content: [{ type: 'text', text: JSON.stringify(result, null, 2) }]
-                        };
+                if (pillarTools.has(name)) {
+                    const missing = this.validateRequiredArgs(name, args);
+                    if (missing.length > 0) {
+                        return this.errorResponse("MissingParameter", `Missing required parameter(s): ${missing.join(', ')}`);
                     }
-                    case 'get_batch_guidance':
-                        return this.jsonResponse(await this.executeGetBatchGuidance(args));
-                    case 'manage_project':
-                        return this.jsonResponse(await this.manageProjectRaw(args));
-                    case 'reconstruct_interface':
-                        return this.jsonResponse(await this.executeReconstructInterface(args));
-                    case 'read_file':
-                        return this.jsonResponse(await this.readFileRaw(args));
-                    case 'write_file':
-                        return this.jsonResponse(await this.executeWriteFile(args));
-                    case 'analyze_file':
-                        return this.jsonResponse(await this.executeAnalyzeFile(args));
-                    default:
-                        break;
-                }
-            }
-
-            if (process.env.SMART_CONTEXT_LEGACY_AUTOMAP === "true") {
-                const adapted = this.legacyAdapter.adapt(name, args);
-                if (adapted) {
-                    const result = await this.orchestrationEngine.executePillar(adapted.category, adapted.args);
+                    const result = await this.orchestrationEngine.executePillar(name, args);
                     return this.jsonResponse(result);
                 }
-            }
 
-            throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
-        } catch (error: any) {
-            if (error instanceof McpError) {
-                throw error;
+                if (legacyTools.has(name) || (compatTools.has(name) && process.env.SMART_CONTEXT_EXPOSE_COMPAT_TOOLS === "true")) {
+                    const missing = this.validateRequiredArgs(name, args);
+                    if (missing.length > 0) {
+                        return this.errorResponse("MissingParameter", `Missing required parameter(s): ${missing.join(', ')}`);
+                    }
+                    this.warnLegacyTool(name);
+                    switch (name) {
+                        case 'read_code':
+                            return this.textResponse(await this.readCodeRaw(args));
+                        case 'search_project':
+                            return this.jsonResponse(await this.searchProjectRaw(args));
+                        case 'search_files':
+                            return this.jsonResponse(await this.searchFilesRaw(args));
+                        case 'read_file':
+                            return this.jsonResponse(await this.readFileRaw(args));
+                        case 'read_fragment':
+                            return this.jsonResponse(await this.readFragmentRaw(args));
+                        case 'analyze_relationship':
+                            return this.jsonResponse(await this.analyzeRelationshipRaw(args));
+                        case 'edit_code':
+                            return this.jsonResponse(await this.editCodeRaw(args));
+                        case 'edit_file': {
+                            const result = await this.editFileRaw(args);
+                            return {
+                                isError: !result.success,
+                                content: [{ type: 'text', text: JSON.stringify(result, null, 2) }]
+                            };
+                        }
+                        case 'get_batch_guidance':
+                            return this.jsonResponse(await this.executeGetBatchGuidance(args));
+                        case 'manage_project':
+                            return this.jsonResponse(await this.manageProjectRaw(args));
+                        case 'reconstruct_interface':
+                            return this.jsonResponse(await this.executeReconstructInterface(args));
+                        case 'write_file':
+                            return this.jsonResponse(await this.executeWriteFile(args));
+                        case 'analyze_file':
+                            return this.jsonResponse(await this.executeAnalyzeFile(args));
+                        default:
+                            break;
+                    }
+                }
+
+                if (process.env.SMART_CONTEXT_LEGACY_AUTOMAP === "true") {
+                    const adapted = this.legacyAdapter.adapt(name, args);
+                    if (adapted) {
+                        const result = await this.orchestrationEngine.executePillar(adapted.category, adapted.args);
+                        return this.jsonResponse(result);
+                    }
+                }
+
+                throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
+            } catch (error: any) {
+                if (error instanceof McpError) {
+                    throw error;
+                }
+                return this.errorResponse(error?.code ?? "InternalError", error?.message ?? "Unknown error", error?.details);
             }
-            return this.errorResponse(error?.code ?? "InternalError", error?.message ?? "Unknown error", error?.details);
-        }
+        });
     }
 
     private warnLegacyTool(toolName: string): void {
@@ -979,6 +1011,86 @@ export class SmartContextServer {
             }
         }
         return missing;
+    }
+
+    private buildRolloutContext(args: any): FeatureFlagContext | undefined {
+        const userId = this.resolveRolloutUser(args);
+        if (!userId) return undefined;
+        return { userId };
+    }
+
+    private resolveRolloutUser(args: any): string | undefined {
+        const candidates: Array<unknown> = [];
+        if (args && typeof args === 'object') {
+            const candidatePaths: string[][] = [
+                ['userId'],
+                ['user', 'id'],
+                ['user', 'email'],
+                ['session', 'userId'],
+                ['session', 'user', 'id'],
+                ['metadata', 'userId'],
+                ['metadata', 'user', 'id'],
+                ['metadata', 'actor', 'id'],
+                ['client', 'userId'],
+                ['__client', 'userId'],
+                ['__context', 'userId'],
+                ['__metadata', 'userId'],
+                ['__metadata', 'actor', 'id'],
+                ['identity', 'userId'],
+                ['actor', 'id']
+            ];
+            for (const path of candidatePaths) {
+                candidates.push(this.extractNestedValue(args, path));
+            }
+            candidates.push(this.extractHeaderUser(args));
+        }
+        candidates.push(
+            process.env.SMART_CONTEXT_ROLLOUT_USER,
+            process.env.SMART_CONTEXT_USER_ID,
+            process.env.SMART_CONTEXT_DEFAULT_USER
+        );
+        return this.pickFirstString(...candidates);
+    }
+
+    private extractNestedValue(source: any, path: string[]): unknown {
+        let current = source;
+        for (const segment of path) {
+            if (!current || typeof current !== 'object') {
+                return undefined;
+            }
+            current = current[segment];
+        }
+        return current;
+    }
+
+    private extractHeaderUser(args: any): string | undefined {
+        const headerSources = [args?.__headers, args?.headers];
+        for (const headers of headerSources) {
+            if (!headers || typeof headers !== 'object') continue;
+            for (const key of Object.keys(headers)) {
+                const lowered = key.toLowerCase();
+                if (lowered === 'x-user-id' || lowered === 'x-slack-user' || lowered === 'x-github-user') {
+                    const value = headers[key];
+                    if (typeof value === 'string') {
+                        const trimmed = value.trim();
+                        if (trimmed) return trimmed;
+                    }
+                }
+            }
+        }
+        return undefined;
+    }
+
+    private pickFirstString(...candidates: Array<unknown>): string | undefined {
+        for (const candidate of candidates) {
+            if (typeof candidate === 'string') {
+                const trimmed = candidate.trim();
+                if (trimmed.length > 0) {
+                    return trimmed;
+                }
+            }
+        }
+        return undefined;
     }
 
     private jsonResponse(payload: any): any {

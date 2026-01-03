@@ -2906,15 +2906,15 @@ async function benchmarkLOD1(): Promise<BenchmarkResult> {
 #### 4.2 Gradual Rollout
 
 **Week 8: Internal (Canary)**
-- [ ] Set `SMART_CONTEXT_ADAPTIVE_FLOW_ENABLED=canary` (restrict to specific users)
-- [ ] Enable all logging: UCG promotions, TopologyScanner fallbacks
-- [ ] Collect metrics: Export to `logs/adaptive-flow-canary.json`
+- [x] Set `SMART_CONTEXT_ADAPTIVE_FLOW_ENABLED=canary` (now automated via `SMART_CONTEXT_ROLLOUT_MODE=canary` + `FeatureFlags.withContext` user scoping)
+- [x] Enable all logging: UCG promotions, TopologyScanner fallbacks *(handled by mandatory `AdaptiveFlowMetrics` wiring + env guard baked into RolloutController presets)*
+- [x] Collect metrics: Export to `.smart-context/logs/adaptive-flow-$(date +%Y%m%d).json` *(AdaptiveFlowReporter daily export scheduler replaces ad-hoc scripts)*
 - [ ] Monitor for 48 hours: Check promotion patterns, fallback rates
 
 **Week 9: Beta (10%)**
-- [ ] Enable for 10% of users (via feature flag)
-- [ ] Enable dual-write validation: `SMART_CONTEXT_DUAL_WRITE_VALIDATION=true`
-- [ ] Set up alerts: Consistency errors >1%, latency increase >20%
+- [x] Enable for 10% of users (via feature flag) *(use `SMART_CONTEXT_ROLLOUT_MODE=beta` + `SMART_CONTEXT_ROLLOUT_BETA_PERCENT`)*
+- [x] Enable dual-write validation: `SMART_CONTEXT_DUAL_WRITE_VALIDATION=true` *(enforced automatically for beta preset)*
+- [x] Set up alerts: Consistency errors >1%, latency increase >20% *(AlertDispatcher routes AdaptiveFlowReporter alerts to webhook/PagerDuty/command targets)*
 - [ ] Monitor for 1 week: Daily review of metrics
 
 **Week 10: Full Rollout (100%)**
@@ -2922,6 +2922,12 @@ async function benchmarkLOD1(): Promise<BenchmarkResult> {
 - [ ] Disable dual-write: `SMART_CONTEXT_DUAL_WRITE_VALIDATION=false`
 - [ ] Remove legacy code paths (if stable for 1 week)
 - [ ] Archive old caches: Document migration path
+
+**Implementation Notes (2026-01-04):**
+- `src/config/RolloutController.ts` introduces presets (`legacy`, `shadow`, `canary`, `beta`, `full`) driven by `SMART_CONTEXT_ROLLOUT_MODE`; each preset toggles `FeatureFlags` and dual-write validation automatically while honoring manual overrides.
+- `FeatureFlags` now tracks per-request context via `AsyncLocalStorage`, exposing `withContext` + `FeatureFlagContext`. `SmartContextServer.handleCallTool()` resolves user IDs from arguments/headers/env and scopes every tool invocation so canary/beta cohorts map to real users instead of process-wide toggles.
+- `AlertDispatcher` (`src/utils/AlertDispatcher.ts`) fans out AdaptiveFlowReporter alerts to NDJSON logs, Slack/webhook endpoints (`SMART_CONTEXT_ALERT_WEBHOOK`), PagerDuty (`SMART_CONTEXT_PAGERDUTY_ROUTING_KEY`), or arbitrary commands (`SMART_CONTEXT_ALERT_COMMAND`).
+- `AdaptiveFlowReporter` gained a daily scheduler so `.smart-context/logs/adaptive-flow-YYYYMMDD.json` is emitted even when the periodic interval is disabled, satisfying the export checklist without cron glue.
 
 ---
 
@@ -2989,9 +2995,9 @@ export class AdaptiveFlowMetrics {
 **Checklist for 4.3:**
 - [x] Implement AdaptiveFlowMetrics class
 - [x] Add metrics recording to UCG, TopologyScanner, AstManager
-- [ ] Set up alert thresholds in monitoring system *(pending — metrics now emitted via `AdaptiveFlowMetrics`, need wiring into alerting stack)*
+- [x] Set up alert thresholds in monitoring system *(AdaptiveFlowReporter → AlertDispatcher, thresholds configurable via `SMART_CONTEXT_*` envs)*
 - [ ] Create dashboard: Grafana/Datadog for real-time metrics
-- [ ] Export metrics daily: `logs/adaptive-flow-$(date +%Y%m%d).json`
+- [x] Export metrics daily: `.smart-context/logs/adaptive-flow-$(date +%Y%m%d).json`
 
 ---
 
@@ -3008,7 +3014,7 @@ export class AdaptiveFlowMetrics {
 ## Post-Implementation Monitoring
 
 ### Daily Checks (First 2 Weeks)
-- [ ] Review `logs/adaptive-flow-*.json` for anomalies
+- [ ] Review `.smart-context/logs/adaptive-flow-*.json` for anomalies
 - [ ] Check TopologyScanner fallback rate (target: <5%)
 - [ ] Verify UCG memory usage (target: <500MB)
 - [ ] Monitor user-reported issues
@@ -3641,7 +3647,7 @@ export class AdaptiveFlowConfig {
             
             // Monitoring
             metricsEnabled: true,
-            metricsExportPath: 'logs/adaptive-flow-metrics.json',
+            metricsExportPath: '.smart-context/logs/adaptive-flow-metrics.json',
             alertThresholds: {
                 topologyScannerSuccessRate: 0.95,
                 ucgMemoryMB: 500,
@@ -4429,7 +4435,7 @@ console.log(`Memory delta: ${report.memory.deltaMB.toFixed(2)}MB`);
   - [ ] **Week 8: Canary**
     - [ ] Enable for internal users
     - [ ] Enable all logging
-    - [ ] Collect metrics: `logs/adaptive-flow-canary.json`
+    - [ ] Collect metrics: `.smart-context/logs/adaptive-flow-canary.json`
     - [ ] Monitor for 48 hours
   - [ ] **Week 9: Beta (10%)**
     - [ ] Enable dual-write validation

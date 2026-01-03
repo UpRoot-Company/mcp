@@ -10,8 +10,8 @@ import { EngineConfig, LOD_LEVEL, AnalysisRequest, LODResult, LODPromotionStats 
 import { LanguageConfigLoader } from '../config/LanguageConfig.js';
 import { AdaptiveAstManager } from './AdaptiveAstManager.js';
 import { FeatureFlags } from '../config/FeatureFlags.js';
-import { UnifiedContextGraph } from '../orchestration/context/UnifiedContextGraph.js';
 import { AdaptiveFlowMetrics } from '../utils/AdaptiveFlowMetrics.js';
+import { UnifiedContextGraph } from '../orchestration/context/UnifiedContextGraph.js';
 import { SkeletonCache } from './SkeletonCache.js';
 import { SkeletonGenerator } from './SkeletonGenerator.js';
 
@@ -168,15 +168,17 @@ export class AstManager implements AdaptiveAstManager {
 
     // NEW: Implement AdaptiveAstManager interface
     async ensureLOD(request: AnalysisRequest): Promise<LODResult> {
-        if (!FeatureFlags.isEnabled(FeatureFlags.ADAPTIVE_FLOW_ENABLED)) {
+        const context = FeatureFlags.getContext();
+        if (!FeatureFlags.isEnabled(FeatureFlags.ADAPTIVE_FLOW_ENABLED, context)) {
             return await this.fallbackToFullAST(request.path);
         }
         
         const ucg = this.getUCG();
         const result = await ucg.ensureLOD(request);
         
-        // Update stats
+        // ADR-043: Record promotion metrics
         if (result.promoted) {
+            AdaptiveFlowMetrics.recordPromotion(result.previousLOD, result.currentLOD);
             this.updateStats(result);
         }
         

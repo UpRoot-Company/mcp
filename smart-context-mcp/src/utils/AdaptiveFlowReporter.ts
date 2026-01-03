@@ -26,6 +26,8 @@ export interface AdaptiveFlowAlertPayload {
 
 export class AdaptiveFlowReporter {
     private timer?: NodeJS.Timeout;
+    private dailyTimer?: NodeJS.Timeout;
+    private lastExportStamp?: string;
     private readonly options: AdaptiveFlowReporterOptions;
 
     constructor(options: AdaptiveFlowReporterOptions) {
@@ -41,6 +43,7 @@ export class AdaptiveFlowReporter {
             return;
         }
         this.flush();
+        this.scheduleDailyExport();
         this.timer = setInterval(() => {
             this.flush();
         }, interval);
@@ -48,16 +51,20 @@ export class AdaptiveFlowReporter {
     }
 
     stop(): void {
-        if (!this.timer) return;
-        clearInterval(this.timer);
-        this.timer = undefined;
+        if (this.timer) {
+            clearInterval(this.timer);
+            this.timer = undefined;
+        }
+        this.clearDailyExport();
     }
 
     flush(): void {
         try {
             const metrics = AdaptiveFlowMetrics.getMetrics();
-            const filePath = this.resolveExportPath();
+            const now = new Date();
+            const filePath = this.resolveExportPath(now);
             AdaptiveFlowMetrics.exportToFile(filePath);
+            this.lastExportStamp = this.buildDateStamp(now);
             this.evaluateAlerts(metrics);
         } catch (error) {
             console.warn('[AdaptiveFlowReporter] Failed to export metrics:', error);
@@ -72,9 +79,11 @@ export class AdaptiveFlowReporter {
         return raw;
     }
 
-    private resolveExportPath(): string {
-        const dir = this.options.exportDir ?? process.env.SMART_CONTEXT_METRICS_DIR ?? path.join(this.options.rootPath, 'logs');
-        const stamp = this.buildDateStamp(new Date());
+    private resolveExportPath(date: Date): string {
+        const dir = this.options.exportDir
+            ?? process.env.SMART_CONTEXT_METRICS_DIR
+            ?? path.join(this.options.rootPath, '.smart-context', 'logs');
+        const stamp = this.buildDateStamp(date);
         return path.join(dir, `adaptive-flow-${stamp}.json`);
     }
 
@@ -139,5 +148,39 @@ export class AdaptiveFlowReporter {
         } else {
             console.warn(`[AdaptiveFlowReporter] ALERT (${type}) ${message}`);
         }
+    }
+
+    private scheduleDailyExport(): void {
+        if (!this.shouldScheduleDailyExport()) return;
+        this.clearDailyExport();
+        const delay = this.millisUntilNextExport();
+        this.dailyTimer = setTimeout(() => {
+            try {
+                this.flush();
+            } finally {
+                this.dailyTimer = undefined;
+                this.scheduleDailyExport();
+            }
+        }, delay);
+        this.dailyTimer.unref?.();
+    }
+
+    private clearDailyExport(): void {
+        if (!this.dailyTimer) return;
+        clearTimeout(this.dailyTimer);
+        this.dailyTimer = undefined;
+    }
+
+    private shouldScheduleDailyExport(): boolean {
+        const raw = process.env.SMART_CONTEXT_METRICS_DAILY_EXPORT;
+        return raw === undefined || raw !== 'false';
+    }
+
+    private millisUntilNextExport(): number {
+        const now = new Date();
+        const target = new Date(now);
+        target.setHours(24, 1, 0, 0);
+        const delta = target.getTime() - now.getTime();
+        return Math.max(delta, 60_000);
     }
 }

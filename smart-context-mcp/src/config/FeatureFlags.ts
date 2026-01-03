@@ -1,6 +1,11 @@
 import { createHash } from 'crypto';
+import { AsyncLocalStorage } from 'async_hooks';
 
-type RolloutMode = 'off' | 'on' | 'canary' | 'beta' | 'full';
+export type RolloutMode = 'off' | 'on' | 'canary' | 'beta' | 'full';
+
+export interface FeatureFlagContext {
+    userId?: string;
+}
 
 /**
  * Feature flags for gradual rollout and A/B testing.
@@ -11,6 +16,7 @@ export class FeatureFlags {
     private static modes: Map<string, RolloutMode> = new Map();
     private static canaryUsers: Set<string> = new Set();
     private static betaPercent = 10;
+    private static contextStorage = new AsyncLocalStorage<FeatureFlagContext>();
     
     /**
      * Enables the Adaptive Flow architecture (LOD + UCG).
@@ -52,16 +58,20 @@ export class FeatureFlags {
         console.log('[FeatureFlags] Initialized:', this.debugState());
     }
     
-    static isEnabled(flag: string, context?: { userId?: string }): boolean {
+    static isEnabled(flag: string, context?: FeatureFlagContext): boolean {
         const enabled = this.flags.get(flag) ?? false;
-        if (!enabled) return false;
         const mode = this.modes.get(flag) ?? (enabled ? 'on' : 'off');
-        const userId = context?.userId;
-        if (!userId) return enabled;
+        if (!enabled && mode !== 'canary' && mode !== 'beta') {
+            return false;
+        }
+
+        const userId = context?.userId ?? this.contextStorage.getStore()?.userId;
         if (mode === 'canary') {
+            if (!userId) return false;
             return this.isCanaryUser(userId);
         }
         if (mode === 'beta') {
+            if (!userId) return false;
             return this.isInBetaCohort(userId);
         }
         return enabled;
@@ -70,6 +80,17 @@ export class FeatureFlags {
     static set(flag: string, enabled: boolean, mode?: RolloutMode): void {
         this.flags.set(flag, enabled);
         this.modes.set(flag, mode ?? (enabled ? 'on' : 'off'));
+    }
+
+    static withContext<T>(context: FeatureFlagContext | undefined, fn: () => T): T {
+        if (!this.contextStorage) {
+            return fn();
+        }
+        return this.contextStorage.run(context ?? {}, fn);
+    }
+
+    static getContext(): FeatureFlagContext | undefined {
+        return this.contextStorage.getStore();
     }
     
     static getAll(): Record<string, boolean> {
@@ -101,12 +122,12 @@ export class FeatureFlags {
                 return { enabled: true, mode: 'full' };
             case 'canary':
                 if (payload) {
-                    this.appendCanaryUsers(payload);
+                    this.addCanaryUsers(payload.split(',').map(value => value.trim()).filter(Boolean));
                 }
                 return { enabled: true, mode: 'canary' };
             case 'beta':
                 if (payload) {
-                    this.betaPercent = this.parseBetaPercent(payload);
+                    this.setBetaPercent(this.parseBetaPercent(payload));
                 }
                 return { enabled: true, mode: 'beta' };
             case 'false':
@@ -123,10 +144,6 @@ export class FeatureFlags {
         if (!raw) return users;
         raw.split(',').map(value => value.trim()).filter(Boolean).forEach(user => users.add(user));
         return users;
-    }
-
-    private static appendCanaryUsers(raw: string): void {
-        raw.split(',').map(value => value.trim()).filter(Boolean).forEach(user => this.canaryUsers.add(user));
     }
 
     private static parseBetaPercent(raw?: string): number {
@@ -148,6 +165,27 @@ export class FeatureFlags {
         const value = parseInt(hash.slice(0, 8), 16);
         const percent = value % 10000;
         return percent / 100 < this.betaPercent;
+    }
+
+    static addCanaryUsers(users: Iterable<string>): void {
+        for (const user of users) {
+            const normalized = user?.trim();
+            if (normalized) {
+                this.canaryUsers.add(normalized);
+            }
+        }
+    }
+
+    static setBetaPercent(percent: number): void {
+        if (!Number.isFinite(percent)) return;
+        this.betaPercent = Math.max(0, Math.min(100, percent));
+    }
+
+    static resetForTesting(): void {
+        this.flags.clear();
+        this.modes.clear();
+        this.canaryUsers.clear();
+        this.betaPercent = 10;
     }
 
     private static debugState(): Record<string, { enabled: boolean; mode: RolloutMode }> {
