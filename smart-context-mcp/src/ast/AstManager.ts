@@ -1,18 +1,31 @@
 import * as path from 'path';
+import { performance } from 'perf_hooks';
 import { AstBackend, AstDocument } from './AstBackend.js';
 import { WebTreeSitterBackend } from './WebTreeSitterBackend.js';
 import { JsAstBackend } from './JsAstBackend.js';
 import { SnapshotBackend } from './SnapshotBackend.js';
-import { EngineConfig } from '../types.js';
+import { EngineConfig, LOD_LEVEL, AnalysisRequest, LODResult, LODPromotionStats } from '../types.js';
 import { LanguageConfigLoader } from '../config/LanguageConfig.js';
+import { AdaptiveAstManager } from './AdaptiveAstManager.js';
+import { FeatureFlags } from '../config/FeatureFlags.js';
 
-export class AstManager {
+export class AstManager implements AdaptiveAstManager {
     private static instance: AstManager;
     private initialized = false;
     private backend?: AstBackend;
     private engineConfig: EngineConfig;
     private activeBackend?: string;
     private languageConfig?: LanguageConfigLoader;
+
+    // NEW: LOD promotion statistics
+    private lodStats: LODPromotionStats = {
+        l0_to_l1: 0,
+        l1_to_l2: 0,
+        l2_to_l3: 0,
+        fallback_rate: 0,
+        avg_promotion_time_ms: { l0_to_l1: 0, l1_to_l2: 0, l2_to_l3: 0 },
+        total_files: 0
+    };
 
     private constructor() {
         this.backend = new WebTreeSitterBackend();
@@ -111,6 +124,71 @@ export class AstManager {
 
     public getActiveBackend(): string | undefined {
         return this.activeBackend;
+    }
+
+    // NEW: Implement AdaptiveAstManager interface
+    async ensureLOD(request: AnalysisRequest): Promise<LODResult> {
+        if (!FeatureFlags.isEnabled(FeatureFlags.ADAPTIVE_FLOW_ENABLED)) {
+            // Fallback: treat all requests as LOD 3 (full AST)
+            const startTime = performance.now();
+            // In a real scenario we'd need the content, but for this stub we use placeholder
+            await this.parseFile(request.path, ''); 
+            const durationMs = performance.now() - startTime;
+            
+            return {
+                path: request.path,
+                previousLOD: 0,
+                currentLOD: 3,
+                requestedLOD: request.minLOD,
+                promoted: true,
+                durationMs,
+                fallbackUsed: true,
+                confidence: 1.0
+            };
+        }
+        
+        // TODO: Phase 2 - Implement actual LOD promotion logic
+        throw new Error('ensureLOD not implemented yet (Phase 2)');
+    }
+    
+    getFileNode(path: string) {
+        if (!FeatureFlags.isEnabled(FeatureFlags.UCG_ENABLED)) {
+            return undefined;
+        }
+        // TODO: Phase 2 - Return UCG node
+        return undefined;
+    }
+    
+    getCurrentLOD(path: string): LOD_LEVEL {
+        // TODO: Phase 2 - Query UCG or FileRecord
+        return 0;
+    }
+    
+    promotionStats(): LODPromotionStats {
+        return { ...this.lodStats };
+    }
+    
+    async fallbackToFullAST(path: string): Promise<LODResult> {
+        const startTime = performance.now();
+        // Force full AST parsing
+        await this.parseFile(path, '');
+        const durationMs = performance.now() - startTime;
+        
+        return {
+            path,
+            previousLOD: 0,
+            currentLOD: 3,
+            requestedLOD: 3,
+            promoted: true,
+            durationMs,
+            fallbackUsed: true,
+            confidence: 1.0
+        };
+    }
+    
+    invalidate(path: string, cascade: boolean = false): void {
+        // TODO: Phase 2 - Implement UCG invalidation
+        console.log(`[AstManager] Invalidate ${path}, cascade: ${cascade}`);
     }
 
     public supportsQueries(): boolean {

@@ -58,6 +58,113 @@ export interface ScoreDetails {
     details?: Array<{ type: string; score: number }>;
 }
 
+// ============================================================
+// LOD (Level of Detail) System Types
+// ============================================================
+
+/** 
+ * Level of Detail for file analysis.
+ * 0 = Registry (metadata only)
+ * 1 = Topology (imports/exports, lightweight)
+ * 2 = Structure (full AST skeleton)
+ * 3 = Semantic (full resolution with types)
+ */
+export type LOD_LEVEL = 0 | 1 | 2 | 3;
+
+/**
+ * Request to ensure a file is analyzed to at least the specified LOD.
+ */
+export interface AnalysisRequest {
+    /** Absolute file path */
+    path: string;
+    /** Minimum LOD level required */
+    minLOD: LOD_LEVEL;
+    /** Optional: Force re-analysis even if already at requested LOD */
+    force?: boolean;
+}
+
+/**
+ * Result of an LOD analysis/promotion operation.
+ */
+export interface LODResult {
+    /** File path that was analyzed */
+    path: string;
+    /** LOD level before the operation */
+    previousLOD: LOD_LEVEL;
+    /** Current LOD level after the operation */
+    currentLOD: LOD_LEVEL;
+    /** LOD level that was requested */
+    requestedLOD: LOD_LEVEL;
+    /** Whether the file was promoted to a higher LOD */
+    promoted: boolean;
+    /** Time taken for the operation in milliseconds */
+    durationMs: number;
+    /** Whether TopologyScanner failed and fell back to full AST */
+    fallbackUsed: boolean;
+    /** Confidence score for regex-based extraction (0.0-1.0) */
+    confidence?: number;
+    /** Error if analysis failed */
+    error?: string;
+}
+
+/**
+ * Topology information extracted at LOD 1.
+ */
+export interface TopologyInfo {
+    /** File path */
+    path: string;
+    /** Import statements */
+    imports: Array<{
+        source: string;          // Module path
+        isDefault: boolean;      // true if default import
+        namedImports: string[];  // Named imports
+        isTypeOnly: boolean;     // true if import type
+        isDynamic: boolean;      // true if import()
+    }>;
+    /** Export statements */
+    exports: Array<{
+        name: string;            // Export name
+        isDefault: boolean;      // true if export default
+        isTypeOnly: boolean;     // true if export type
+        reExportFrom?: string;   // Source if re-export
+    }>;
+    /** Top-level symbols (classes, functions, interfaces) */
+    topLevelSymbols: Array<{
+        name: string;
+        kind: 'class' | 'function' | 'interface' | 'type' | 'const' | 'let' | 'var';
+        exported: boolean;
+        lineNumber: number;
+    }>;
+    /** Extraction confidence (0.0-1.0) */
+    confidence: number;
+    /** Whether AST fallback was used */
+    fallbackUsed: boolean;
+    /** Extraction duration in ms */
+    extractionTimeMs: number;
+}
+
+/**
+ * Statistics about LOD promotions.
+ */
+export interface LODPromotionStats {
+    /** Number of LOD 0 → 1 promotions */
+    l0_to_l1: number;
+    /** Number of LOD 1 → 2 promotions */
+    l1_to_l2: number;
+    /** Number of LOD 2 → 3 promotions */
+    l2_to_l3: number;
+    /** TopologyScanner fallback rate (0.0-1.0) */
+    fallback_rate: number;
+    /** Average promotion time per level */
+    avg_promotion_time_ms: {
+        l0_to_l1: number;
+        l1_to_l2: number;
+        l2_to_l3: number;
+    };
+    /** Total files tracked in UCG */
+    total_files: number;
+}
+
 export type CallType = "direct" | "method" | "constructor" | "callback" | "optional" | "unknown";
 
 export interface CallSiteInfo {

@@ -1,7 +1,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import { PathManager } from "../utils/PathManager.js";
-import type { DocumentKind, SymbolInfo } from "../types.js";
+import type { DocumentKind, SymbolInfo, LOD_LEVEL } from "../types.js";
 import { EmbeddingPackManager, resolveEmbeddingPackConfigFromEnv, type EmbeddingPackConfig } from "./EmbeddingPack.js";
 
 export type StorageMode = "memory" | "file";
@@ -12,6 +12,19 @@ export interface FileRecord {
     language?: string | null;
     size_bytes?: number;
     content_hash?: string;
+    
+    /** Current LOD level (0-3). Defaults to 0 (Registry) */
+    currentLOD?: LOD_LEVEL;
+    
+    /** Timestamp of last LOD promotion */
+    lodUpdatedAt?: number;
+    
+    /** Topology data if at LOD 1+ */
+    topology?: {
+        imports: string[];      // Simplified: just module paths
+        exports: string[];      // Simplified: just exported names
+        dependencies: string[]; // Resolved file paths
+    };
 }
 
 export interface StoredDependency {
