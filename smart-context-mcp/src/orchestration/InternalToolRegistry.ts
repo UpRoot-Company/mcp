@@ -12,12 +12,27 @@ export interface InternalTool {
  */
 export class InternalToolRegistry {
   private tools: Map<string, (args: any) => Promise<any>> = new Map();
+  private metadata: Map<string, any> = new Map();
 
   /**
    * 도구 이름과 실행 함수를 등록합니다.
    */
   public register(name: string, handler: (args: any) => Promise<any>): void {
     this.tools.set(name, handler);
+  }
+
+  /**
+   * 메타데이터를 저장합니다 (예: searchEngine 참조).
+   */
+  public setMetadata(key: string, value: any): void {
+    this.metadata.set(key, value);
+  }
+
+  /**
+   * 메타데이터를 가져옵니다.
+   */
+  public getMetadata<T = any>(key: string): T | undefined {
+    return this.metadata.get(key) as T;
   }
 
   /**
@@ -37,6 +52,13 @@ export class InternalToolRegistry {
    */
   public getRegisteredTools(): string[] {
     return Array.from(this.tools.keys());
+  }
+
+  /**
+   * 도구 핸들러를 가져옵니다.
+   */
+  public get(name: string): ((args: any) => Promise<any>) | undefined {
+    return this.tools.get(name);
   }
 
   public hasTool(name: string): boolean {

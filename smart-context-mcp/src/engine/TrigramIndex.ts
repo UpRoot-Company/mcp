@@ -178,7 +178,7 @@ export class TrigramIndex {
 
     public async search(term: string, limit: number = 200, options?: { waitForReady?: boolean }): Promise<SearchCandidate[]> {
         if (!this.options.enabled) return [];
-        const waitForReady = options?.waitForReady !== false;
+        const waitForReady = options?.waitForReady === true;
         if (waitForReady) {
             await this.ensureReady();
         } else if (!this.isReady) {

@@ -233,6 +233,10 @@ export class SmartContextServer {
         this.legacyAdapter = new LegacyToolAdapter();
 
         this.registerInternalTools();
+        
+        // Store searchEngine reference for pillars to access
+        this.internalRegistry.setMetadata('searchEngine', this.searchEngine);
+        
         this.setupHandlers();
         this.setupShutdownHooks();
         this.startHeartbeat();
@@ -2477,6 +2481,16 @@ export class SmartContextServer {
         const transport = new StdioServerTransport();
         await this.server.connect(transport);
         console.error(`Smart Context MCP Server running on stdio (cwd=${process.cwd()})`);
+        
+        // Background warmup: Start trigram index building without blocking
+        // This improves search quality for subsequent requests
+        if (!this.isTestEnv()) {
+            setImmediate(() => {
+                this.searchEngine.warmup().catch((error) => {
+                    console.error('[SmartContextServer] Background warmup failed:', error);
+                });
+            });
+        }
     }
 }
 

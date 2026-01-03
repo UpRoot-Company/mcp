@@ -122,7 +122,7 @@ export class OrchestrationEngine {
 
     const response: any = {
       ...result,
-      insights: insights.insights,
+      insights: [...(result.insights || []), ...insights.insights],
       visualization: insights.visualization,
       guidance,
       internalToolsUsed: context.getFullHistory().map((h: any) => h.tool)

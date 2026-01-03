@@ -31,6 +31,12 @@ type ExploreResponse = {
     degraded?: boolean;
     reasons?: string[];
     stats?: Record<string, unknown>;
+    insights?: Array<{
+        type: "info" | "warning" | "error";
+        message: string;
+        relatedSymbols: string[];
+        suggestedAction?: string;
+    }>;
 };
 
 const DEFAULT_MAX_RESULTS = 8;
@@ -413,7 +419,40 @@ export class ExplorePillar {
             response.reasons = Array.from(new Set(reasons));
         }
 
+        // Add index status to insights for user guidance
+        this.addIndexStatusInsights(response);
+
         return response;
+    }
+
+    private addIndexStatusInsights(response: ExploreResponse): void {
+        try {
+            const searchEngine = this.registry.getMetadata<any>('searchEngine');
+            if (!searchEngine) return;
+
+            const isReady = searchEngine.isIndexReady?.();
+            const isBuilding = searchEngine.isIndexBuilding?.();
+
+            if (isBuilding) {
+                response.insights = response.insights || [];
+                response.insights.push({
+                    type: "info",
+                    message: "Search index is building in the background. Results will improve as indexing completes.",
+                    relatedSymbols: [],
+                    suggestedAction: "Wait for indexing to complete, or use `manage` tool with command `reindex` to force a rebuild."
+                });
+            } else if (isReady === false) {
+                response.insights = response.insights || [];
+                response.insights.push({
+                    type: "warning",
+                    message: "Search index is not ready. Results may be incomplete.",
+                    relatedSymbols: [],
+                    suggestedAction: "Use `manage` tool with command `reindex` to build the search index for better results."
+                });
+            }
+        } catch {
+            // Silently ignore errors - this is optional guidance only
+        }
     }
 
     private async buildItemForPath(

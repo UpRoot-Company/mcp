@@ -205,6 +205,14 @@ export class SearchEngine {
         await this.trigramIndex.ensureReady();
     }
 
+    public isIndexReady(): boolean {
+        return this.trigramIndex.isReadyState();
+    }
+
+    public isIndexBuilding(): boolean {
+        return this.trigramIndex.isBuildingState();
+    }
+
     public async rebuild(options?: { logEvery?: number; logger?: (message: string) => void; logTotals?: boolean }): Promise<void> {
         await this.trigramIndex.rebuild(options);
         this.callGraphSignals = undefined;
@@ -300,13 +308,16 @@ export class SearchEngine {
         console.error(`[SearchEngine] Collected ${candidates.size} candidates`);
 
         // Phase 1 Smart Fuzzy Match: Symbol-based search for symbol queries
+        console.error(`[SearchEngine] intent=${intent}, symbolMapper=${!!this.intentToSymbolMapper}, symbolEmbeddingIndex=${!!this.symbolEmbeddingIndex}`);
         if (intent === "symbol" && this.intentToSymbolMapper && this.symbolEmbeddingIndex) {
             try {
+                console.error(`[SearchEngine] Starting symbol search...`);
                 const stopSymbolSearch = metrics.startTimer("search.scout.symbol_search_ms");
                 const symbolResults = await this.intentToSymbolMapper.mapToSymbols(effectiveQuery, {
                     maxResults: args.maxResults ?? 20,
                     minConfidence: 0.3,
                 });
+                console.error(`[SearchEngine] Symbol search returned ${symbolResults.length} results`);
                 stopSymbolSearch();
 
                 if (symbolResults.length > 0) {
@@ -357,6 +368,16 @@ export class SearchEngine {
             usage.candidates = candidates.size;
         }
         let candidateList = Array.from(candidates);
+        
+        // OPTIMIZATION: When index is not ready, limit candidate files for fast response
+        if (!trigramReady && candidateList.length > 5) {
+            candidateList = candidateList.slice(0, 5);
+            if (usage) {
+                usage.degraded = true;
+                usage.reason = usage.reason ?? 'index_not_ready';
+            }
+        }
+        
         if (budget && candidates.size > budget.maxCandidates) {
             if (usage) {
                 usage.degraded = true;
