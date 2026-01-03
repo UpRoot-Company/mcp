@@ -11,6 +11,31 @@ import { BruteforceVectorIndex } from "./BruteforceVectorIndex.js";
 import { HnswVectorIndex } from "./HnswVectorIndex.js";
 import { resolveVectorIndexConfigFromEnv, type VectorIndexConfig, type VectorIndexMode, type VectorIndexShardSetting } from "./VectorIndexConfig.js";
 
+/**
+ * Vector item type - supports both document chunks and code symbols
+ */
+export type VectorItemType = 'doc' | 'symbol';
+
+export interface VectorItemMetadata {
+    type: VectorItemType;
+    filePath: string;
+    lineRange?: { start: number; end: number };
+    symbolType?: 'class' | 'function' | 'method' | 'interface' | 'type';
+    symbolName?: string;
+    signature?: string;
+}
+
+export interface VectorItem {
+    id: string;
+    metadata: VectorItemMetadata;
+    embedding: {
+        provider: string;
+        model: string;
+        dims: number;
+        vector: Float32Array;
+    };
+}
+
 type VectorIndexMeta = {
     version: number;
     provider: string;
@@ -144,14 +169,33 @@ export class VectorIndexManager {
         }
     }
 
-    public upsertEmbedding(chunkId: string, embedding: { provider: string; model: string; dims: number; vector: Float32Array }): void {
+    /**
+     * Index a vector item (document chunk or code symbol)
+     * @param item - VectorItem with metadata and embedding
+     */
+    public indexItem(item: VectorItem): void {
         if (!this.isEnabled() || this.config.mode === "off") return;
-        const key = this.keyFor(embedding.provider, embedding.model);
+        const key = this.keyFor(item.embedding.provider, item.embedding.model);
         const state = this.states.get(key);
         if (!state) return;
-        if (state.dims !== embedding.dims) return;
-        const shardId = this.shardForId(chunkId, state.shardCount);
-        state.indexes[shardId]?.upsert(chunkId, embedding.vector);
+        if (state.dims !== item.embedding.dims) return;
+        const shardId = this.shardForId(item.id, state.shardCount);
+        state.indexes[shardId]?.upsert(item.id, item.embedding.vector);
+    }
+
+    /**
+     * @deprecated Use indexItem() instead. Kept for backward compatibility.
+     */
+    public upsertEmbedding(chunkId: string, embedding: { provider: string; model: string; dims: number; vector: Float32Array }): void {
+        // Backward compatibility: treat as document chunk
+        this.indexItem({
+            id: chunkId,
+            metadata: {
+                type: 'doc',
+                filePath: '', // Unknown for legacy calls
+            },
+            embedding
+        });
     }
 
     public removeChunk(chunkId: string): void {
