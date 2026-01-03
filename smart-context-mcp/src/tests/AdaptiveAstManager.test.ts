@@ -22,11 +22,11 @@ describe('AdaptiveAstManager', () => {
         FeatureFlags.set(FeatureFlags.UCG_ENABLED, true);
     });
     
-    afterEach(() => {
+    afterEach(async () => {
         if (fs.existsSync(tempDir)) {
             fs.rmSync(tempDir, { recursive: true, force: true });
         }
-        AstManager.resetForTesting();
+        await AstManager.resetForTestingAsync();
         FeatureFlags.set(FeatureFlags.ADAPTIVE_FLOW_ENABLED, false);
     });
     

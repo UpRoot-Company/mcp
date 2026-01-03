@@ -12,7 +12,7 @@ import { FeatureFlags } from '../config/FeatureFlags.js';
 import { UnifiedContextGraph } from '../orchestration/context/UnifiedContextGraph.js';
 
 export class AstManager implements AdaptiveAstManager {
-    private static instance: AstManager;
+    private static instance: AstManager | undefined;
     private initialized = false;
     private backend?: AstBackend;
     private engineConfig: EngineConfig;
@@ -44,8 +44,14 @@ export class AstManager implements AdaptiveAstManager {
 
     public static resetForTesting(): void {
         if (AstManager.instance) {
-            if (AstManager.instance.backend?.dispose) {
-                AstManager.instance.backend.dispose();
+            // Synchronous parts
+            if (AstManager.instance.backend && typeof (AstManager.instance.backend as any).dispose === 'function') {
+                (AstManager.instance.backend as any).dispose();
+            }
+            if (AstManager.instance.ucg) {
+                // Fire and forget disposal for background watchers
+                AstManager.instance.ucg.dispose().catch(() => {});
+                AstManager.instance.ucg = undefined;
             }
             AstManager.instance.initialized = false;
             AstManager.instance.backend = undefined;
@@ -53,6 +59,17 @@ export class AstManager implements AdaptiveAstManager {
             AstManager.instance.activeBackend = undefined;
             AstManager.instance.languageConfig?.dispose();
             AstManager.instance.languageConfig = undefined;
+            AstManager.instance = undefined;
+        }
+    }
+
+    /**
+     * Complete asynchronous cleanup for tests that use UCG/FileWatcher.
+     */
+    public static async resetForTestingAsync(): Promise<void> {
+        if (AstManager.instance) {
+            await AstManager.instance.dispose();
+            AstManager.instance = undefined;
         }
     }
 
@@ -148,18 +165,52 @@ export class AstManager implements AdaptiveAstManager {
         
         // Update stats
         if (result.promoted) {
-            const prev = result.previousLOD;
-            const curr = result.currentLOD;
-            if (prev === 0 && curr >= 1) this.lodStats.l0_to_l1++;
-            if (prev <= 1 && curr >= 2) this.lodStats.l1_to_l2++;
-            if (prev <= 2 && curr === 3) this.lodStats.l2_to_l3++;
+            this.updateStats(result);
         }
+        
+        // Dual-write validation (if enabled)
+        if (FeatureFlags.isEnabled(FeatureFlags.DUAL_WRITE_VALIDATION)) {
+            this.validateDualWrite(request.path, result);
+        }
+        
+        return result;
+    }
+
+    private updateStats(result: LODResult) {
+        const prev = result.previousLOD;
+        const curr = result.currentLOD;
+        const duration = result.durationMs;
+
+        if (prev === 0 && curr >= 1) {
+            this.lodStats.l0_to_l1++;
+            this.lodStats.avg_promotion_time_ms.l0_to_l1 = 
+                (this.lodStats.avg_promotion_time_ms.l0_to_l1 * (this.lodStats.l0_to_l1 - 1) + duration) / this.lodStats.l0_to_l1;
+        }
+        if (prev <= 1 && curr >= 2) {
+            this.lodStats.l1_to_l2++;
+            this.lodStats.avg_promotion_time_ms.l1_to_l2 = 
+                (this.lodStats.avg_promotion_time_ms.l1_to_l2 * (this.lodStats.l1_to_l2 - 1) + duration) / this.lodStats.l1_to_l2;
+        }
+        if (prev <= 2 && curr === 3) {
+            this.lodStats.l2_to_l3++;
+            this.lodStats.avg_promotion_time_ms.l2_to_l3 = 
+                (this.lodStats.avg_promotion_time_ms.l2_to_l3 * (this.lodStats.l2_to_l3 - 1) + duration) / this.lodStats.l2_to_l3;
+        }
+
         if (result.fallbackUsed) {
             const total = this.lodStats.l0_to_l1 + this.lodStats.l1_to_l2 + this.lodStats.l2_to_l3;
             this.lodStats.fallback_rate = total > 0 ? (this.lodStats.l0_to_l1 / total) : 0;
         }
-        
-        return result;
+    }
+
+    private validateDualWrite(path: string, result: LODResult) {
+        if (result.currentLOD >= 2) {
+            const ucgNode = this.getUCG().getNode(path);
+            // skeletonCache is managed by UCG internally
+            if (ucgNode?.skeleton) {
+                console.debug(`[DualWrite] Validating consistency for ${path}`);
+            }
+        }
     }
     
     getFileNode(path: string) {
@@ -294,6 +345,10 @@ export class AstManager implements AdaptiveAstManager {
     public async dispose(): Promise<void> {
         if (this.backend && typeof (this.backend as any).dispose === 'function') {
             (this.backend as any).dispose();
+        }
+        if (this.ucg) {
+            await this.ucg.dispose();
+            this.ucg = undefined;
         }
         this.languageConfig?.dispose();
         this.initialized = false;

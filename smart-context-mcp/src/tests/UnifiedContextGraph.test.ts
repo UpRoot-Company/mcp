@@ -23,12 +23,12 @@ describe('UnifiedContextGraph', () => {
         await manager.init({ mode: 'test', rootPath: tempDir });
     });
     
-    afterEach(() => {
-        ucg.clear();
+    afterEach(async () => {
+        await ucg.dispose();
         if (fs.existsSync(tempDir)) {
             fs.rmSync(tempDir, { recursive: true, force: true });
         }
-        AstManager.resetForTesting();
+        await AstManager.resetForTestingAsync();
     });
     
     describe('LOD Promotion', () => {

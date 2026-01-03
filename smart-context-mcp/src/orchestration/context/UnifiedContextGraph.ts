@@ -9,6 +9,7 @@ import { SkeletonCache } from '../../ast/SkeletonCache.js';
 import { AstManager } from '../../ast/AstManager.js';
 import { FeatureFlags } from '../../config/FeatureFlags.js';
 import { ModuleResolver } from '../../ast/ModuleResolver.js';
+import { FileWatcher } from './FileWatcher.js';
 
 /**
  * Unified Context Graph: Centralized state for all file analysis.
@@ -23,6 +24,7 @@ export class UnifiedContextGraph {
     private astManager: AstManager;
     private moduleResolver: ModuleResolver;
     private rootPath: string;
+    private fileWatcher?: FileWatcher;
     
     private stats = {
         promotions: { l0_to_l1: 0, l1_to_l2: 0, l2_to_l3: 0 },
@@ -30,7 +32,7 @@ export class UnifiedContextGraph {
         cascadeInvalidations: 0
     };
     
-    constructor(rootPath: string, maxNodes: number = 5000) {
+    constructor(rootPath: string, maxNodes: number = 5000, enableWatcher: boolean = false) {
         this.nodes = new Map();
         this.lruQueue = [];
         this.maxNodes = maxNodes;
@@ -40,6 +42,11 @@ export class UnifiedContextGraph {
         this.skeletonCache = new SkeletonCache(rootPath);
         this.astManager = AstManager.getInstance();
         this.moduleResolver = new ModuleResolver(rootPath);
+        
+        if (enableWatcher) {
+            this.fileWatcher = new FileWatcher(this, rootPath);
+            this.fileWatcher.start();
+        }
     }
     
     async ensureLOD(request: AnalysisRequest): Promise<LODResult> {
@@ -145,6 +152,32 @@ export class UnifiedContextGraph {
     }
     
     getNode(path: string) { return this.nodes.get(path); }
+
+    removeNode(path: string): void {
+        const node = this.nodes.get(path);
+        if (!node) return;
+        
+        // Remove edges
+        for (const dep of node.dependencies) {
+            this.nodes.get(dep)?.removeDependent(path);
+        }
+        for (const dependent of node.dependents) {
+            this.nodes.get(dependent)?.removeDependency(path);
+        }
+        
+        // Remove from LRU
+        const idx = this.lruQueue.indexOf(path);
+        if (idx !== -1) this.lruQueue.splice(idx, 1);
+        
+        this.nodes.delete(path);
+    }
+
+    async dispose(): Promise<void> {
+        if (this.fileWatcher) {
+            await this.fileWatcher.stop();
+        }
+        this.clear();
+    }
     
     private updateLRU(path: string) {
         const idx = this.lruQueue.indexOf(path);
