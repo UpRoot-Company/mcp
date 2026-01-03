@@ -1,9 +1,27 @@
 # ADR-042-004: PH Change/Write (Batch + Latency)
 
-**Status:** Proposed  
+**Status:** ✅ **Phase 0-1 Implemented**  
 **Date:** 2026-01-05  
 **Author:** Smart Context MCP Team  
 **Related:** `docs/analysis/technical-report.md`, ADR-042-001, ADR-042-002, ADR-042-003, ADR-033 (Six Pillars), ADR-019/030 (Tool Consolidation + Batch Transactions)
+
+## Implementation Status
+
+✅ **Phase 0 (Correctness Hotfix):** Complete
+- Batch change support (shouldUseBatch, mapEditsToFiles)
+- Multi-file edit mapping with MULTI_FILE_MAPPING_REQUIRED error
+- EditCoordinator.applyBatchEdits with atomic rollback
+- WritePillar fast-path for simple overwrites
+
+✅ **Phase 1 (Latency Guardrails):** Partial
+- Auto-correction guardrails in batch mode
+- Doc suggestion opt-in (suggestDocs)
+- Metrics timers added (change.total_ms, edit_coordinator_ms)
+
+⏳ **Phase 2 (Observability + Tuning):** Planned
+- Budget/threshold tuning based on field data
+
+See ChangePillar.ts for implementation details.
 
 ---
 

@@ -39,8 +39,29 @@ Per `smart-context-mcp/docs/adr/ADR-040-five-pillars-explore-consolidation.md`, 
 - `explore` — unified discovery (search + preview/section + optional full reads)
 - `understand` — synthesize structure/relationships
 - `change` — plan/apply safe edits (dry-run first)
+  - **Layer 3 AI Features** (ADR-042-006):
+    - Smart fuzzy match: Intent-based symbol search with embeddings
+    - Symbol-level impact analysis: AST diff + auto-repair suggestions
+    - Quick code generation: Style inference + template generation
 - `write` — create/scaffold files
+  - **Layer 3 AI Features**:
+    - Pattern-based generation: Extracts project patterns for consistent code
+    - Smart write: VectorSearch → PatternExtractor → TemplateGenerator pipeline
 - `manage` — status/undo/redo/reindex/history
+
+**AI-Enhanced Capabilities** (Layer 3):
+- **Smart Fuzzy Match**: Embedding-based symbol search when exact matches fail
+- **AST Impact Analysis**: Symbol-level change impact with repair suggestions
+- **Code Generation**: Infers project style and generates matching code
+- **Pattern Extraction**: Learns from similar files to maintain consistency
+
+ENV Controls:
+```bash
+# Layer 3 AI Features (all default to false)
+SMART_CONTEXT_LAYER3_SMART_MATCH=true        # Enable smart fuzzy symbol matching
+SMART_CONTEXT_LAYER3_SYMBOL_IMPACT=true     # Enable symbol-level impact analysis
+SMART_CONTEXT_LAYER3_CODE_GEN=true           # Enable code generation features
+```
 
 Legacy tool names (e.g. `search_project`, `read_code`, `edit_code`) are opt-in; see `smart-context-mcp/docs/compat/README.md`.
 

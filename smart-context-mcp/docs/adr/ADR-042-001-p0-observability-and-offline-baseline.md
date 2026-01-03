@@ -1,9 +1,20 @@
 # ADR-042-001: P0 Observability + Standalone Baseline (No Network / No Native DB)
 
-**Status:** Proposed  
+**Status:** ✅ **Implemented**  
 **Date:** 2026-01-02  
 **Author:** Smart Context MCP Team  
 **Related:** `docs/analysis/technical-report.md`, ADR-034/035 (Budgets & Degradation), ADR-036~039 (Document pipeline), ADR-041 (Integrity modes)
+
+## Implementation Status
+
+✅ **Core P0 requirements implemented:**
+- Offline model bundling (multilingual-e5-small)
+- File-based IndexStore (legacy JSON support maintained)
+- MetricsCollector with histogram support
+- Trigram guardrails for large repos
+- Skeleton performance improvements
+
+See ADR-042-002 and ADR-042-003 for P1/P2 implementations.
 
 ---
 

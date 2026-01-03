@@ -1,9 +1,28 @@
 # ADR-042-005: PH Editor Overhaul + Change/Write Completion (No More Follow-ups)
 
-**Status:** Proposed  
+**Status:** ✅ **Phase A3, B2 Implemented**  
 **Date:** 2026-01-05  
 **Author:** Smart Context MCP Team  
 **Related:** ADR-042-004 (PH Change/Write Hotfix), ADR-042-001/002/003, ADR-033 (Six Pillars), ADR-009/024 (Editor matching & edit flexibility), ADR-005/030 (Transactions)
+
+## Implementation Status
+
+✅ **Phase A3 (EditResolver):** Complete
+- EditResolver with smart fuzzy match
+- Timeout control (SMART_CONTEXT_RESOLVE_TIMEOUT_MS)
+- Ambiguous match auto-pick option
+- Integration with IntentToSymbolMapper (Layer 3)
+
+✅ **Phase B2 (V2 Editor Mode):** Complete
+- V2 mode with ENV gates (SMART_CONTEXT_EDITOR_V2_ENABLED)
+- Mode selection: off/hybrid/full
+- executeV2BatchChange in ChangePillar
+
+⏳ **Phase C (Full Replacement):** Deferred
+- Large-scale refactoring postponed
+- Current incremental approach preferred for stability
+
+See EditResolver.ts and ChangePillar.ts for implementation.
 
 ---
 

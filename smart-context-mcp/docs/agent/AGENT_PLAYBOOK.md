@@ -1,52 +1,77 @@
-# Agent Playbook: Smart Context - Five Pillars
+# Agent Playbook
 
-This guide defines how to use the **Five Pillars Architecture** to interact with the codebase efficiently.
-
-## Core Mandate: "What vs How"
-You express **"What"** you want to achieve using the 5 high-level pillars. The system automatically determines **"How"** to execute it using internal tools.
+> **Five Pillars Architecture** (ADR-040) — Intent-based codebase interaction
 
 ---
 
-## 1. The Five Pillars (Quick Reference)
+## The Five Pillars
 
-| Pillar | Intent | Use Case |
-|:---|:---|:---|
-| **`explore`** | "I want to find or read something." | Unified search + preview/section + optional full reads. |
-| **`understand`** | "I want to comprehend this code." | Analyze logic, architecture, call graphs, and dependencies. |
-| **`change`** | "I want to modify this code." | Safely edit code with auto-DryRun and impact analysis. |
-| **`write`** | "I want to create something." | Generate new files or scaffold project components. |
-| **`manage`** | "I want to control state." | Undo/redo changes, check status, or rebuild indices. |
+| Pillar | Intent | Example |
+|--------|--------|----------|
+| **`explore`** | Find or read | Search, preview, full reads |
+| **`understand`** | Comprehend code | Architecture, call graphs, dependencies |
+| **`change`** | Modify code | Safe edits with dry-run & impact |
+| **`write`** | Create files | Generate, scaffold components |
+| **`manage`** | Control state | Undo/redo, status, rebuild |
 
----
-
-## 2. Standard Workflows
-
-### Pattern A: Analyze → Modify
-1.  **Understand**: `understand({ goal: "Understand auth logic in UserService" })`
-2.  **Review**: Check the `structure` and `guidance` from the response.
-3.  **Plan Change**: `change({ intent: "Add domain whitelist", options: { dryRun: true } })`
-4.  **Verify**: Review the `diff` and `impactReport`.
-5.  **Apply**: `change({ intent: "Add domain whitelist", options: { dryRun: false } })`
-
-### Pattern B: Search → Deep Dive
-1.  **Explore**: `explore({ query: "PaymentProcessor" })`
-2.  **Examine**: Use the preview/section results in `data.docs`/`data.code`.
-3.  **Deep dive**: `explore({ paths: ["src/payments/Processor.ts"], view: "full" })` if needed.
+**Principle:** Express **"What"** (intent) → System handles **"How"** (execution)
 
 ---
 
-## 3. Intelligent Guidance
-Every response includes a `guidance` field.
-- **`message`**: A summary of what was achieved.
-- **`suggestedActions`**: The best next steps. **Always prioritize these.**
-- **`warnings`**: Risks like God Modules or high blast radius.
+## Common Patterns
+
+### 1. Analyze → Modify
+```typescript
+// Step 1: Understand
+understand({ goal: "Understand auth logic in UserService" })
+
+// Step 2: Plan (dry-run)
+change({ intent: "Add domain whitelist", options: { dryRun: true } })
+
+// Step 3: Verify diff + impact
+
+// Step 4: Apply
+change({ intent: "Add domain whitelist" })
+```
+
+### 2. Search → Deep Dive
+```typescript
+// Step 1: Find
+explore({ query: "PaymentProcessor" })
+
+// Step 2: Preview results
+
+// Step 3: Full read (if needed)
+explore({ paths: ["src/payments/Processor.ts"], view: "full" })
+```
 
 ---
 
-## 4. Legacy Compatibility
-Legacy tools are hidden by default in the MCP tool list. If you need them for compatibility, enable:
+## Response Structure
 
-- `SMART_CONTEXT_EXPOSE_LEGACY_TOOLS=true` (expose legacy tools in tool list)
-- `SMART_CONTEXT_LEGACY_AUTOMAP=true` (auto-map unknown legacy calls to pillars)
+Every response includes **`guidance`**:
+- `message` — What was achieved
+- `suggestedActions` — Next steps (**prioritize these**)
+- `warnings` — Risks (God Modules, blast radius)
 
-Even with legacy tools enabled, using the 5 pillars directly is recommended for optimal performance and consistent guidance.
+---
+
+## Layer 3 AI Features
+
+**Optional advanced capabilities** (ADR-042-006, disabled by default):
+
+| Feature | ENV Flag | Description |
+|---------|----------|-------------|
+| Smart Fuzzy Match | `SMART_CONTEXT_LAYER3_SMART_MATCH=true` | Embedding-based symbol resolution |
+| AST Impact | `SMART_CONTEXT_LAYER3_SYMBOL_IMPACT=true` | Auto change impact detection |
+| Code Generation | `SMART_CONTEXT_LAYER3_CODE_GEN=true` | Pattern-aware generation |
+
+---
+
+## Legacy Compatibility
+
+**ENV Flags:**
+- `SMART_CONTEXT_EXPOSE_LEGACY_TOOLS=true` — Show old tools in list
+- `SMART_CONTEXT_LEGACY_AUTOMAP=true` — Auto-map old calls to pillars
+
+**Recommendation:** Use Five Pillars directly for best results.

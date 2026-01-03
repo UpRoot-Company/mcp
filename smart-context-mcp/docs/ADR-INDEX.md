@@ -1,35 +1,62 @@
-# ADR Index (Curated)
+# ADR Index
 
-All ADRs live in `smart-context-mcp/docs/adr/`. This index is intentionally **curated** to reduce duplication and doc drift.
+> **All ADRs:** `docs/adr/` | **Archive:** `docs/adr/archive/`
 
-## Most important (read these first)
+---
 
-- **ADR-033 — Six Pillars Architecture**: `adr/ADR-033-Six-Pillars-Architecture.md`
-- **ADR-040 — Five Pillars (Explore-first) consolidation**: `adr/ADR-040-five-pillars-explore-consolidation.md`
-- **ADR-041 — Integrity Audit Modes (Cross-source consistency)**: `adr/ADR-041-integrity-audit-modes.md`
-- **ADR-022 — Scalable Architecture (SQLite / WAL)**: `adr/ADR-022-scalable-architecture.md`
-- **ADR-014 — Smart File Profile (Skeleton-first)**: `adr/ADR-014-smart-file-profile.md`
-- **ADR-005 — Reliability & Transactions**: `adr/ADR-005-Reliability-and-Transactions.md`
+## 1. Core Architecture
 
-## Search / indexing / ranking
+| ADR | Title | Path |
+|-----|-------|------|
+| **040** | **Five Pillars** (current) | `adr/ADR-040-five-pillars-explore-consolidation.md` |
+| 033 | Six Pillars (legacy) | `adr/ADR-033-Six-Pillars-Architecture.md` |
+| 022 | Scalable Architecture (SQLite) | `adr/ADR-022-scalable-architecture.md` |
+| 005 | Reliability & Transactions | `adr/ADR-005-Reliability-and-Transactions.md` |
+| 041 | Integrity Audit Modes | `adr/ADR-041-integrity-audit-modes.md` |
 
-- ADR-017 / ADR-018 — clustered search: `adr/ADR-017-context-aware-clustered-search.md`, `adr/ADR-018-consolidated-cluster-search.md`
-- ADR-023 — gap remediation (trigram/hash): `adr/ADR-023-Enhanced-Architectural-Gap-Remediation.md`
-- ADR-036 — universal document support (markdown/mdx-first): `adr/ADR-036-universal-document-support.md`
-- ADR-037 — docs v2 (plain text + code comments + retrieval quality + embedding ops + scalable storage): `adr/ADR-037-universal-text-retrieval-ops.md`
-- ADR-038 — token-efficient evidence packs & progressive disclosure: `adr/ADR-038-token-efficient-evidence-packs.md`
+---
 
-## Editing safety
+## 2. Search & Retrieval
 
-- ADR-024 — edit flexibility & safety: `adr/ADR-024-enhanced-edit-flexibility-and-safety.md`
-- ADR-032 — edit reliability & state sync: `adr/ADR-032-edit-code-reliability-and-state-synchronization.md`
+| ADR | Title | Path |
+|-----|-------|------|
+| 037 | Universal Text Retrieval | `adr/ADR-037-universal-text-retrieval-ops.md` |
+| 038 | Token-Efficient Evidence | `adr/ADR-038-token-efficient-evidence-packs.md` |
+| 018 | Consolidated Cluster Search | `adr/ADR-018-consolidated-cluster-search.md` |
+| 036 | Universal Document Support | `adr/ADR-036-universal-document-support.md` |
+| 023 | Gap Remediation (trigram) | `adr/ADR-023-Enhanced-Architectural-Gap-Remediation.md` |
+| 014 | Smart File Profile | `adr/ADR-014-smart-file-profile.md` |
 
-## Agent experience
+---
 
-- ADR-026 — symbol resolution & workflow guidance: `adr/ADR-026-Symbol-Resolution-And-Workflow-Guidance.md`
-- ADR-030 — agent-centric intelligence & resilience: `adr/ADR-030-Agent-Centric-Intelligence-And-Resilience.md`
+## 3. Editing & Safety
+
+| ADR | Title | Path |
+|-----|-------|------|
+| 032 | Edit Reliability & State Sync | `adr/ADR-032-edit-code-reliability-and-state-synchronization.md` |
+| 024 | Edit Flexibility & Safety | `adr/ADR-024-enhanced-edit-flexibility-and-safety.md` |
+| 026 | Symbol Resolution & Workflow | `adr/ADR-026-Symbol-Resolution-And-Workflow-Guidance.md` |
+| 030 | Agent Intelligence & Resilience | `adr/ADR-030-Agent-Centric-Intelligence-And-Resilience.md` |
+
+---
+
+## 4. Performance & AI (ADR-042 Series)
+
+**Status:** ✅ Implemented (2026-01-03) | **Summary:** `adr/ADR-042-COMPLETION-SUMMARY.md`
+
+| ADR | Title | Status | Path |
+|-----|-------|--------|------|
+| **042-001** | P0 Offline Baseline | ✅ | `adr/ADR-042-001-p0-observability-and-offline-baseline.md` |
+| **042-002** | P1 Hybrid ANN | ✅ | `adr/ADR-042-002-p1-hybrid-ann-and-search-scaling.md` |
+| **042-003** | P2 Quantization + IO | ✅ | `adr/ADR-042-003-p2-quantization-and-io-scaling.md` |
+| **042-004** | Change/Write Hotfix | ✅ Phase 0-1 | `adr/ADR-042-004-ph-change-write.md` |
+| **042-005** | Editor Overhaul | ✅ Phase A3, B2 | `adr/ADR-042-005-ph-editor-overhaul-and-change-write-completion.md` |
+| **042-006** | Layer 3 AI Features | ✅ | `adr/ADR-042-006-ph-layer3-ai-enhanced-features.md` |
+
+---
 
 ## Notes
 
-- Some older ADRs reference legacy tool names (`search_project`, `read_code`, `edit_code`). The recommended interface is the Five Pillars (ADR-040).
+- **Archived ADRs:** Older/superseded decisions moved to `docs/adr/archive/`
+- **Legacy Tools:** Some ADRs reference old tool names. Use Five Pillars (ADR-040) instead.
 

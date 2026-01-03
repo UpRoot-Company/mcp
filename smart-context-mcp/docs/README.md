@@ -14,6 +14,13 @@ Smart Context MCP exposes a small, intent-based tool surface (**Five Pillars**, 
 - `smart-context-mcp/docs/guides/configuration.md` — common env knobs (minimal + accurate)
 - `smart-context-mcp/docs/guides/troubleshooting.md` — common “it doesn’t work” fixes
 
+## Recent updates
+
+- **ADR-042 Series Completion** (2026-01-03): `adr/ADR-042-COMPLETION-SUMMARY.md`
+  - P0-P2 performance & scalability ✅
+  - Layer 3 AI-enhanced features ✅
+  - Production-ready (90%)
+
 ## Directory map
 
 - `agent/` — agent-facing docs (pillars + patterns)
