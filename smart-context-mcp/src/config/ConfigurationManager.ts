@@ -239,4 +239,49 @@ export class ConfigurationManager extends EventEmitter {
         // v1 모드에서는 기본적으로 true
         return ConfigurationManager.get('SMART_CONTEXT_EDITOR_ALLOW_AMBIGUOUS_AUTOPICK', true);
     }
+
+    // ADR-042-006: Layer 3 AI-Enhanced Features
+
+    /**
+     * Phase 1: Smart Fuzzy Match - Enable embedding-based symbol search
+     */
+    public static getLayer3SmartMatchEnabled(): boolean {
+        return ConfigurationManager.get('SMART_CONTEXT_LAYER3_SMART_MATCH', false);
+    }
+
+    /**
+     * Phase 1: Confidence threshold for auto-resolving with smart match
+     */
+    public static getLayer3SmartMatchThreshold(): number {
+        return ConfigurationManager.get('SMART_CONTEXT_LAYER3_SMART_MATCH_THRESHOLD', 0.85);
+    }
+
+    /**
+     * Phase 2: Symbol Impact Analysis - Enable AST-based breaking change detection
+     */
+    public static getLayer3SymbolImpactEnabled(): boolean {
+        return ConfigurationManager.get('SMART_CONTEXT_LAYER3_SYMBOL_IMPACT', false);
+    }
+
+    /**
+     * Phase 2: Maximum CallGraph traversal depth for impact analysis
+     */
+    public static getLayer3ImpactMaxDepth(): number {
+        return ConfigurationManager.get('SMART_CONTEXT_LAYER3_IMPACT_MAX_DEPTH', 3);
+    }
+
+    /**
+     * Phase 2.5/3: Code Generation - Enable AI-powered code generation
+     */
+    public static getLayer3CodeGenEnabled(): boolean {
+        return ConfigurationManager.get('SMART_CONTEXT_LAYER3_CODE_GEN', false);
+    }
+
+    /**
+     * Phase 3: Number of similar files to analyze for pattern extraction
+     */
+    public static getLayer3GenSimilarCount(): number {
+        return ConfigurationManager.get('SMART_CONTEXT_LAYER3_GEN_SIMILAR_COUNT', 5);
+    }
 }
+

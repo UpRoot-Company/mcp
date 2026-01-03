@@ -8,6 +8,8 @@ import { metrics } from '../../utils/MetricsCollector.js';
 import { StyleInference } from '../../generation/StyleInference.js';
 import { SimpleTemplateGenerator, type TemplateType, type TemplateContext } from '../../generation/SimpleTemplateGenerator.js';
 import { NodeFileSystem } from '../../platform/FileSystem.js';
+import { PatternExtractor, type ProjectPatterns } from '../../generation/PatternExtractor.js';
+import { TemplateGenerator } from '../../generation/TemplateGenerator.js';
 
 
 export class ReadPillar {
@@ -185,6 +187,10 @@ export class WritePillar {
       
       // ADR-042-006: Phase 2.5 - Quick Generate
       const quickGenerate = Boolean((constraints as any).quickGenerate);
+      
+      // ADR-042-006: Phase 3 - Smart Write (Full Code Generation)
+      const smartWrite = Boolean((constraints as any).smartWrite);
+      const styleReference = (constraints as any).styleReference as string[] | undefined;
 
       if (!targetPath) {
         return {
@@ -201,8 +207,45 @@ export class WritePillar {
 
       const resolvedPath = await this.resolveTargetPath(targetPath);
 
+      // ADR-042-006: Phase 3 - Smart Write (VectorSearch → PatternExtractor → TemplateGenerator)
+      if (smartWrite && !hasExplicitContent) {
+        const stopSmartWrite = metrics.startTimer("write.smart_write_ms");
+        
+        try {
+          const generated = await this.smartWriteCode(
+            resolvedPath,
+            originalIntent,
+            constraints,
+            context,
+            styleReference
+          );
+          stopSmartWrite();
+          
+          if (generated) {
+            content = generated.code;
+            
+            // Write generated code using safeWrite mode
+            return await this.writeGeneratedCode(
+              resolvedPath,
+              content,
+              originalIntent,
+              context,
+              generated.templateType,
+              generated.imports
+            );
+          } else {
+            // Fallback to quickGenerate or normal flow
+            stopSmartWrite();
+          }
+        } catch (error: any) {
+          stopSmartWrite();
+          console.warn(`Smart write failed: ${error.message}, falling back to quickGenerate`);
+          // Continue to quickGenerate fallback
+        }
+      }
+
       // ADR-042-006: Phase 2.5 - Quick code generation
-      if (quickGenerate && !hasExplicitContent) {
+      if ((quickGenerate || smartWrite) && !hasExplicitContent) {
         const stopGenerate = metrics.startTimer("write.quick_generate_ms");
         
         try {
@@ -403,6 +446,94 @@ export class WritePillar {
       };
     } finally {
       stopTotal();
+    }
+  }
+
+  /**
+   * Generate code using smart code generation with pattern extraction (Phase 3)
+   * Pipeline: VectorSearch → PatternExtractor → TemplateGenerator
+   */
+  private async smartWriteCode(
+    resolvedPath: string,
+    intent: string,
+    constraints: any,
+    context: OrchestrationContext,
+    styleReference?: string[]
+  ): Promise<{ code: string; templateType: TemplateType; imports: string[] } | null> {
+    try {
+      // Get similar files using VectorSearch or explicit styleReference
+      let similarFiles: string[] = [];
+      
+      if (styleReference && styleReference.length > 0) {
+        // Use explicit reference files
+        similarFiles = styleReference;
+      } else {
+        // Use VectorSearch to find similar files
+        const similarCount = 5; // Default: analyze top 5 similar files
+        try {
+          const searchResults = await this.runTool(context, 'search_project', {
+            query: intent,
+            type: 'semantic',
+            maxResults: similarCount
+          });
+          
+          if (searchResults?.results) {
+            similarFiles = searchResults.results
+              .map((r: any) => r.path)
+              .filter((p: string) => p && p !== resolvedPath)
+              .slice(0, similarCount);
+          }
+        } catch (err) {
+          // Search failed, fall back to quickGenerate
+        }
+      }
+
+      if (similarFiles.length === 0) {
+        return null; // Fall back to quickGenerate
+      }
+
+      // Extract patterns from similar files
+      const dirPath = path.dirname(resolvedPath);
+      const fs = new NodeFileSystem(dirPath);
+      const patternExtractor = new PatternExtractor(fs, dirPath, {});
+      const patterns: ProjectPatterns = await patternExtractor.extractPatterns(similarFiles);
+
+      if (!patterns || Object.keys(patterns).length === 0) {
+        return null; // Fall back to quickGenerate
+      }
+
+      // Infer style from similar files
+      const styleInference = new StyleInference(fs, dirPath, {});
+      const styleResult = await styleInference.inferStyle(path.extname(resolvedPath));
+      const { confidence, ...style } = styleResult;
+
+      // Parse intent to get template context
+      const parsed = this.parseGenerationIntent(intent, resolvedPath);
+      if (!parsed) {
+        return null;
+      }
+      const { templateType, context: templateContext } = parsed;
+
+      // Generate code using TemplateGenerator with patterns
+      const templateGenerator = new TemplateGenerator(style);
+      const generated = templateGenerator.generateAdvanced(templateType, {
+        ...templateContext,
+        patterns,
+        usePatterns: true
+      });
+
+      if (!generated || !generated.code) {
+        return null; // Fall back to quickGenerate
+      }
+
+      return {
+        code: generated.code,
+        templateType,
+        imports: generated.imports || []
+      };
+    } catch (err) {
+      // Generation failed, fall back to quickGenerate
+      return null;
     }
   }
 
@@ -682,9 +813,17 @@ export class WritePillar {
     content: string,
     intent: string,
     context: OrchestrationContext,
-    templateType: TemplateType
+    templateType: TemplateType,
+    imports?: string[]
   ): Promise<any> {
     try {
+      // Prepend imports if provided
+      let finalContent = content;
+      if (imports && imports.length > 0) {
+        const importStatements = imports.join('\n');
+        finalContent = importStatements + '\n\n' + content;
+      }
+
       // Check if file exists
       let existingContent = '';
       try {
@@ -709,7 +848,7 @@ export class WritePillar {
       // Use full range edit with undo support
       const edit = {
         targetString: existingContent,
-        replacementString: content,
+        replacementString: finalContent,
         indexRange: { start: 0, end: existingContent.length },
         expectedHash: existingContent ? this.computeHash(existingContent) : undefined
       };

@@ -1281,6 +1281,7 @@ export class ChangePillar {
     v2Mode: string;
   }): Promise<any> {
     const { intent, context, rawEdits, targetFiles, dryRun, includeImpact, v2Mode } = args;
+    const { constraints } = intent;
     const stopResolve = metrics.startTimer("change.resolve_ms");
     
     try {
@@ -1300,7 +1301,9 @@ export class ChangePillar {
       // Resolve all edits
       const resolveOptions = {
         allowAmbiguousAutoPick: ConfigurationManager.getAllowAmbiguousAutoPick(),
-        timeoutMs: ConfigurationManager.getResolveTimeoutMs()
+        timeoutMs: ConfigurationManager.getResolveTimeoutMs(),
+        // ADR-042-006: Phase 1 - Smart Fuzzy Match
+        smartMatch: constraints.smartMatch ?? ConfigurationManager.getLayer3SmartMatchEnabled(),
       };
 
       const allResolvedEdits: any[] = [];

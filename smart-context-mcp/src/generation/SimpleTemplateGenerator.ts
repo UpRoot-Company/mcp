@@ -29,6 +29,8 @@ export interface TemplateContext {
     export?: boolean;
     /** JSDoc comment */
     description?: string;
+    /** Whether function is async */
+    async?: boolean;
 }
 
 /**
@@ -67,7 +69,7 @@ export type TemplateType = 'function' | 'class' | 'interface';
  * - Support for function, class, interface
  */
 export class SimpleTemplateGenerator {
-    constructor(private readonly style: CodeStyle) {}
+    constructor(protected readonly style: CodeStyle) {}
 
     /**
      * Generate code from template type and context
@@ -309,7 +311,7 @@ export class SimpleTemplateGenerator {
     /**
      * Get indentation string
      */
-    private getIndent(level: number = 1): string {
+    protected getIndent(level: number = 1): string {
         if (this.style.indent === 'tabs') {
             return '\t'.repeat(level);
         } else {
@@ -320,7 +322,7 @@ export class SimpleTemplateGenerator {
     /**
      * Get line ending character(s)
      */
-    private getLineEnding(): string {
+    protected getLineEnding(): string {
         return this.style.lineEndings === 'crlf' ? '\r\n' : '\n';
     }
 

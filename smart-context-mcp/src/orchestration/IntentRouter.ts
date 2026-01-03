@@ -60,6 +60,11 @@ export interface IntentConstraints {
   allowBinary?: boolean;
   allowGlobs?: boolean;
   integrity?: IntegrityOptions;
+  // ADR-042-006: Layer 3 AI-Enhanced Features
+  smartMatch?: boolean;        // Phase 1: Enable embedding-based symbol search
+  quickGenerate?: boolean;      // Phase 2.5: Enable quick code generation
+  smartWrite?: boolean;         // Phase 3: Enable full code generation with pattern extraction
+  styleReference?: string[];    // Phase 3: Explicit reference files for pattern extraction
 }
 
 
