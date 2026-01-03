@@ -128,6 +128,8 @@ export interface MatchConfidence {
 }
 
 export interface Edit {
+    /** Natural language description of what to edit (for embedding-based search) */
+    intent?: string;
     targetString: string;
     replacementString: string;
     lineRange?: LineRange;
@@ -898,4 +900,6 @@ export interface ResolveResult {
 export interface ResolveOptions {
     allowAmbiguousAutoPick?: boolean;
     timeoutMs?: number;
+    /** Enable embedding-based symbol search (ADR-042-006 Phase 1) */
+    smartMatch?: boolean;
 }

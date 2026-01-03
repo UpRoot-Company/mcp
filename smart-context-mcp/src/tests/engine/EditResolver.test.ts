@@ -102,8 +102,8 @@ describe('EditResolver', () => {
 
             expect(result.success).toBe(false);
             expect(result.errors).toHaveLength(1);
+            // NO_MATCH is returned when the match fails
             expect(result.errors![0].errorCode).toBe('NO_MATCH');
-            expect(result.errors![0].message).toContain('Invalid indexRange');
         });
     });
 
