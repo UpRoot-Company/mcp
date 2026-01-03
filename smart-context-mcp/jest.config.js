@@ -4,8 +4,8 @@ export default {
   moduleNameMapper: {
     '^(\\.{1,2}/.*)\\.js$': '$1',
   },
-  setupFilesAfterEnv: ['<rootDir>/dist/src/tests/setup.js'],
-  testMatch: ['**/dist/src/tests/**/*.test.js'],
-  testPathIgnorePatterns: ['/dist/src/tests/performance/'],
+  setupFilesAfterEnv: ['<rootDir>/dist/tests/setup.js'],
+  testMatch: ['**/dist/tests/**/*.test.js'],
+  testPathIgnorePatterns: ['/dist/tests/performance/'],
   verbose: true
 };

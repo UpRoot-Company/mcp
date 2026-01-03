@@ -10,9 +10,12 @@
 import { performance } from 'perf_hooks';
 import * as fs from 'fs';
 import * as path from 'path';
+import { fileURLToPath } from 'url';
 import { EditResolver } from '../src/engine/EditResolver.js';
-import { Editor } from '../src/engine/Editor.js';
+import { EditorEngine } from '../src/engine/Editor.js';
 import { NodeFileSystem } from '../src/platform/FileSystem.js';
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 async function runBenchmark(target, resolver, editor, rootPath) {
     const startTime = performance.now();
     try {
@@ -20,10 +23,11 @@ async function runBenchmark(target, resolver, editor, rootPath) {
             const filePath = path.join(rootPath, target.file);
             const content = fs.readFileSync(filePath, 'utf-8');
             const edits = target.edits.map(e => ({
-                oldCode: e.oldCode,
-                newCode: e.newCode,
+                targetString: e.oldCode,
+                replacementString: e.newCode,
+                fuzzyMode: e.fuzzyMode,
             }));
-            const result = await resolver.resolveAll(filePath, edits, content);
+            const result = await resolver.resolveAll(filePath, edits);
             const duration = performance.now() - startTime;
             return {
                 target: target.type,
@@ -32,8 +36,8 @@ async function runBenchmark(target, resolver, editor, rootPath) {
                 threshold_ms: target.threshold_ms,
                 status: duration < target.threshold_ms ? 'PASS' : 'FAIL',
                 details: {
-                    resolved: result.resolved.length,
-                    errors: result.errors.length,
+                    resolved: result.resolvedEdits?.length || 0,
+                    errors: result.errors?.length || 0,
                 },
             };
         }
@@ -46,10 +50,11 @@ async function runBenchmark(target, resolver, editor, rootPath) {
                 }
                 const content = fs.readFileSync(filePath, 'utf-8');
                 const edits = target.edits.map(e => ({
-                    oldCode: e.oldCode,
-                    newCode: e.newCode,
+                    targetString: e.oldCode,
+                    replacementString: e.newCode,
+                    fuzzyMode: e.fuzzyMode,
                 }));
-                const result = await resolver.resolveAll(filePath, edits, content);
+                const result = await resolver.resolveAll(filePath, edits);
                 results.push(result);
             }
             const duration = performance.now() - startTime;
@@ -61,8 +66,8 @@ async function runBenchmark(target, resolver, editor, rootPath) {
                 status: duration < target.threshold_ms ? 'PASS' : 'FAIL',
                 details: {
                     filesProcessed: results.length,
-                    totalResolved: results.reduce((sum, r) => sum + r.resolved.length, 0),
-                    totalErrors: results.reduce((sum, r) => sum + r.errors.length, 0),
+                    totalResolved: results.reduce((sum, r) => sum + (r.resolvedEdits?.length || 0), 0),
+                    totalErrors: results.reduce((sum, r) => sum + (r.errors?.length || 0), 0),
                 },
             };
         }
@@ -70,12 +75,15 @@ async function runBenchmark(target, resolver, editor, rootPath) {
             const filePath = path.join(rootPath, target.file);
             const content = fs.readFileSync(filePath, 'utf-8');
             const edits = target.edits.map(e => ({
-                oldCode: e.oldCode,
-                newCode: e.newCode,
+                targetString: e.oldCode,
+                replacementString: e.newCode,
+                fuzzyMode: e.fuzzyMode,
             }));
-            const result = await resolver.resolveAll(filePath, edits, content);
+            const result = await resolver.resolveAll(filePath, edits, {
+                allowAmbiguousAutoPick: false,
+            });
             const duration = performance.now() - startTime;
-            const hasExpectedError = result.errors.some(e => e.type === target.expectedError);
+            const hasExpectedError = result.errors?.some(e => e.errorCode === target.expectedError);
             return {
                 target: target.type,
                 description: target.description,
@@ -85,7 +93,7 @@ async function runBenchmark(target, resolver, editor, rootPath) {
                 details: {
                     expectedError: target.expectedError,
                     foundError: hasExpectedError,
-                    errorTypes: result.errors.map(e => e.type),
+                    errorTypes: result.errors?.map(e => e.errorCode) || [],
                 },
             };
         }
@@ -93,12 +101,13 @@ async function runBenchmark(target, resolver, editor, rootPath) {
             const filePath = path.join(rootPath, target.file);
             const content = fs.readFileSync(filePath, 'utf-8');
             const edits = target.edits.map(e => ({
-                oldCode: e.oldCode,
-                newCode: e.newCode,
+                targetString: e.oldCode,
+                replacementString: e.newCode,
+                fuzzyMode: e.fuzzyMode,
             }));
-            const result = await resolver.resolveAll(filePath, edits, content);
+            const result = await resolver.resolveAll(filePath, edits);
             const duration = performance.now() - startTime;
-            const hasExpectedError = result.errors.some(e => e.type === target.expectedError);
+            const hasExpectedError = result.errors?.some(e => e.errorCode === target.expectedError);
             return {
                 target: target.type,
                 description: target.description,
@@ -134,7 +143,10 @@ async function runBenchmark(target, resolver, editor, rootPath) {
     }
 }
 async function main() {
-    const rootPath = path.resolve(__dirname, '..');
+    const distRoot = path.resolve(__dirname, '..');
+    const rootPath = path.basename(distRoot) === 'dist'
+        ? path.resolve(distRoot, '..')
+        : distRoot;
     const scenarioPath = path.join(rootPath, 'benchmarks/scenarios/v2-editor.json');
     if (!fs.existsSync(scenarioPath)) {
         console.error(`Scenario not found: ${scenarioPath}`);
@@ -142,9 +154,10 @@ async function main() {
     }
     const scenario = JSON.parse(fs.readFileSync(scenarioPath, 'utf-8'));
     console.log(`\n🚀 ${scenario.name}: ${scenario.description}\n`);
-    const fileSystem = new NodeFileSystem();
-    const editor = new Editor(fileSystem);
-    const resolver = new EditResolver(editor, fileSystem);
+    const fileSystem = new NodeFileSystem(rootPath);
+    const backupsDir = path.join(rootPath, '.backups');
+    const editor = new EditorEngine(backupsDir, fileSystem);
+    const resolver = new EditResolver(fileSystem, editor);
     const results = [];
     for (const target of scenario.targets) {
         console.log(`\n📊 ${target.description}`);

@@ -10,6 +10,6 @@
     "types": ["jest", "node"],
     "moduleResolution": "NodeNext"                           /* Specify how modules are resolved. */
   },
-  "include": ["src/**/*.ts", "benchmarks/**/*.ts"],
-  "exclude": ["node_modules"]
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules", "benchmarks", "test-*.ts"]
 }
