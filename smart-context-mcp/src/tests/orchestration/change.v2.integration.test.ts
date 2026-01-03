@@ -247,14 +247,15 @@ function test3() { return 42; }
       const start = Date.now();
       const result = await editResolver.resolveAll(file, [{
         targetString: 'xyz',  // Too short
-        replacementString: 'abc'
+        replacementString: 'abc',
+        fuzzyMode: 'levenshtein'
       }], { timeoutMs: 1500 });
       const duration = Date.now() - start;
 
       // Assert: Should fail fast (not timeout)
       expect(duration).toBeLessThan(500); // No expensive levenshtein
       expect(result.success).toBe(false);
-      expect(result.errors![0].errorCode).toBe('NO_MATCH');
+      expect(result.errors![0].errorCode).toBe('LEVENSHTEIN_BLOCKED');
     });
 
     test('should respect resolve timeout', async () => {

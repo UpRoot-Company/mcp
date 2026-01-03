@@ -4,34 +4,30 @@
  */
 
 export class Calculator {
-  // First occurrence of "add" method
-  addNumbers(a: number, b: number): number {
+  // Multiple methods with similar signatures to trigger ambiguity
+  add(a: number, b: number): number {
     return a + b;
   }
 
-  // Second occurrence with similar name
-  addStrings(a: string, b: string): string {
-    return a + b;
-  }
-
-  // Third occurrence with different signature
   addAll(...numbers: number[]): number {
     return numbers.reduce((sum, n) => sum + n, 0);
   }
 }
 
-export class StringUtils {
-  // Another "add" context - should create ambiguity
-  static add(str1: string, str2: string): string {
-    return str1 + str2;
+export class MathHelper {
+  // Another class with same method name - creates ambiguity
+  add(a: number, b: number): number {
+    return a + b;
   }
+}
 
+export class StringUtils {
   static concat(...parts: string[]): string {
     return parts.join("");
   }
 }
 
-// Multiple similar patterns that can cause ambiguity when searching
+// Standalone functions with similar patterns
 export function processStringData(input: string): string {
   return input.toUpperCase();
 }

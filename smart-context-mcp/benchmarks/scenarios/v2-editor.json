@@ -39,8 +39,8 @@
       "file": "benchmarks/test-fixtures/ambiguous-matches.ts",
       "edits": [
         {
-          "oldCode": "add(",
-          "newCode": "sum("
+          "oldCode": "add(a: number, b: number)",
+          "newCode": "sum(a: number, b: number)"
         }
       ],
       "expectedError": "AMBIGUOUS_MATCH"
@@ -53,7 +53,8 @@
       "edits": [
         {
           "oldCode": "console.log(\"Service initialized\")",
-          "newCode": "console.log(\"Service ready\")"
+          "newCode": "console.log(\"Service ready\")",
+          "fuzzyMode": "levenshtein"
         }
       ],
       "expectedError": "LEVENSHTEIN_BLOCKED"

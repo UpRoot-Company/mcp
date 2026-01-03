@@ -78,18 +78,22 @@ export class EditResolver {
 
                 try {
                     // Apply cost guardrails for levenshtein
-                    if (edit.fuzzyMode === "levenshtein" && !this.shouldAllowLevenshtein(fileSize, edit.targetString?.length ?? 0)) {
-                        errors.push({
-                            filePath: absPath,
-                            editIndex: i,
-                            errorCode: "NO_MATCH",
-                            message: `Levenshtein disabled: file too large (${fileSize} bytes) or target too short (${edit.targetString?.length ?? 0} chars)`,
-                            suggestion: {
-                                tool: "change",
-                                next: "Provide lineRange or use exact match instead of fuzzy"
-                            }
-                        });
-                        continue;
+                    if (edit.fuzzyMode === "levenshtein") {
+                        const targetLen = edit.targetString?.length ?? 0;
+                        if (!this.shouldAllowLevenshtein(fileSize, targetLen)) {
+                            errors.push({
+                                filePath: absPath,
+                                editIndex: i,
+                                errorCode: "LEVENSHTEIN_BLOCKED",
+                                message: `Levenshtein blocked: file size=${fileSize} bytes (max=${ConfigurationManager.getMaxLevenshteinFileBytes()}), target length=${targetLen} (min=${ConfigurationManager.getMinLevenshteinTargetLen()})`,
+                                suggestion: {
+                                    tool: "change",
+                                    lineRange: edit.lineRange,
+                                    next: "Provide lineRange to narrow search scope, or use exact match instead of fuzzy"
+                                }
+                            });
+                            continue;
+                        }
                     }
 
                     // Plan the edit using Editor's planning API

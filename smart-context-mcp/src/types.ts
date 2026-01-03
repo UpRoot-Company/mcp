@@ -879,7 +879,7 @@ export interface ResolvedEdit {
 export interface ResolveError {
     filePath: string;
     editIndex: number;
-    errorCode: "NO_MATCH" | "AMBIGUOUS_MATCH" | "HASH_MISMATCH" | "INVALID_RANGE" | "RESOLVE_TIMEOUT";
+    errorCode: "NO_MATCH" | "AMBIGUOUS_MATCH" | "HASH_MISMATCH" | "INVALID_RANGE" | "RESOLVE_TIMEOUT" | "LEVENSHTEIN_BLOCKED";
     message: string;
     suggestion?: {
         tool?: "read" | "change";

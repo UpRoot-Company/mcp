@@ -22,6 +22,7 @@ const __dirname = path.dirname(__filename);
 interface EditRequest {
   oldCode: string;
   newCode: string;
+  fuzzyMode?: "whitespace" | "levenshtein";
 }
 
 interface BenchmarkTarget {
@@ -30,7 +31,7 @@ interface BenchmarkTarget {
   threshold_ms: number;
   file?: string;
   files?: string[];
-  edits: Array<{ oldCode: string; newCode: string }>;
+  edits: Array<{ oldCode: string; newCode: string; fuzzyMode?: "whitespace" | "levenshtein" }>;
   expectedError?: string;
 }
 
@@ -66,9 +67,10 @@ async function runBenchmark(
       const edits = target.edits.map(e => ({
         targetString: e.oldCode,
         replacementString: e.newCode,
+        fuzzyMode: e.fuzzyMode,
       }));
       
-      const result = await resolver.resolveAll(filePath, edits, );
+      const result = await resolver.resolveAll(filePath, edits);
       const duration = performance.now() - startTime;
       
       return {
@@ -96,6 +98,7 @@ async function runBenchmark(
         const edits = target.edits.map(e => ({
           targetString: e.oldCode,
           replacementString: e.newCode,
+          fuzzyMode: e.fuzzyMode,
         }));
         
         const result = await resolver.resolveAll(filePath, edits);
@@ -124,9 +127,12 @@ async function runBenchmark(
       const edits = target.edits.map(e => ({
         targetString: e.oldCode,
         replacementString: e.newCode,
+        fuzzyMode: e.fuzzyMode,
       }));
       
-      const result = await resolver.resolveAll(filePath, edits, );
+      const result = await resolver.resolveAll(filePath, edits, {
+        allowAmbiguousAutoPick: false,
+      });
       const duration = performance.now() - startTime;
       
       const hasExpectedError = result.errors?.some(e => e.errorCode === target.expectedError);
@@ -151,9 +157,10 @@ async function runBenchmark(
       const edits = target.edits.map(e => ({
         targetString: e.oldCode,
         replacementString: e.newCode,
+        fuzzyMode: e.fuzzyMode,
       }));
       
-      const result = await resolver.resolveAll(filePath, edits, );
+      const result = await resolver.resolveAll(filePath, edits);
       const duration = performance.now() - startTime;
       
       const hasExpectedError = result.errors?.some(e => e.errorCode === target.expectedError);
@@ -194,7 +201,10 @@ async function runBenchmark(
 }
 
 async function main() {
-  const rootPath = path.resolve(__dirname, '..');
+  const distRoot = path.resolve(__dirname, '..');
+  const rootPath = path.basename(distRoot) === 'dist'
+    ? path.resolve(distRoot, '..')
+    : distRoot;
   const scenarioPath = path.join(rootPath, 'benchmarks/scenarios/v2-editor.json');
   
   if (!fs.existsSync(scenarioPath)) {

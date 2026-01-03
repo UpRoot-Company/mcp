@@ -164,8 +164,8 @@ describe('EditResolver', () => {
 
             expect(result.success).toBe(false);
             expect(result.errors).toHaveLength(1);
-            expect(result.errors![0].errorCode).toBe('NO_MATCH');
-            expect(result.errors![0].message).toContain('Levenshtein disabled');
+            expect(result.errors![0].errorCode).toBe('LEVENSHTEIN_BLOCKED');
+            expect(result.errors![0].message).toContain('Levenshtein blocked');
         });
 
         it('should allow levenshtein with adequate target length', async () => {
