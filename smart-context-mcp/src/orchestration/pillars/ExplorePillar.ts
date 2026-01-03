@@ -4,6 +4,8 @@ import { LRUCache } from "lru-cache";
 import { InternalToolRegistry } from "../InternalToolRegistry.js";
 import { OrchestrationContext } from "../OrchestrationContext.js";
 import { ParsedIntent } from "../IntentRouter.js";
+import { BudgetManager } from "../BudgetManager.js";
+import { analyzeQuery } from "../../engine/search/QueryMetrics.js";
 import { IntegrityEngine } from "../../integrity/IntegrityEngine.js";
 import type { IntegrityReport } from "../../integrity/IntegrityTypes.js";
 
@@ -131,6 +133,28 @@ export class ExplorePillar {
         const allowGlobs = constraints.allowGlobs === true;
         const integrityOptions = IntegrityEngine.resolveOptions(constraints.integrity, "explore");
 
+        const queryMetrics = query ? analyzeQuery(query) : undefined;
+        let projectStats = context.getState<any>("project_stats");
+        if (!projectStats) {
+            try {
+                projectStats = await this.runTool(context, "project_stats", {});
+                if (projectStats) {
+                    context.setState("project_stats", projectStats);
+                }
+            } catch {
+                projectStats = undefined;
+            }
+        }
+        const searchBudget = queryMetrics
+            ? BudgetManager.create({
+                category: "navigate",
+                queryLength: queryMetrics.length,
+                tokenCount: queryMetrics.tokenCount,
+                strongQuery: queryMetrics.strong,
+                projectStats: projectStats?.fileCount ? { fileCount: projectStats.fileCount } : undefined
+            })
+            : undefined;
+
         if (!query && paths.length === 0) {
             return {
                 success: false,
@@ -155,6 +179,20 @@ export class ExplorePillar {
         const includeCode = include.code !== false;
         const includeComments = include.comments === true;
         const includeLogs = include.logs === true;
+
+        if (searchBudget) {
+            const desiredFileBudget = Math.min(
+                maxFiles,
+                Math.max(12, maxResults * 2)
+            );
+            searchBudget.maxCandidates = Math.min(searchBudget.maxCandidates, desiredFileBudget);
+            searchBudget.maxFilesRead = Math.min(searchBudget.maxFilesRead, desiredFileBudget);
+            const perFileCharBudget = Math.max(400, Math.floor(maxChars / Math.max(1, maxResults)));
+            searchBudget.maxBytesRead = Math.min(
+                searchBudget.maxBytesRead,
+                desiredFileBudget * perFileCharBudget
+            );
+        }
 
         const effectivePackId = query
             ? (packId ?? computeExplorePackId(query, {
@@ -267,7 +305,8 @@ export class ExplorePillar {
                     const codeResults = await this.runTool(context, "search_project", {
                         query,
                         maxResults: packMaxResults,
-                        type: "file"
+                        type: "file",
+                        budget: searchBudget
                     });
                     const results = Array.isArray(codeResults?.results) ? codeResults.results : [];
                     const codeItems = results.map((item: any) => ({

@@ -299,25 +299,20 @@ export class SearchEngine {
         const previewLength = this.normalizeSnippetLength(args.snippetLength);
         const matchesPerFileLimit = args.matchesPerFile ?? this.maxMatchesPerFile;
 
-        console.error(`[SearchEngine] Collecting candidates for keywords: [${normalizedKeywords.join(', ')}]`);
         const stopCollectCandidates = metrics.startTimer("search.scout.collect_candidates_ms");
         const trigramReady = this.trigramIndex.isReadyState();
         let candidates = await this.candidateCollector.collectHybridCandidates(normalizedKeywords, {
             waitForTrigram: trigramReady
         });
-        console.error(`[SearchEngine] Collected ${candidates.size} candidates`);
 
         // Phase 1 Smart Fuzzy Match: Symbol-based search for symbol queries
-        console.error(`[SearchEngine] intent=${intent}, symbolMapper=${!!this.intentToSymbolMapper}, symbolEmbeddingIndex=${!!this.symbolEmbeddingIndex}`);
         if (intent === "symbol" && this.intentToSymbolMapper && this.symbolEmbeddingIndex) {
             try {
-                console.error(`[SearchEngine] Starting symbol search...`);
                 const stopSymbolSearch = metrics.startTimer("search.scout.symbol_search_ms");
                 const symbolResults = await this.intentToSymbolMapper.mapToSymbols(effectiveQuery, {
                     maxResults: args.maxResults ?? 20,
                     minConfidence: 0.3,
                 });
-                console.error(`[SearchEngine] Symbol search returned ${symbolResults.length} results`);
                 stopSymbolSearch();
 
                 if (symbolResults.length > 0) {
