@@ -93,8 +93,9 @@ export class TransformersEmbeddingProvider implements EmbeddingProviderClient {
             return explicit.trim();
         }
         const currentDir = path.dirname(url.fileURLToPath(import.meta.url));
-        const distRoot = path.resolve(currentDir, "..");
-        const candidate = path.join(distRoot, "models");
+        // dist/embeddings -> dist -> project_root
+        const projectRoot = path.resolve(currentDir, "..", "..");
+        const candidate = path.join(projectRoot, "models");
         return candidate;
     }
 }

@@ -181,6 +181,7 @@ export class WebTreeSitterBackend implements AstBackend {
 
         try {
             moduleDir = path.dirname(fileURLToPath(import.meta.url));
+            // dist/ast -> dist -> project_root
             candidates.push(path.resolve(moduleDir, '..', '..', 'wasm', `tree-sitter-${langName}.wasm`));
             candidates.push(path.resolve(moduleDir, '..', '..', 'node_modules', 'tree-sitter-wasms', 'out', `tree-sitter-${langName}.wasm`));
         } catch {
