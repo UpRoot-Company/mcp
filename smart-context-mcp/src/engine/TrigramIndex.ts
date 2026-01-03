@@ -168,9 +168,22 @@ export class TrigramIndex {
         this.schedulePersist();
     }
 
-    public async search(term: string, limit: number = 200): Promise<SearchCandidate[]> {
+    public isReadyState(): boolean {
+        return this.isReady;
+    }
+
+    public isBuildingState(): boolean {
+        return this.isBuilding;
+    }
+
+    public async search(term: string, limit: number = 200, options?: { waitForReady?: boolean }): Promise<SearchCandidate[]> {
         if (!this.options.enabled) return [];
-        await this.ensureReady();
+        const waitForReady = options?.waitForReady !== false;
+        if (waitForReady) {
+            await this.ensureReady();
+        } else if (!this.isReady) {
+            return [];
+        }
         
         const query = TrigramIndex.normalizeQuery(term);
         if (query.length < 3) {

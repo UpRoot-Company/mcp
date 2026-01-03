@@ -291,8 +291,13 @@ export class SearchEngine {
         const previewLength = this.normalizeSnippetLength(args.snippetLength);
         const matchesPerFileLimit = args.matchesPerFile ?? this.maxMatchesPerFile;
 
+        console.error(`[SearchEngine] Collecting candidates for keywords: [${normalizedKeywords.join(', ')}]`);
         const stopCollectCandidates = metrics.startTimer("search.scout.collect_candidates_ms");
-        let candidates = await this.candidateCollector.collectHybridCandidates(normalizedKeywords);
+        const trigramReady = this.trigramIndex.isReadyState();
+        let candidates = await this.candidateCollector.collectHybridCandidates(normalizedKeywords, {
+            waitForTrigram: trigramReady
+        });
+        console.error(`[SearchEngine] Collected ${candidates.size} candidates`);
 
         // Phase 1 Smart Fuzzy Match: Symbol-based search for symbol queries
         if (intent === "symbol" && this.intentToSymbolMapper && this.symbolEmbeddingIndex) {

@@ -13,13 +13,21 @@ export class CandidateCollector {
         private fileSystem?: IFileSystem // Add optional fileSystem injection
     ) {}
 
-    public async collectHybridCandidates(keywords: string[]): Promise<Set<string>> {
+    public async collectHybridCandidates(
+        keywords: string[],
+        options?: { waitForTrigram?: boolean }
+    ): Promise<Set<string>> {
         const candidates = new Set<string>();
         const debug = process.env.SMART_CONTEXT_DEBUG === 'true';
+        // CHANGED: Don't wait for trigram index to be ready on first call
+        // This prevents 20+ second timeouts on initial explore calls
+        const waitForTrigram = options?.waitForTrigram === true; // Changed from !== false
 
         // Source 1: Trigram index
         const trigramQuery = keywords.join(' ');
-        const trigramResults = await this.trigramIndex.search(trigramQuery, MAX_CANDIDATE_FILES * 2);
+        const trigramResults = await this.trigramIndex.search(trigramQuery, MAX_CANDIDATE_FILES * 2, {
+            waitForReady: waitForTrigram
+        });
         for (const result of trigramResults) {
             candidates.add(result.filePath);
         }
@@ -64,9 +72,13 @@ export class CandidateCollector {
 
     public async collectFilesystemCandidates(
         rootDir: string,
-        shouldInclude: (relativePath: string) => boolean
+        shouldInclude: (relativePath: string) => boolean,
+        options?: { maxCandidates?: number; timeoutMs?: number }
     ): Promise<Set<string>> {
         const candidates = new Set<string>();
+        const maxCandidates = options?.maxCandidates ?? MAX_CANDIDATE_FILES;
+        const timeoutMs = options?.timeoutMs ?? 0;
+        const startedAt = Date.now();
         
         // If fileSystem is provided, use it. Otherwise, assume fs/promises (not ideal for tests)
         // But for consistency with SearchEngine, we should rely on IFileSystem.
@@ -79,6 +91,9 @@ export class CandidateCollector {
         const stack: string[] = [rootDir];
 
         while (stack.length > 0) {
+            if (timeoutMs > 0 && Date.now() - startedAt >= timeoutMs) {
+                break;
+            }
             const current = stack.pop()!;
             let entries: string[];
             try {
@@ -110,6 +125,9 @@ export class CandidateCollector {
 
                 if (shouldInclude(relativeToRoot)) {
                     candidates.add(relativeToRoot);
+                    if (candidates.size >= maxCandidates) {
+                        return candidates;
+                    }
                 }
             }
         }
