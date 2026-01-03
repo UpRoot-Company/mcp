@@ -1,5 +1,6 @@
 import path from "path";
 import crypto from "crypto";
+import { AstManager } from "../../ast/AstManager.js";
 import { LRUCache } from "lru-cache";
 import { InternalToolRegistry } from "../InternalToolRegistry.js";
 import { OrchestrationContext } from "../OrchestrationContext.js";
@@ -309,14 +310,37 @@ export class ExplorePillar {
                         budget: searchBudget
                     });
                     const results = Array.isArray(codeResults?.results) ? codeResults.results : [];
-                    const codeItems = results.map((item: any) => ({
-                        kind: "file_preview",
-                        filePath: item.path ?? "",
-                        preview: truncate(item.context ?? "", maxItemChars),
-                        range: item.line ? { startLine: item.line, endLine: item.line } : undefined,
-                        score: item.score,
-                        why: [item.type ?? "search_project"]
+                    
+                    // ADR-043: Pre-fetch Topology (LOD 1) for search results
+                    const codeItems = await Promise.all(results.map(async (item: any) => {
+                        const codeItem: ExploreItem = {
+                            kind: "file_preview",
+                            filePath: item.path ?? "",
+                            preview: truncate(item.context ?? "", maxItemChars),
+                            range: item.line ? { startLine: item.line, endLine: item.line } : undefined,
+                            score: item.score,
+                            why: [item.type ?? "search_project"],
+                            metadata: {}
+                        };
+
+                        try {
+                            const manager = AstManager.getInstance();
+                            const lodResult = await manager.ensureLOD({ path: item.path, minLOD: 1 }) as any;
+                            if (lodResult.currentLOD >= 1 && lodResult.topology) {
+                                codeItem.metadata = {
+                                    ...codeItem.metadata,
+                                    symbols: lodResult.topology.topLevelSymbols?.map((s: any) => s.name).slice(0, 10),
+                                    exports: lodResult.topology.exports?.map((e: any) => e.name).slice(0, 5),
+                                    lod: lodResult.currentLOD,
+                                    dependencyCount: lodResult.topology.imports?.length ?? 0
+                                };
+                            }
+                        } catch {
+                            // LOD failure is non-fatal for exploration
+                        }
+                        return codeItem;
                     }));
+
                     codeForPack = codeItems;
                     response.data.code = codeItems.slice(0, maxResults);
                     if (codeResults?.degraded) {

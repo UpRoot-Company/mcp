@@ -1,4 +1,5 @@
 
+import { AstManager } from '../../ast/AstManager.js';
 import { InternalToolRegistry } from '../InternalToolRegistry.js';
 import { OrchestrationContext } from '../OrchestrationContext.js';
 import { ParsedIntent } from '../IntentRouter.js';
@@ -145,11 +146,34 @@ export class UnderstandPillar {
     }
 
     if (includeDependencies && allowGraphs) {
-      deps = await this.runTool(context, 'analyze_relationship', {
-        target: filePath,
-        mode: 'dependencies',
-        direction: 'both'
-      }, progress);
+      // ADR-043: Directly use UCG for dependency analysis
+      const manager = AstManager.getInstance();
+      await manager.ensureLOD({ path: filePath, minLOD: 1 }); // Ensure base topology
+      const node = manager.getUCG().getNode(filePath);
+      
+            if (node) {
+        // Collect LOD 1 info for all direct dependencies
+        const directDeps = [...node.dependencies];
+        await Promise.all(directDeps.map(dep => manager.ensureLOD({ path: dep, minLOD: 1 })));
+        
+        deps = {
+          success: true,
+          edges: directDeps.map(dep => ({
+            from: filePath,
+            to: dep,
+            type: 'dependency',
+            metadata: (manager.getUCG().getNode(dep) as any)?.topology ?? {}
+          }))
+        };
+      }
+ else {
+        // Fallback to legacy tool if UCG node missing
+        deps = await this.runTool(context, 'analyze_relationship', {
+          target: filePath,
+          mode: 'dependencies',
+          direction: 'both'
+        }, progress);
+      }
     } else if (includeDependencies && !allowGraphs) {
       degraded = true;
       refinementReason = refinementReason ?? 'budget_exceeded';

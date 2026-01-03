@@ -88,7 +88,8 @@ export class SkeletonGenerator {
                 : Boolean(maybeHasError);
 
             if (rootHasError) {
-                throw new Error('Tree-sitter parse error detected while building skeleton');
+                console.warn(`[SkeletonGenerator] Tree-sitter parse error in ${filePath}. Returning raw content.`);
+                return content;
             }
 
             const queryKey = `${langId}:${config.query}`;

@@ -14,6 +14,7 @@ import type { ResolveError } from '../../types.js';
 import { EditCoordinator } from '../../engine/EditCoordinator.js';
 import { EditorEngine } from '../../engine/Editor.js';
 import { HistoryEngine } from '../../engine/History.js';
+import { AstManager } from '../../ast/AstManager.js';
 import { NodeFileSystem } from '../../platform/FileSystem.js';
 import { SymbolImpactAnalyzer, type SymbolImpactRequest, type SymbolImpactResult } from '../../engine/SymbolImpactAnalyzer.js';
 import { AstDiffEngine } from '../../ast/AstDiffEngine.js';
@@ -176,8 +177,35 @@ export class ChangePillar {
     const impactPromise = !dryRun && budget.allowImpact
       ? this.runTool(context, 'impact_analyzer', { target: targetPath, edits })
       : Promise.resolve(null);
-    const dependencyPromise = !dryRun && budget.allowImpact
-      ? this.runTool(context, 'analyze_relationship', { target: targetPath, mode: 'dependencies', direction: 'both' })
+    
+    // ADR-043: Enhanced impact discovery using UCG dependents
+    const dependencyPromise = !dryRun && budget.allowImpact && targetPath
+      ? (async () => {
+          const manager = AstManager.getInstance();
+          await manager.ensureLOD({ path: targetPath, minLOD: 1 });
+          const node = manager.getUCG().getNode(targetPath);
+          
+          if (node) {
+            const dependents = [...node.dependents];
+            // Fetch LOD 1 info for all dependents to show symbol usage context
+            await Promise.all(dependents.map(dep => manager.ensureLOD({ path: dep, minLOD: 1 })));
+            
+            return {
+              success: true,
+              edges: dependents.map(dep => ({
+                from: dep,
+                to: targetPath as string,
+                type: 'dependency',
+                metadata: {
+                  lod: 1,
+                  symbols: (manager.getUCG().getNode(dep) as any)?.topology?.topLevelSymbols?.map((s: any) => s.name).slice(0, 5)
+                }
+              }))
+            };
+          }
+          // Fallback
+          return this.runTool(context, 'analyze_relationship', { target: targetPath, mode: 'dependencies', direction: 'both' });
+        })()
       : Promise.resolve(null);
     const hotSpotPromise = !dryRun && budget.allowImpact
       ? this.runTool(context, 'hotspot_detector', {})

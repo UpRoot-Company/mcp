@@ -146,7 +146,7 @@ export class AstManager implements AdaptiveAstManager {
         return this.activeBackend;
     }
 
-    private getUCG(): UnifiedContextGraph {
+    public getUCG(): UnifiedContextGraph {
         if (!this.ucg) {
             const root = this.engineConfig.rootPath ?? process.cwd();
             this.ucg = new UnifiedContextGraph(root);

@@ -1,112 +1,73 @@
-#!/usr/bin/env node
+import { AstManager } from '../src/ast/AstManager';
+import { FeatureFlags } from '../src/config/FeatureFlags';
 import * as fs from 'fs';
 import * as path from 'path';
 import { performance } from 'perf_hooks';
-import { AstManager } from '../src/ast/AstManager.js';
-import { FeatureFlags } from '../src/config/FeatureFlags.js';
 
-interface BenchmarkResult {
-    scenario: string;
-    files: number;
-    totalTimeMs: number;
-    avgTimePerFileMs: number;
-    memoryUsedMB: number;
-}
+async function runBenchmark() {
+    FeatureFlags.set(FeatureFlags.ADAPTIVE_FLOW_ENABLED, true);
+    FeatureFlags.set(FeatureFlags.TOPOLOGY_SCANNER_ENABLED, true);
+    
+    console.log('============================================================');
+    console.log('LOD Performance Comparison Benchmark (ADR-043 Final)');
+    console.log('============================================================');
 
-/**
- * Benchmark: Compare LOD 1 extraction vs Full AST parsing
- * Run: npm run benchmark:lod
- */
-async function main() {
-    console.log('='.repeat(60));
-    console.log('LOD Performance Comparison Benchmark');
-    console.log('='.repeat(60));
-    
-    const testFiles = findTestFiles(process.cwd(), 50); // Sample 50 files
-    console.log(`\nFound ${testFiles.length} test files\n`);
-    
-    const results: BenchmarkResult[] = [];
-    
-    // Scenario 1: Full AST (current behavior)
-    console.log('Scenario 1: Full AST Parsing (baseline)...');
-    FeatureFlags.set(FeatureFlags.ADAPTIVE_FLOW_ENABLED, false);
-    results.push(await benchmarkFullAST(testFiles));
-    
-    // Scenario 2: LOD 1 with TopologyScanner (Phase 2 - placeholder)
-    console.log('\nScenario 2: LOD 1 Topology Scan (not yet implemented)...');
-    console.log('  → Will be implemented in Phase 2');
-    
-    // Print results
-    console.log('\n' + '='.repeat(60));
-    console.log('RESULTS');
-    console.log('='.repeat(60));
-    
-    results.forEach(r => {
-        console.log(`\n${r.scenario}:`);
-        console.log(`  Files:            ${r.files}`);
-        console.log(`  Total Time:       ${r.totalTimeMs.toFixed(2)}ms`);
-        console.log(`  Avg Time/File:    ${r.avgTimePerFileMs.toFixed(2)}ms`);
-        console.log(`  Memory Used:      ${r.memoryUsedMB.toFixed(2)}MB`);
-    });
-    
-    console.log('\n' + '='.repeat(60));
+    const testFiles = findTestFiles('src', 50);
+    console.log(`Found ${testFiles.length} test files\n`);
 
-    // Cleanup to allow process to exit
-    const manager = AstManager.getInstance();
-    await manager.dispose();
-    process.exit(0);
-}
-
-async function benchmarkFullAST(files: string[]): Promise<BenchmarkResult> {
-    const manager = AstManager.getInstance();
-    await manager.init({ mode: 'prod', rootPath: process.cwd() });
-    
-    const memBefore = process.memoryUsage().heapUsed;
-    const startTime = performance.now();
-    
-    for (const file of files) {
-        const content = fs.readFileSync(file, 'utf-8');
-        await manager.parseFile(file, content);
-    }
-    
-    const totalTimeMs = performance.now() - startTime;
-    const memAfter = process.memoryUsage().heapUsed;
-    const memoryUsedMB = (memAfter - memBefore) / 1024 / 1024;
-    
-    return {
-        scenario: 'Full AST Parsing',
-        files: files.length,
-        totalTimeMs,
-        avgTimePerFileMs: totalTimeMs / files.length,
-        memoryUsedMB
-    };
-}
-
-function findTestFiles(dir: string, maxFiles: number): string[] {
-    const files: string[] = [];
-    const srcDir = path.join(dir, 'src');
-    
-    function walk(currentDir: string) {
-        if (files.length >= maxFiles) return;
-        
-        if (!fs.existsSync(currentDir)) return;
-        const entries = fs.readdirSync(currentDir, { withFileTypes: true });
-        
-        for (const entry of entries) {
-            if (files.length >= maxFiles) break;
-            
-            const fullPath = path.join(currentDir, entry.name);
-            
-            if (entry.isDirectory()) {
-                walk(fullPath);
-            } else if (entry.name.endsWith('.ts') && !entry.name.endsWith('.test.ts')) {
-                files.push(fullPath);
-            }
+    // Scenario 1: Full AST (LOD 3)
+    console.log('Scenario 1: Full AST (LOD 3) - Baseline...');
+    const manager1 = AstManager.getInstance();
+    const start3 = performance.now();
+    for (const file of testFiles) {
+        try {
+            await manager1.ensureLOD({ path: file, minLOD: 3 });
+        } catch (e) {
+            console.error(`  - Failed LOD 3 for ${file}:`, e instanceof Error ? e.message : e);
         }
     }
+    const end3 = performance.now();
+    const time3 = end3 - start3;
+
+    // Scenario 2: Topology Scan (LOD 1)
+    console.log('Scenario 2: Topology Scan (LOD 1) - Optimized...');
+    await AstManager.resetForTestingAsync();
+    const manager2 = AstManager.getInstance();
+    const start1 = performance.now();
+    for (const file of testFiles) {
+        try {
+            await manager2.ensureLOD({ path: file, minLOD: 1 });
+        } catch (e) {
+            console.error(`  - Failed LOD 1 for ${file}:`, e instanceof Error ? e.message : e);
+        }
+    }
+    const end1 = performance.now();
+    const time1 = end1 - start1;
+
+    console.log('\n============================================================');
+    console.log('RESULTS:');
+    console.log('------------------------------------------------------------');
+    console.log(`Full AST (LOD 3): Total ${time3.toFixed(2)}ms, Avg ${(time3 / testFiles.length).toFixed(2)}ms/file`);
+    console.log(`Topology (LOD 1): Total ${time1.toFixed(2)}ms, Avg ${(time1 / testFiles.length).toFixed(2)}ms/file`);
+    console.log('------------------------------------------------------------');
+    console.log(`Improvement: ${((time3) / (time1)).toFixed(2)}x faster`);
+    console.log('============================================================');
     
-    walk(srcDir);
-    return files.slice(0, maxFiles);
+    await AstManager.resetForTestingAsync();
 }
 
-main().catch(console.error);
+function findTestFiles(dir: string, limit: number, found: string[] = []): string[] {
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    for (const entry of entries) {
+        if (found.length >= limit) break;
+        const fullPath = path.join(dir, entry.name);
+        if (entry.isDirectory() && !entry.name.startsWith('.') && entry.name !== 'node_modules') {
+            findTestFiles(fullPath, limit, found);
+        } else if (entry.isFile() && (entry.name.endsWith('.ts') || entry.name.endsWith('.js'))) {
+            found.push(fullPath);
+        }
+    }
+    return found;
+}
+
+runBenchmark().catch(console.error);
