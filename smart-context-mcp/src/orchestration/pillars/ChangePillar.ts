@@ -15,6 +15,13 @@ import { EditCoordinator } from '../../engine/EditCoordinator.js';
 import { EditorEngine } from '../../engine/Editor.js';
 import { HistoryEngine } from '../../engine/History.js';
 import { NodeFileSystem } from '../../platform/FileSystem.js';
+import { SymbolImpactAnalyzer, type SymbolImpactRequest, type SymbolImpactResult } from '../../engine/SymbolImpactAnalyzer.js';
+import { AstDiffEngine } from '../../ast/AstDiffEngine.js';
+import { AutoRepairSuggester } from '../../engine/AutoRepairSuggester.js';
+import { SkeletonGenerator } from '../../ast/SkeletonGenerator.js';
+import { SymbolIndex } from '../../ast/SymbolIndex.js';
+import { CallGraphBuilder } from '../../ast/CallGraphBuilder.js';
+import { ModuleResolver } from '../../ast/ModuleResolver.js';
 
 
 export class ChangePillar {
@@ -42,7 +49,7 @@ export class ChangePillar {
     const stopTotal = metrics.startTimer("change.total_ms");
     try {
     const { targets, constraints, originalIntent, action } = intent;
-    const { dryRun = true, includeImpact = false } = constraints;
+    const { dryRun = true, includeImpact = false, includeSymbolImpact = false } = constraints;
       const integrityOptions = IntegrityEngine.resolveOptions(constraints.integrity, "change");
 
       const rawEdits = Array.isArray(constraints.edits) ? constraints.edits : [];
@@ -175,6 +182,11 @@ export class ChangePillar {
     const hotSpotPromise = !dryRun && budget.allowImpact
       ? this.runTool(context, 'hotspot_detector', {})
       : Promise.resolve([]);
+    
+    // 2.5 Symbol-level Impact Analysis (Phase 2 - AI Enhanced)
+    const symbolImpactPromise = includeSymbolImpact && targetPath
+      ? this.analyzeSymbolImpact(targetPath, edits, constraints)
+      : Promise.resolve(null);
 
       // 3. Execute Edit (Includes DryRun)
       const stopEdit = metrics.startTimer("change.edit_coordinator_ms");
@@ -255,6 +267,7 @@ export class ChangePillar {
     const impact = dryRun ? (allowImpactPreview ? (finalResult.impactPreview ?? null) : null) : await impactPromise;
     const deps = await dependencyPromise;
     const hotSpots = await hotSpotPromise;
+    const symbolImpact = await symbolImpactPromise;
     const impactReport = this.toImpactReport(impact, deps, targetPath, hotSpots);
     const plan = dryRun
       ? {
@@ -332,6 +345,8 @@ export class ChangePillar {
         diff: truncatedDiff,
         plan,
         impactReport,
+        symbolImpact: symbolImpact || undefined,
+        suggestedEdits: (symbolImpact as any)?.suggestedEdits,
         editResult: dryRun ? undefined : finalResult,
         transactionId: finalResult.operation?.id ?? '',
         rollbackAvailable: !dryRun && Boolean(finalResult.success),
@@ -1443,6 +1458,74 @@ export class ChangePillar {
       message: messages.join(' '),
       suggestedActions: actions
     };
+  }
+
+  /**
+   * Analyze symbol-level impact of proposed changes (Phase 2)
+   */
+  private async analyzeSymbolImpact(
+    filePath: string,
+    edits: any[],
+    constraints: any
+  ): Promise<SymbolImpactResult | null> {
+    try {
+      // Read current file content
+      const currentContent = await this.fileSystem.readFile(filePath);
+      
+      // Apply edits to get proposed new content
+      const editorEngine = new EditorEngine(process.cwd(), this.fileSystem);
+      let newContent = currentContent;
+      
+      // Simple simulation: apply edits sequentially
+      for (const edit of edits) {
+        if (edit.targetString && edit.replacementString) {
+          newContent = newContent.replace(edit.targetString, edit.replacementString);
+        }
+      }
+      
+      // Initialize components for symbol analysis
+      const rootPath = process.cwd();
+      const skeletonGenerator = new SkeletonGenerator();
+      const symbolIndex = new SymbolIndex(rootPath, skeletonGenerator, []);
+      const moduleResolver = new ModuleResolver(rootPath);
+      const callGraphBuilder = new CallGraphBuilder(rootPath, symbolIndex, moduleResolver);
+      const astDiffEngine = new AstDiffEngine();
+      
+      const symbolImpactAnalyzer = new SymbolImpactAnalyzer(
+        symbolIndex,
+        callGraphBuilder,
+        astDiffEngine
+      );
+      
+      // Analyze impact
+      const request: SymbolImpactRequest = {
+        filePath,
+        oldContent: currentContent,
+        newContent,
+        maxDepth: constraints.symbolImpactDepth || 3
+      };
+      
+      const result = await symbolImpactAnalyzer.analyzeImpact(request);
+      
+      // If there are breaking changes, generate repair suggestions
+      const hasBreaking = result.astChanges.some((c: any) => c.isBreaking);
+      if (hasBreaking && result.impactedSymbols.length > 0) {
+        const autoRepairSuggester = new AutoRepairSuggester();
+        const repairResult = await autoRepairSuggester.suggestRepairs(
+          result.astChanges,
+          result.impactedSymbols
+        );
+        
+        // Attach repair suggestions to result
+        (result as any).suggestedEdits = repairResult.suggestedEdits;
+      }
+      
+      return result;
+      
+    } catch (error) {
+      console.warn('Symbol impact analysis failed:', error);
+      return null;
+    }
   }
 
 }

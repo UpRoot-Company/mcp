@@ -9,6 +9,7 @@ export interface IntentConstraints {
   depth?: 'shallow' | 'standard' | 'deep';
   scope?: 'symbol' | 'file' | 'module' | 'project';
   includeImpact?: boolean;
+  includeSymbolImpact?: boolean;
   dryRun?: boolean;
   batchMode?: boolean;
   batchImpactLimit?: number;

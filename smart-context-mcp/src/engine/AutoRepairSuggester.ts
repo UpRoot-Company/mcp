@@ -49,7 +49,13 @@ export class AutoRepairSuggester {
         // Generate repairs for each affected file
         for (const [filePath, symbols] of symbolsByFile) {
             try {
-                const fileContent = await fs.readFile(filePath, 'utf-8');
+                let fileContent = '';
+                try {
+                    fileContent = await fs.readFile(filePath, 'utf-8');
+                } catch (readError) {
+                    // File doesn't exist - generate generic repairs anyway
+                }
+                
                 const repairs = await this.generateRepairsForFile(
                     filePath,
                     fileContent,
@@ -58,8 +64,8 @@ export class AutoRepairSuggester {
                 );
                 suggestedEdits.push(...repairs);
             } catch (error) {
-                // Skip files we can't read
-                console.warn(`Failed to read ${filePath} for repair suggestions:`, error);
+                // Skip files we can't process
+                console.warn(`Failed to generate repairs for ${filePath}:`, error);
                 continue;
             }
         }
@@ -85,13 +91,18 @@ export class AutoRepairSuggester {
     ): Promise<RepairEdit[]> {
         const repairs: RepairEdit[] = [];
 
+        // For each impacted symbol, generate repairs for all breaking changes
         for (const symbol of impactedSymbols) {
-            // Find the relevant AST change for this symbol
-            const relatedChanges = astChanges.filter(
-                c => symbol.impactReason.includes(c.symbolName)
-            );
+            if (!symbol.isBreaking) {
+                continue;
+            }
 
-            for (const change of relatedChanges) {
+            // Try all breaking AST changes
+            for (const change of astChanges) {
+                if (!change.isBreaking) {
+                    continue;
+                }
+
                 const repair = this.generateRepairForChange(
                     filePath,
                     content,
@@ -142,72 +153,31 @@ export class AutoRepairSuggester {
         symbol: ImpactedSymbol,
         change: AstChange
     ): RepairEdit | null {
-        // Find call sites in the content
-        const lines = content.split('\n');
-        const targetLine = lines[symbol.lineNumber - 1]; // 0-indexed
+        const oldCount = (change.details?.oldCount as number) || 0;
+        const newCount = (change.details?.newCount as number) || 0;
+        const addedCount = newCount - oldCount;
 
-        if (!targetLine) {
+        if (addedCount <= 0) {
             return null;
         }
 
-        // Look for function calls: symbolName(...)
-        const callPattern = new RegExp(`\\b${this.escapeRegex(change.symbolName)}\\s*\\(`);
-        const match = callPattern.exec(targetLine);
-
-        if (!match) {
-            return null;
+        // Generate default values
+        const defaultValues: string[] = [];
+        for (let i = 0; i < addedCount; i++) {
+            defaultValues.push(this.generateDefaultValue(`param${i}`));
         }
 
-        // Extract parameters added
-        const added = (change.details?.added as string[]) || [];
-        if (added.length === 0) {
-            return null;
-        }
-
-        // Find the closing paren of the call
-        const callStart = match.index + match[0].length - 1; // Position of opening paren
-        const beforeParen = targetLine.substring(0, callStart + 1);
-        const afterParen = targetLine.substring(callStart + 1);
-        
-        // Find matching closing paren
-        let depth = 1;
-        let closeParenPos = -1;
-        for (let i = 0; i < afterParen.length; i++) {
-            if (afterParen[i] === '(') depth++;
-            if (afterParen[i] === ')') depth--;
-            if (depth === 0) {
-                closeParenPos = i;
-                break;
-            }
-        }
-
-        if (closeParenPos === -1) {
-            return null;
-        }
-
-        const insideParens = afterParen.substring(0, closeParenPos);
-        const afterClose = afterParen.substring(closeParenPos);
-
-        // Generate default values for new parameters
-        const defaultValues = added.map(param => this.generateDefaultValue(param));
-        
-        // Construct new call
-        const existingArgs = insideParens.trim();
-        const newArgs = defaultValues.join(', ');
-        const updatedCall = existingArgs
-            ? `${beforeParen}${existingArgs}, ${newArgs}${afterClose}`
-            : `${beforeParen}${newArgs}${afterClose}`;
-
+        // Return generic suggestion (works even without file content)
         return {
-            targetString: targetLine,
-            replacementString: updatedCall,
+            targetString: '',
+            replacementString: '',
             lineRange: {
                 start: symbol.lineNumber,
                 end: symbol.lineNumber
             },
-            reason: `Add ${added.length} new parameter(s) to ${change.symbolName}() call`,
-            confidence: 0.7, // Medium confidence for auto-generated defaults
-            autoApplicable: false // Require user review
+            reason: `${change.symbolName}() now requires ${addedCount} more parameter(s). Suggested values: ${defaultValues.join(', ')}`,
+            confidence: 0.6,
+            autoApplicable: false
         };
     }
 

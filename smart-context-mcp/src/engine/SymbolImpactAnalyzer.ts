@@ -1,8 +1,11 @@
 import { CallGraphBuilder } from '../ast/CallGraphBuilder.js';
 import { SymbolIndex } from '../ast/SymbolIndex.js';
-import { AstDiffEngine, AstChange, AstDiffResult } from '../ast/AstDiffEngine.js';
+import { AstDiffEngine, type AstDiffResult, type AstChange } from '../ast/AstDiffEngine.js';
 import { Edit, DefinitionSymbol } from '../types.js';
 import * as path from 'path';
+
+// Re-export for convenience
+export type { AstChange } from '../ast/AstDiffEngine.js';
 
 /**
  * Impact level for a symbol change
