@@ -5,6 +5,9 @@ import { InternalToolRegistry } from '../InternalToolRegistry.js';
 import { OrchestrationContext } from '../OrchestrationContext.js';
 import { ParsedIntent } from '../IntentRouter.js';
 import { metrics } from '../../utils/MetricsCollector.js';
+import { StyleInference } from '../../generation/StyleInference.js';
+import { SimpleTemplateGenerator, type TemplateType, type TemplateContext } from '../../generation/SimpleTemplateGenerator.js';
+import { NodeFileSystem } from '../../platform/FileSystem.js';
 
 
 export class ReadPillar {
@@ -179,6 +182,9 @@ export class WritePillar {
       let content = constraints.content ?? '';
       const hasExplicitContent = constraints.content !== undefined;
       const safeWrite = Boolean((constraints as any).safeWrite);
+      
+      // ADR-042-006: Phase 2.5 - Quick Generate
+      const quickGenerate = Boolean((constraints as any).quickGenerate);
 
       if (!targetPath) {
         return {
@@ -194,6 +200,36 @@ export class WritePillar {
       }
 
       const resolvedPath = await this.resolveTargetPath(targetPath);
+
+      // ADR-042-006: Phase 2.5 - Quick code generation
+      if (quickGenerate && !hasExplicitContent) {
+        const stopGenerate = metrics.startTimer("write.quick_generate_ms");
+        
+        try {
+          const generated = await this.quickGenerateCode(resolvedPath, originalIntent, constraints);
+          stopGenerate();
+          
+          if (generated) {
+            content = generated.code;
+            
+            // Write generated code using safeWrite mode
+            return await this.writeGeneratedCode(
+              resolvedPath,
+              content,
+              originalIntent,
+              context,
+              generated.templateType
+            );
+          } else {
+            // Fallback to normal template resolution if generation fails
+            stopGenerate();
+          }
+        } catch (error: any) {
+          stopGenerate();
+          // Log but don't fail - fallback to normal flow
+          console.warn(`Quick generate failed: ${error.message}`);
+        }
+      }
 
       // ADR-042-005: Phase B3 - safeWrite mode (full range patch with undo support)
       if (hasExplicitContent && safeWrite) {
@@ -459,6 +495,265 @@ export class WritePillar {
       duration: Date.now() - started
     });
     return output;
+  }
+
+  /**
+   * ADR-042-006: Phase 2.5 - Quick code generation
+   * 
+   * Generate code from intent using StyleInference + SimpleTemplateGenerator
+   */
+  private async quickGenerateCode(
+    targetPath: string,
+    intent: string,
+    constraints: any
+  ): Promise<{ code: string; templateType: TemplateType } | null> {
+    const rootPath = process.cwd();
+    const fileSystem = new NodeFileSystem(rootPath);
+    
+    // 1. Infer project style
+    const ext = path.extname(targetPath);
+    const styleInference = new StyleInference(fileSystem, rootPath);
+    const style = await styleInference.inferStyle(ext);
+
+    // 2. Parse intent to determine template type and context
+    const parseResult = this.parseGenerationIntent(intent, targetPath);
+    if (!parseResult) {
+      return null;
+    }
+
+    const { templateType, context: templateContext } = parseResult;
+
+    // 3. Generate code using template
+    const generator = new SimpleTemplateGenerator(style);
+    const code = generator.generate(templateType, templateContext);
+
+    return { code, templateType };
+  }
+
+  /**
+   * Parse intent to extract template type and context
+   */
+  private parseGenerationIntent(
+    intent: string,
+    targetPath: string
+  ): { templateType: TemplateType; context: TemplateContext } | null {
+    const lowerIntent = intent.toLowerCase();
+    const baseName = path.basename(targetPath, path.extname(targetPath));
+    
+    // Extract name from path or intent
+    const name = this.extractNameFromIntent(intent, baseName);
+
+    // Detect template type
+    if (lowerIntent.includes('function') || lowerIntent.includes('func')) {
+      return {
+        templateType: 'function',
+        context: {
+          name,
+          params: this.extractParams(intent),
+          returnType: this.extractReturnType(intent),
+          export: lowerIntent.includes('export'),
+          description: this.extractDescription(intent),
+        },
+      };
+    }
+
+    if (lowerIntent.includes('class')) {
+      return {
+        templateType: 'class',
+        context: {
+          name: this.toPascalCase(name),
+          export: lowerIntent.includes('export') || !lowerIntent.includes('internal'),
+          description: this.extractDescription(intent),
+          properties: [],
+          methods: [],
+        },
+      };
+    }
+
+    if (lowerIntent.includes('interface') || lowerIntent.includes('type')) {
+      return {
+        templateType: 'interface',
+        context: {
+          name: this.toPascalCase(name),
+          export: lowerIntent.includes('export') || !lowerIntent.includes('internal'),
+          description: this.extractDescription(intent),
+          properties: [],
+          methods: [],
+        },
+      };
+    }
+
+    // Default to function if unclear
+    return {
+      templateType: 'function',
+      context: {
+        name,
+        export: true,
+        description: intent,
+      },
+    };
+  }
+
+  /**
+   * Extract name from intent or use basename
+   */
+  private extractNameFromIntent(intent: string, fallback: string): string {
+    // Look for patterns like "create function calculateTotal"
+    const patterns = [
+      /(?:function|class|interface)\s+([a-zA-Z_][a-zA-Z0-9_]*)/i,
+      /(?:named|called)\s+([a-zA-Z_][a-zA-Z0-9_]*)/i,
+      /^([a-zA-Z_][a-zA-Z0-9_]*)\s*(?:function|class)/i,
+    ];
+
+    for (const pattern of patterns) {
+      const match = intent.match(pattern);
+      if (match && match[1]) {
+        return match[1];
+      }
+    }
+
+    // Use basename as fallback
+    return fallback.replace(/[^a-zA-Z0-9_]/g, '') || 'generated';
+  }
+
+  /**
+   * Extract parameters from intent
+   */
+  private extractParams(intent: string): string {
+    // Look for patterns like "with params (x: number, y: number)"
+    const match = intent.match(/(?:params?|parameters?|args?|arguments?)\s*\(([^)]+)\)/i);
+    if (match && match[1]) {
+      return match[1].trim();
+    }
+
+    // Look for patterns like "takes x and y"
+    const takesMatch = intent.match(/(?:takes?|accepts?)\s+([a-zA-Z0-9_,\s]+)/i);
+    if (takesMatch && takesMatch[1]) {
+      const params = takesMatch[1].split(/\s+and\s+|\s*,\s*/);
+      return params.map(p => p.trim()).join(', ');
+    }
+
+    return '';
+  }
+
+  /**
+   * Extract return type from intent
+   */
+  private extractReturnType(intent: string): string {
+    // Look for patterns like "returns number" or "return type: string"
+    const patterns = [
+      /returns?\s+([a-zA-Z0-9_<>[\]]+)/i,
+      /return\s+type\s*:\s*([a-zA-Z0-9_<>[\]]+)/i,
+    ];
+
+    for (const pattern of patterns) {
+      const match = intent.match(pattern);
+      if (match && match[1]) {
+        return match[1];
+      }
+    }
+
+    return 'void';
+  }
+
+  /**
+   * Extract description from intent
+   */
+  private extractDescription(intent: string): string {
+    // Remove common prefixes
+    let desc = intent
+      .replace(/^(?:create|generate|make|add|write)\s+/i, '')
+      .replace(/^(?:a|an|the)\s+/i, '')
+      .trim();
+
+    // Capitalize first letter
+    if (desc.length > 0) {
+      desc = desc.charAt(0).toUpperCase() + desc.slice(1);
+    }
+
+    return desc || 'Auto-generated code';
+  }
+
+  /**
+   * Write generated code to file
+   */
+  private async writeGeneratedCode(
+    filePath: string,
+    content: string,
+    intent: string,
+    context: OrchestrationContext,
+    templateType: TemplateType
+  ): Promise<any> {
+    try {
+      // Check if file exists
+      let existingContent = '';
+      try {
+        existingContent = await this.runTool(context, 'read_code', { 
+          filePath, 
+          view: 'full' 
+        });
+      } catch {
+        // File doesn't exist - create it
+        try {
+          await this.runTool(context, 'write_file', { filePath, content: '' });
+        } catch {
+          await this.runTool(context, 'edit_code', {
+            edits: [{ filePath, operation: 'create', replacementString: '' }],
+            dryRun: false,
+            createMissingDirectories: true
+          });
+        }
+        existingContent = '';
+      }
+
+      // Use full range edit with undo support
+      const edit = {
+        targetString: existingContent,
+        replacementString: content,
+        indexRange: { start: 0, end: existingContent.length },
+        expectedHash: existingContent ? this.computeHash(existingContent) : undefined
+      };
+
+      const result = await this.runTool(context, 'edit_coordinator', {
+        filePath,
+        edits: [edit],
+        dryRun: false
+      });
+
+      return {
+        success: result.success ?? true,
+        status: result.success === false ? 'failure' : 'success',
+        createdFiles: result.success ? [{ 
+          path: filePath, 
+          description: `Generated ${templateType} from intent: ${intent}` 
+        }] : [],
+        transactionId: result.operation?.id || '',
+        rollbackAvailable: true,
+        writeMode: 'quickGenerate',
+        templateType,
+        guidance: {
+          message: result.success 
+            ? `Generated ${templateType} with project style. Use 'manage undo' to rollback.` 
+            : `Generation failed: ${result.message || 'Unknown error'}`,
+          suggestedActions: result.success 
+            ? [{ pillar: 'read', action: 'view_full', target: filePath }] 
+            : []
+        }
+      };
+    } catch (error: any) {
+      return {
+        success: false,
+        status: 'failure',
+        createdFiles: [],
+        transactionId: '',
+        rollbackAvailable: false,
+        writeMode: 'quickGenerate',
+        guidance: {
+          message: `Quick generate failed: ${error.message}`,
+          suggestedActions: []
+        }
+      };
+    }
   }
 }
 
