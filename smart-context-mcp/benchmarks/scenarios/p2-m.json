@@ -1,9 +1,20 @@
 {
   "name": "p2-m",
+  "description": "Profile M: Medium (50k-250k embeddings, 10k-50k files) - Real-world large projects",
   "includeGlobs": ["src/**"],
-  "excludeGlobs": ["benchmarks/**", "dist/**"],
+  "excludeGlobs": ["benchmarks/**", "dist/**", "node_modules/**"],
   "queries": [
     { "query": "class QueryIntentDetector", "expectTop": "src/engine/search/QueryIntent.ts" },
-    { "query": "EmbeddingPackManager", "expectTop": "src/storage/EmbeddingPack.ts" }
-  ]
+    { "query": "EmbeddingPackManager", "expectTop": "src/storage/EmbeddingPack.ts" },
+    { "query": "VectorIndexManager rebuild", "expectTop": "src/vector/VectorIndexManager.ts" },
+    { "query": "TrigramIndex search", "expectTop": "src/engine/TrigramIndex.ts" },
+    { "query": "SkeletonGenerator", "expectTop": "src/ast/SkeletonGenerator.ts" }
+  ],
+  "vectorIndex": {
+    "mode": "hnsw",
+    "shards": "auto"
+  },
+  "embeddingPack": {
+    "format": "both"
+  }
 }

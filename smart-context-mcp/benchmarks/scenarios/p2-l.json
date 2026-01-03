@@ -1,10 +1,25 @@
 {
   "name": "p2-l",
+  "description": "Profile L: Large (250k-1M embeddings, 50k+ files) - Enterprise/closed-network environments",
   "includeGlobs": ["src/**"],
-  "excludeGlobs": ["benchmarks/**", "dist/**"],
+  "excludeGlobs": ["benchmarks/**", "dist/**", "node_modules/**"],
   "queries": [
     { "query": "VectorIndexManager", "expectTop": "src/vector/VectorIndexManager.ts" },
     { "query": "TrigramIndex", "expectTop": "src/engine/TrigramIndex.ts" },
-    { "query": "EmbeddingPackManager", "expectTop": "src/storage/EmbeddingPack.ts" }
-  ]
+    { "query": "EmbeddingPackManager", "expectTop": "src/storage/EmbeddingPack.ts" },
+    { "query": "SearchEngine scout", "expectTop": "src/engine/Search.ts" },
+    { "query": "IntentRouter parseIntent", "expectTop": "src/orchestration/IntentRouter.ts" },
+    { "query": "SymbolEmbeddingIndex", "expectTop": "src/indexing/SymbolEmbeddingIndex.ts" },
+    { "query": "PatternExtractor extractPatterns", "expectTop": "src/generation/PatternExtractor.ts" },
+    { "query": "TemplateGenerator generateAdvanced", "expectTop": "src/generation/TemplateGenerator.ts" }
+  ],
+  "vectorIndex": {
+    "mode": "hnsw",
+    "shards": "auto",
+    "maxPoints": 200000
+  },
+  "embeddingPack": {
+    "format": "q8",
+    "cacheMB": 256
+  }
 }

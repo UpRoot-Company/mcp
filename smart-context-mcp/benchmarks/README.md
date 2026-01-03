@@ -18,10 +18,27 @@ node --import tsx benchmarks/main.ts
 You can run a fixed scenario (stable include/exclude + query set) for more reproducible results:
 
 ```bash
-node --import tsx benchmarks/main.ts --scenario p2-m
+# P2 Scale Profiles (ADR-042-003)
+node --import tsx benchmarks/main.ts --scenario p2-s   # Small (≤50k embeddings, ≤10k files)
+node --import tsx benchmarks/main.ts --scenario p2-m   # Medium (50k-250k embeddings, 10k-50k files)
+node --import tsx benchmarks/main.ts --scenario p2-l   # Large (250k-1M embeddings, 50k+ files)
 ```
 
 Scenario files live in `benchmarks/scenarios/` and define include/exclude globs and expected recall targets.
+
+### P2 Metrics (ADR-042-003)
+
+Each scenario collects comprehensive P2 metrics:
+
+**Latency**: Search p50/p95/p99, Vector query p50/p95/p99, Vector index build time
+
+**Memory**: RSS, Heap Used, Heap Total
+
+**Storage**: Embeddings Pack size, Vector Index size, Trigram Index size
+
+**Quality**: Recall@1, Recall@10
+
+Reports are automatically saved to `benchmarks/reports/full-report-<timestamp>.md` with detailed P2 metric breakdown.
 
 ---
 

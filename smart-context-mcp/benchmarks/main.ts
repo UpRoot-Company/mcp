@@ -23,12 +23,54 @@ interface Metric {
     status: '✅' | '⚠️' | '🚀';
 }
 
+interface P2Metrics {
+    // Latency (p50/p95/p99)
+    searchLatencyP50: number;
+    searchLatencyP95: number;
+    searchLatencyP99: number;
+    vectorQueryLatencyP50?: number;
+    vectorQueryLatencyP95?: number;
+    vectorQueryLatencyP99?: number;
+    vectorBuildMs?: number;
+    
+    // Memory
+    rssBytes: number;
+    heapUsedBytes: number;
+    heapTotalBytes: number;
+    
+    // Storage
+    embeddingsPackBytes: number;
+    vectorIndexBytes: number;
+    trigramIndexBytes: number;
+    totalStorageBytes: number;
+    
+    // Quality
+    recallAt1: number;
+    recallAt10: number;
+    
+    // Scenario info
+    queryCount: number;
+    embeddingFormat?: string;
+    vectorIndexMode?: string;
+    shardCount?: number;
+}
+
 type BenchmarkScenario = {
     name?: string;
+    description?: string;
     rootPath?: string;
     includeGlobs?: string[];
     excludeGlobs?: string[];
     queries?: Array<{ query: string; expectTop: string }>;
+    vectorIndex?: {
+        mode?: string;
+        shards?: string | number;
+        maxPoints?: number;
+    };
+    embeddingPack?: {
+        format?: string;
+        cacheMB?: number;
+    };
 };
 
 function getArgValue(argv: string[], name: string): string | null {
@@ -50,6 +92,13 @@ function readScenario(rootPath: string, scenarioName: string): BenchmarkScenario
 
 function bytesToMb(bytes: number): number {
     return bytes / (1024 * 1024);
+}
+
+function percentile(values: number[], p: number): number {
+    if (values.length === 0) return 0;
+    const sorted = [...values].sort((a, b) => a - b);
+    const index = Math.ceil((p / 100) * sorted.length) - 1;
+    return sorted[Math.max(0, index)];
 }
 
 function directorySizeBytes(dir: string): number {
@@ -151,8 +200,10 @@ async function runBenchmark() {
     const queries = scenario.queries ?? [];
     let hitsAt1 = 0;
     let hitsAt10 = 0;
-    const s6 = performance.now();
+    const searchLatencies: number[] = [];
+    
     for (const q of queries) {
+        const s6 = performance.now();
         const results = await searchEngine.scout({
             query: q.query,
             includeGlobs: scenario.includeGlobs,
@@ -160,15 +211,24 @@ async function runBenchmark() {
             groupByFile: true,
             deduplicateByContent: true
         });
+        const elapsed = performance.now() - s6;
+        searchLatencies.push(elapsed);
+        
         if (results[0]?.filePath === q.expectTop) hitsAt1++;
         if (results.slice(0, 10).some(r => r.filePath === q.expectTop)) hitsAt10++;
     }
-    const elapsed6 = performance.now() - s6;
+    
     const recallAt1 = queries.length > 0 ? (hitsAt1 / queries.length) * 100 : 0;
     const recallAt10 = queries.length > 0 ? (hitsAt10 / queries.length) * 100 : 0;
+    const searchP50 = percentile(searchLatencies, 50);
+    const searchP95 = percentile(searchLatencies, 95);
+    const searchP99 = percentile(searchLatencies, 99);
+    
     metrics.push({ step: 6, name: "Recall@1 (scenario)", value: recallAt1, unit: "%", status: '✅' });
     metrics.push({ step: 6, name: "Recall@10 (scenario)", value: recallAt10, unit: "%", status: '✅' });
-    metrics.push({ step: 6, name: "Search Time (scenario)", value: elapsed6, unit: "ms", status: '🚀' });
+    metrics.push({ step: 6, name: "Search p50", value: searchP50, unit: "ms", status: '🚀' });
+    metrics.push({ step: 6, name: "Search p95", value: searchP95, unit: "ms", status: '🚀' });
+    metrics.push({ step: 6, name: "Search p99", value: searchP99, unit: "ms", status: '🚀' });
 
     // STEP 7: Relationship Analysis Latency
     console.log("[Step 7] Relationship Analysis Latency...");
@@ -196,8 +256,68 @@ async function runBenchmark() {
     const mem = process.memoryUsage();
     const smartContextDir = path.join(rootPath, ".smart-context");
     const smartContextBytes = directorySizeBytes(smartContextDir);
-    reportMd += `\n\n## Scenario\n\n- name: ${scenario.name ?? scenarioName ?? "default"}\n- includeGlobs: ${(scenario.includeGlobs ?? []).join(", ")}\n- excludeGlobs: ${(scenario.excludeGlobs ?? []).join(", ")}\n- queries: ${queries.length}\n`;
-    reportMd += `\n## System Metrics\n\n- rssMB: ${bytesToMb(mem.rss).toFixed(1)}\n- heapUsedMB: ${bytesToMb(mem.heapUsed).toFixed(1)}\n- smartContextDirMB: ${bytesToMb(smartContextBytes).toFixed(1)}\n`;
+    
+    // P2 Storage breakdown
+    const embeddingsPackDir = path.join(smartContextDir, "storage", "v1", "embeddings");
+    const vectorIndexDir = path.join(smartContextDir, "vector-index");
+    const trigramIndexPath = path.join(smartContextDir, "storage", "trigram-index.json");
+    
+    const embeddingsPackBytes = fs.existsSync(embeddingsPackDir) ? directorySizeBytes(embeddingsPackDir) : 0;
+    const vectorIndexBytes = fs.existsSync(vectorIndexDir) ? directorySizeBytes(vectorIndexDir) : 0;
+    const trigramIndexBytes = fs.existsSync(trigramIndexPath) ? fs.statSync(trigramIndexPath).size : 0;
+    
+    // P2 Metrics collection
+    const p2Metrics: P2Metrics = {
+        searchLatencyP50: searchP50,
+        searchLatencyP95: searchP95,
+        searchLatencyP99: searchP99,
+        rssBytes: mem.rss,
+        heapUsedBytes: mem.heapUsed,
+        heapTotalBytes: mem.heapTotal,
+        embeddingsPackBytes,
+        vectorIndexBytes,
+        trigramIndexBytes,
+        totalStorageBytes: smartContextBytes,
+        recallAt1,
+        recallAt10,
+        queryCount: queries.length,
+        embeddingFormat: scenario.embeddingPack?.format,
+        vectorIndexMode: scenario.vectorIndex?.mode
+    };
+    
+    reportMd += `\n\n## Scenario\n\n- name: ${scenario.name ?? scenarioName ?? "default"}\n`;
+    if (scenario.description) reportMd += `- description: ${scenario.description}\n`;
+    reportMd += `- includeGlobs: ${(scenario.includeGlobs ?? []).join(", ")}\n- excludeGlobs: ${(scenario.excludeGlobs ?? []).join(", ")}\n- queries: ${queries.length}\n`;
+    if (scenario.vectorIndex) {
+        reportMd += `- vectorIndex.mode: ${scenario.vectorIndex.mode ?? "auto"}\n`;
+        reportMd += `- vectorIndex.shards: ${scenario.vectorIndex.shards ?? "off"}\n`;
+    }
+    if (scenario.embeddingPack) {
+        reportMd += `- embeddingPack.format: ${scenario.embeddingPack.format ?? "float32"}\n`;
+    }
+    
+    reportMd += `\n## P2 Metrics (ADR-042-003)\n\n`;
+    reportMd += `### Latency (ms)\n\n`;
+    reportMd += `- Search p50: ${p2Metrics.searchLatencyP50.toFixed(3)}\n`;
+    reportMd += `- Search p95: ${p2Metrics.searchLatencyP95.toFixed(3)}\n`;
+    reportMd += `- Search p99: ${p2Metrics.searchLatencyP99.toFixed(3)}\n`;
+    
+    reportMd += `\n### Memory (MB)\n\n`;
+    reportMd += `- RSS: ${bytesToMb(p2Metrics.rssBytes).toFixed(1)}\n`;
+    reportMd += `- Heap Used: ${bytesToMb(p2Metrics.heapUsedBytes).toFixed(1)}\n`;
+    reportMd += `- Heap Total: ${bytesToMb(p2Metrics.heapTotalBytes).toFixed(1)}\n`;
+    
+    reportMd += `\n### Storage (MB)\n\n`;
+    reportMd += `- Embeddings Pack: ${bytesToMb(p2Metrics.embeddingsPackBytes).toFixed(1)}\n`;
+    reportMd += `- Vector Index: ${bytesToMb(p2Metrics.vectorIndexBytes).toFixed(1)}\n`;
+    reportMd += `- Trigram Index: ${bytesToMb(p2Metrics.trigramIndexBytes).toFixed(1)}\n`;
+    reportMd += `- Total Storage: ${bytesToMb(p2Metrics.totalStorageBytes).toFixed(1)}\n`;
+    
+    reportMd += `\n### Quality\n\n`;
+    reportMd += `- Recall@1: ${p2Metrics.recallAt1.toFixed(1)}%\n`;
+    reportMd += `- Recall@10: ${p2Metrics.recallAt10.toFixed(1)}%\n`;
+    
+    reportMd += `\n## System Metrics (Legacy)\n\n- rssMB: ${bytesToMb(mem.rss).toFixed(1)}\n- heapUsedMB: ${bytesToMb(mem.heapUsed).toFixed(1)}\n- smartContextDirMB: ${bytesToMb(smartContextBytes).toFixed(1)}\n`;
     fs.writeFileSync(reportPath, reportMd);
 
     console.log("\n==========================================================");
