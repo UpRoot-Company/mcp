@@ -1,4 +1,5 @@
 import * as path from 'path';
+import * as fs from 'fs';
 import { performance } from 'perf_hooks';
 import { AstBackend, AstDocument } from './AstBackend.js';
 import { WebTreeSitterBackend } from './WebTreeSitterBackend.js';
@@ -8,6 +9,7 @@ import { EngineConfig, LOD_LEVEL, AnalysisRequest, LODResult, LODPromotionStats 
 import { LanguageConfigLoader } from '../config/LanguageConfig.js';
 import { AdaptiveAstManager } from './AdaptiveAstManager.js';
 import { FeatureFlags } from '../config/FeatureFlags.js';
+import { UnifiedContextGraph } from '../orchestration/context/UnifiedContextGraph.js';
 
 export class AstManager implements AdaptiveAstManager {
     private static instance: AstManager;
@@ -16,6 +18,7 @@ export class AstManager implements AdaptiveAstManager {
     private engineConfig: EngineConfig;
     private activeBackend?: string;
     private languageConfig?: LanguageConfigLoader;
+    private ucg?: UnifiedContextGraph;
 
     // NEW: LOD promotion statistics
     private lodStats: LODPromotionStats = {
@@ -126,69 +129,70 @@ export class AstManager implements AdaptiveAstManager {
         return this.activeBackend;
     }
 
+    private getUCG(): UnifiedContextGraph {
+        if (!this.ucg) {
+            const root = this.engineConfig.rootPath ?? process.cwd();
+            this.ucg = new UnifiedContextGraph(root);
+        }
+        return this.ucg;
+    }
+
     // NEW: Implement AdaptiveAstManager interface
     async ensureLOD(request: AnalysisRequest): Promise<LODResult> {
         if (!FeatureFlags.isEnabled(FeatureFlags.ADAPTIVE_FLOW_ENABLED)) {
-            // Fallback: treat all requests as LOD 3 (full AST)
-            const startTime = performance.now();
-            // In a real scenario we'd need the content, but for this stub we use placeholder
-            await this.parseFile(request.path, ''); 
-            const durationMs = performance.now() - startTime;
-            
-            return {
-                path: request.path,
-                previousLOD: 0,
-                currentLOD: 3,
-                requestedLOD: request.minLOD,
-                promoted: true,
-                durationMs,
-                fallbackUsed: true,
-                confidence: 1.0
-            };
+            return await this.fallbackToFullAST(request.path);
         }
         
-        // TODO: Phase 2 - Implement actual LOD promotion logic
-        throw new Error('ensureLOD not implemented yet (Phase 2)');
+        const ucg = this.getUCG();
+        const result = await ucg.ensureLOD(request);
+        
+        // Update stats
+        if (result.promoted) {
+            const prev = result.previousLOD;
+            const curr = result.currentLOD;
+            if (prev === 0 && curr >= 1) this.lodStats.l0_to_l1++;
+            if (prev <= 1 && curr >= 2) this.lodStats.l1_to_l2++;
+            if (prev <= 2 && curr === 3) this.lodStats.l2_to_l3++;
+        }
+        if (result.fallbackUsed) {
+            const total = this.lodStats.l0_to_l1 + this.lodStats.l1_to_l2 + this.lodStats.l2_to_l3;
+            this.lodStats.fallback_rate = total > 0 ? (this.lodStats.l0_to_l1 / total) : 0;
+        }
+        
+        return result;
     }
     
     getFileNode(path: string) {
-        if (!FeatureFlags.isEnabled(FeatureFlags.UCG_ENABLED)) {
-            return undefined;
-        }
-        // TODO: Phase 2 - Return UCG node
-        return undefined;
+        if (!FeatureFlags.isEnabled(FeatureFlags.UCG_ENABLED)) return undefined;
+        return this.getUCG().getNode(path);
     }
     
     getCurrentLOD(path: string): LOD_LEVEL {
-        // TODO: Phase 2 - Query UCG or FileRecord
-        return 0;
+        if (!FeatureFlags.isEnabled(FeatureFlags.UCG_ENABLED)) return 0;
+        return this.getUCG().getNode(path)?.lod ?? 0;
     }
     
     promotionStats(): LODPromotionStats {
-        return { ...this.lodStats };
+        return { ...this.lodStats, total_files: this.ucg ? this.getUCG().getStats().nodes : 0 };
     }
     
     async fallbackToFullAST(path: string): Promise<LODResult> {
         const startTime = performance.now();
-        // Force full AST parsing
-        await this.parseFile(path, '');
+        // Read actual content for accurate parsing
+        const content = fs.existsSync(path) ? fs.readFileSync(path, 'utf-8') : '';
+        await this.parseFile(path, content);
         const durationMs = performance.now() - startTime;
         
         return {
-            path,
-            previousLOD: 0,
-            currentLOD: 3,
-            requestedLOD: 3,
-            promoted: true,
-            durationMs,
-            fallbackUsed: true,
-            confidence: 1.0
+            path, previousLOD: 0, currentLOD: 3, requestedLOD: 3,
+            promoted: true, durationMs, fallbackUsed: true, confidence: 1.0
         };
     }
     
     invalidate(path: string, cascade: boolean = false): void {
-        // TODO: Phase 2 - Implement UCG invalidation
-        console.log(`[AstManager] Invalidate ${path}, cascade: ${cascade}`);
+        if (FeatureFlags.isEnabled(FeatureFlags.UCG_ENABLED)) {
+            this.getUCG().invalidate(path, cascade);
+        }
     }
 
     public supportsQueries(): boolean {

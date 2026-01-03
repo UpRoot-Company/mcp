@@ -141,6 +141,8 @@ export interface TopologyInfo {
     fallbackUsed: boolean;
     /** Extraction duration in ms */
     extractionTimeMs: number;
+    /** Optional error during extraction */
+    error?: string;
 }
 
 /**

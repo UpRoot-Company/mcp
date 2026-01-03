@@ -1,6 +1,5 @@
 import { LOD_LEVEL, AnalysisRequest, LODResult, LODPromotionStats } from '../types.js';
-// import { ContextNode } from '../orchestration/context/ContextNode.js'; // Will create in Phase 2
-type ContextNode = any;
+import { ContextNode } from '../orchestration/context/ContextNode.js';
 
 /**
  * Adaptive AST Manager interface supporting granular LOD-based analysis.
