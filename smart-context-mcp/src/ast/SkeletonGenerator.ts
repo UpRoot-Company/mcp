@@ -88,8 +88,11 @@ export class SkeletonGenerator {
                 : Boolean(maybeHasError);
 
             if (rootHasError) {
-                console.warn(`[SkeletonGenerator] Tree-sitter parse error in ${filePath}. Returning raw content.`);
-                return content;
+                const errorMsg = 'Skeleton generation failed due to parse error';
+                console.warn(`[SkeletonGenerator] ${errorMsg} in ${filePath}.`);
+                // If content is very large, truncate it to prevent token explosion
+                const displayContent = content.length > 1000 ? content.substring(0, 1000) + '...' : content;
+                return `/* ${errorMsg} */\n${displayContent}`;
             }
 
             const queryKey = `${langId}:${config.query}`;

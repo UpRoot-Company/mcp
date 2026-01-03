@@ -1,9 +1,16 @@
+import { createHash } from 'crypto';
+
+type RolloutMode = 'off' | 'on' | 'canary' | 'beta' | 'full';
+
 /**
  * Feature flags for gradual rollout and A/B testing.
  * Flags can be controlled via environment variables or runtime config.
  */
 export class FeatureFlags {
     private static flags: Map<string, boolean> = new Map();
+    private static modes: Map<string, RolloutMode> = new Map();
+    private static canaryUsers: Set<string> = new Set();
+    private static betaPercent = 10;
     
     /**
      * Enables the Adaptive Flow architecture (LOD + UCG).
@@ -34,25 +41,121 @@ export class FeatureFlags {
     static DUAL_WRITE_VALIDATION = 'dual_write_validation';
     
     static initialize(): void {
-        // Read from environment variables
-        this.set(this.ADAPTIVE_FLOW_ENABLED, process.env.SMART_CONTEXT_ADAPTIVE_FLOW_ENABLED === 'true');
-        this.set(this.TOPOLOGY_SCANNER_ENABLED, process.env.SMART_CONTEXT_TOPOLOGY_SCANNER_ENABLED === 'true');
-        this.set(this.UCG_ENABLED, process.env.SMART_CONTEXT_UCG_ENABLED === 'true');
-        this.set(this.DUAL_WRITE_VALIDATION, process.env.SMART_CONTEXT_DUAL_WRITE_VALIDATION === 'true');
-        
-        console.log('[FeatureFlags] Initialized:', Object.fromEntries(this.flags));
+        this.canaryUsers = this.parseCanaryUsers(process.env.SMART_CONTEXT_CANARY_USERS);
+        this.betaPercent = this.parseBetaPercent(process.env.SMART_CONTEXT_BETA_PERCENT);
+
+        this.applyEnvFlag(this.ADAPTIVE_FLOW_ENABLED, process.env.SMART_CONTEXT_ADAPTIVE_FLOW_ENABLED);
+        this.applyEnvFlag(this.TOPOLOGY_SCANNER_ENABLED, process.env.SMART_CONTEXT_TOPOLOGY_SCANNER_ENABLED);
+        this.applyEnvFlag(this.UCG_ENABLED, process.env.SMART_CONTEXT_UCG_ENABLED);
+        this.applyEnvFlag(this.DUAL_WRITE_VALIDATION, process.env.SMART_CONTEXT_DUAL_WRITE_VALIDATION);
+
+        console.log('[FeatureFlags] Initialized:', this.debugState());
     }
     
-    static isEnabled(flag: string): boolean {
-        return this.flags.get(flag) ?? false;
+    static isEnabled(flag: string, context?: { userId?: string }): boolean {
+        const enabled = this.flags.get(flag) ?? false;
+        if (!enabled) return false;
+        const mode = this.modes.get(flag) ?? (enabled ? 'on' : 'off');
+        const userId = context?.userId;
+        if (!userId) return enabled;
+        if (mode === 'canary') {
+            return this.isCanaryUser(userId);
+        }
+        if (mode === 'beta') {
+            return this.isInBetaCohort(userId);
+        }
+        return enabled;
     }
     
-    static set(flag: string, enabled: boolean): void {
+    static set(flag: string, enabled: boolean, mode?: RolloutMode): void {
         this.flags.set(flag, enabled);
+        this.modes.set(flag, mode ?? (enabled ? 'on' : 'off'));
     }
     
     static getAll(): Record<string, boolean> {
         return Object.fromEntries(this.flags);
+    }
+
+    static getMode(flag: string): RolloutMode {
+        return this.modes.get(flag) ?? 'off';
+    }
+
+    private static applyEnvFlag(flag: string, rawValue: string | undefined): void {
+        const { enabled, mode } = this.parseFlagState(rawValue);
+        this.flags.set(flag, enabled);
+        this.modes.set(flag, mode);
+    }
+
+    private static parseFlagState(rawValue: string | undefined): { enabled: boolean; mode: RolloutMode } {
+        if (!rawValue) {
+            return { enabled: false, mode: 'off' };
+        }
+        const [modePart, payload] = rawValue.split(':', 2);
+        const normalized = modePart.trim().toLowerCase();
+        switch (normalized) {
+            case 'true':
+            case '1':
+            case 'on':
+                return { enabled: true, mode: 'on' };
+            case 'full':
+                return { enabled: true, mode: 'full' };
+            case 'canary':
+                if (payload) {
+                    this.appendCanaryUsers(payload);
+                }
+                return { enabled: true, mode: 'canary' };
+            case 'beta':
+                if (payload) {
+                    this.betaPercent = this.parseBetaPercent(payload);
+                }
+                return { enabled: true, mode: 'beta' };
+            case 'false':
+            case '0':
+            case 'off':
+                return { enabled: false, mode: 'off' };
+            default:
+                return { enabled: rawValue === 'true', mode: rawValue === 'true' ? 'on' : 'off' };
+        }
+    }
+
+    private static parseCanaryUsers(raw?: string): Set<string> {
+        const users = new Set<string>();
+        if (!raw) return users;
+        raw.split(',').map(value => value.trim()).filter(Boolean).forEach(user => users.add(user));
+        return users;
+    }
+
+    private static appendCanaryUsers(raw: string): void {
+        raw.split(',').map(value => value.trim()).filter(Boolean).forEach(user => this.canaryUsers.add(user));
+    }
+
+    private static parseBetaPercent(raw?: string): number {
+        if (!raw) return this.betaPercent || 10;
+        const value = Number(raw);
+        if (!Number.isFinite(value)) return this.betaPercent || 10;
+        return Math.max(0, Math.min(100, value));
+    }
+
+    private static isCanaryUser(userId: string): boolean {
+        if (this.canaryUsers.size === 0) return false;
+        return this.canaryUsers.has(userId);
+    }
+
+    private static isInBetaCohort(userId: string): boolean {
+        if (this.betaPercent <= 0) return false;
+        if (this.betaPercent >= 100) return true;
+        const hash = createHash('sha1').update(userId).digest('hex');
+        const value = parseInt(hash.slice(0, 8), 16);
+        const percent = value % 10000;
+        return percent / 100 < this.betaPercent;
+    }
+
+    private static debugState(): Record<string, { enabled: boolean; mode: RolloutMode }> {
+        const entries: Array<[string, { enabled: boolean; mode: RolloutMode }]> = [];
+        for (const [flag, enabled] of this.flags.entries()) {
+            entries.push([flag, { enabled, mode: this.modes.get(flag) ?? 'off' }]);
+        }
+        return Object.fromEntries(entries);
     }
 }
 

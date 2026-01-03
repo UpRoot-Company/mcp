@@ -9,6 +9,7 @@ import * as os from 'os';
 describe('AdaptiveAstManager', () => {
     let manager: AstManager;
     let tempDir: string;
+    let previousFlags: Record<string, boolean>;
     
     beforeEach(async () => {
         tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ast-manager-test-'));
@@ -17,6 +18,7 @@ describe('AdaptiveAstManager', () => {
         await manager.init({ mode: 'test', rootPath: tempDir });
         
         // Enable adaptive flow for testing
+        previousFlags = FeatureFlags.getAll();
         FeatureFlags.set(FeatureFlags.ADAPTIVE_FLOW_ENABLED, true);
         FeatureFlags.set(FeatureFlags.TOPOLOGY_SCANNER_ENABLED, true);
         FeatureFlags.set(FeatureFlags.UCG_ENABLED, true);
@@ -27,7 +29,10 @@ describe('AdaptiveAstManager', () => {
             fs.rmSync(tempDir, { recursive: true, force: true });
         }
         await AstManager.resetForTestingAsync();
-        FeatureFlags.set(FeatureFlags.ADAPTIVE_FLOW_ENABLED, false);
+        const currentKeys = Object.keys(FeatureFlags.getAll());
+        for (const key of currentKeys) {
+            FeatureFlags.set(key, previousFlags[key] ?? false);
+        }
     });
     
     describe('LOD Management', () => {
@@ -73,6 +78,29 @@ describe('AdaptiveAstManager', () => {
             
             expect(result.fallbackUsed).toBe(true);
             expect(result.currentLOD).toBe(3);
+        });
+    });
+
+    describe('TopologyScanner integration', () => {
+        it('should populate UCG topology data when enabled', async () => {
+            const testFile = path.join(tempDir, 'graph.ts');
+            fs.writeFileSync(testFile, 'import { helper } from "./dep";\nexport const value = helper();');
+            const depFile = path.join(tempDir, 'dep.ts');
+            fs.writeFileSync(depFile, 'export const helper = () => 42;');
+
+            const result = await manager.ensureLOD({ path: testFile, minLOD: 1 });
+            expect(result.fallbackUsed).toBe(false);
+            const node = manager.getUCG().getNode(testFile);
+            expect(node?.topology?.imports?.[0]?.source).toContain('./dep');
+        });
+
+        it('should mark fallback when TopologyScanner is disabled', async () => {
+            FeatureFlags.set(FeatureFlags.TOPOLOGY_SCANNER_ENABLED, false);
+            const testFile = path.join(tempDir, 'graph-fallback.ts');
+            fs.writeFileSync(testFile, 'export const flag = true;');
+
+            const result = await manager.ensureLOD({ path: testFile, minLOD: 1 });
+            expect(result.fallbackUsed).toBe(true);
         });
     });
     

@@ -1,6 +1,5 @@
 import path from "path";
 import crypto from "crypto";
-import { AstManager } from "../../ast/AstManager.js";
 import { LRUCache } from "lru-cache";
 import { InternalToolRegistry } from "../InternalToolRegistry.js";
 import { OrchestrationContext } from "../OrchestrationContext.js";
@@ -9,6 +8,8 @@ import { BudgetManager } from "../BudgetManager.js";
 import { analyzeQuery } from "../../engine/search/QueryMetrics.js";
 import { IntegrityEngine } from "../../integrity/IntegrityEngine.js";
 import type { IntegrityReport } from "../../integrity/IntegrityTypes.js";
+import { UnifiedContextGraph } from "../context/UnifiedContextGraph.js";
+import type { TopologyInfo } from "../../types.js";
 
 type ExploreItem = {
     kind: "document_section" | "file_preview" | "file_full" | "symbol" | "directory";
@@ -302,6 +303,8 @@ export class ExplorePillar {
                     }
                 }
 
+                const ucg = context.getState<UnifiedContextGraph>('ucg');
+
                 if (includeCode) {
                     const codeResults = await this.runTool(context, "search_project", {
                         query,
@@ -324,18 +327,21 @@ export class ExplorePillar {
                         };
 
                         try {
-                            const manager = AstManager.getInstance();
-                            const lodResult = await manager.ensureLOD({ path: item.path, minLOD: 1 }) as any;
-                            if (lodResult.currentLOD >= 1 && lodResult.topology) {
-                                codeItem.metadata = {
-                                    ...codeItem.metadata,
-                                    symbols: lodResult.topology.topLevelSymbols?.map((s: any) => s.name).slice(0, 10),
-                                    exports: lodResult.topology.exports?.map((e: any) => e.name).slice(0, 5),
-                                    lod: lodResult.currentLOD,
-                                    dependencyCount: lodResult.topology.imports?.length ?? 0
-                                };
+                            if (item.path) {
+                                const graphSnapshot = await this.collectTopologyMetadata(ucg, item.path);
+                                if (graphSnapshot.topology) {
+                                    codeItem.metadata = {
+                                        ...codeItem.metadata,
+                                        symbols: graphSnapshot.topology.topLevelSymbols?.map((s) => s.name).slice(0, 10),
+                                        exports: graphSnapshot.topology.exports?.map((e) => e.name).slice(0, 5),
+                                        lod: graphSnapshot.lod,
+                                        dependencyCount: graphSnapshot.dependencyCount,
+                                        dependents: graphSnapshot.dependents
+                                    };
+                                }
                             }
-                        } catch {
+                        } catch (error) {
+                            console.debug('[ExplorePillar] Topology enrichment skipped:', error);
                             // LOD failure is non-fatal for exploration
                         }
                         return codeItem;
@@ -723,6 +729,28 @@ export class ExplorePillar {
             duration: Date.now() - started
         });
         return output;
+    }
+
+    private async collectTopologyMetadata(
+        ucg: UnifiedContextGraph | undefined,
+        filePath: string
+    ): Promise<{ topology?: TopologyInfo; lod?: number; dependencyCount?: number; dependents?: number }> {
+        if (!ucg || !filePath) {
+            return {};
+        }
+
+        await ucg.ensureLOD({ path: filePath, minLOD: 1 });
+        const node = ucg.getNode(filePath);
+        if (!node || !node.topology) {
+            return {};
+        }
+
+        return {
+            topology: node.topology,
+            lod: node.lod,
+            dependencyCount: node.topology.imports?.length ?? node.dependencies.size,
+            dependents: node.dependents.size
+        };
     }
 }
 

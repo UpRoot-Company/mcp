@@ -14,7 +14,7 @@ import type { ResolveError } from '../../types.js';
 import { EditCoordinator } from '../../engine/EditCoordinator.js';
 import { EditorEngine } from '../../engine/Editor.js';
 import { HistoryEngine } from '../../engine/History.js';
-import { AstManager } from '../../ast/AstManager.js';
+import { UnifiedContextGraph } from '../context/UnifiedContextGraph.js';
 import { NodeFileSystem } from '../../platform/FileSystem.js';
 import { SymbolImpactAnalyzer, type SymbolImpactRequest, type SymbolImpactResult } from '../../engine/SymbolImpactAnalyzer.js';
 import { AstDiffEngine } from '../../ast/AstDiffEngine.js';
@@ -52,6 +52,7 @@ export class ChangePillar {
     const { targets, constraints, originalIntent, action } = intent;
     const { dryRun = true, includeImpact = false, includeSymbolImpact = false } = constraints;
       const integrityOptions = IntegrityEngine.resolveOptions(constraints.integrity, "change");
+      const ucg = context.getState<UnifiedContextGraph>('ucg');
 
       const rawEdits = Array.isArray(constraints.edits) ? constraints.edits : [];
       const targetFiles = this.resolveTargetFiles(constraints, targets);
@@ -181,29 +182,10 @@ export class ChangePillar {
     // ADR-043: Enhanced impact discovery using UCG dependents
     const dependencyPromise = !dryRun && budget.allowImpact && targetPath
       ? (async () => {
-          const manager = AstManager.getInstance();
-          await manager.ensureLOD({ path: targetPath, minLOD: 1 });
-          const node = manager.getUCG().getNode(targetPath);
-          
-          if (node) {
-            const dependents = [...node.dependents];
-            // Fetch LOD 1 info for all dependents to show symbol usage context
-            await Promise.all(dependents.map(dep => manager.ensureLOD({ path: dep, minLOD: 1 })));
-            
-            return {
-              success: true,
-              edges: dependents.map(dep => ({
-                from: dep,
-                to: targetPath as string,
-                type: 'dependency',
-                metadata: {
-                  lod: 1,
-                  symbols: (manager.getUCG().getNode(dep) as any)?.topology?.topLevelSymbols?.map((s: any) => s.name).slice(0, 5)
-                }
-              }))
-            };
+          const deps = await this.collectDependentsFromGraph(ucg, targetPath);
+          if (deps) {
+            return deps;
           }
-          // Fallback
           return this.runTool(context, 'analyze_relationship', { target: targetPath, mode: 'dependencies', direction: 'both' });
         })()
       : Promise.resolve(null);
@@ -400,6 +382,58 @@ export class ChangePillar {
     }
 
 
+  }
+
+  private async collectDependentsFromGraph(
+    ucg: UnifiedContextGraph | undefined,
+    targetPath: string | undefined
+  ): Promise<{ success: boolean; edges: Array<{ from: string; to: string; type: string; metadata?: Record<string, unknown> }> } | undefined> {
+    if (!ucg || !targetPath) {
+      return undefined;
+    }
+
+    try {
+      await ucg.ensureLOD({ path: targetPath, minLOD: 1 });
+    } catch (error) {
+      console.debug('[ChangePillar] Failed to promote target for shared graph impact:', error);
+      return undefined;
+    }
+
+    const node = ucg.getNode(targetPath);
+    if (!node) {
+      return undefined;
+    }
+
+    const dependents = [...node.dependents];
+    if (dependents.length === 0) {
+      return { success: true, edges: [] };
+    }
+
+    await Promise.all(dependents.map(async (dep) => {
+      try {
+        await ucg.ensureLOD({ path: dep, minLOD: 1 });
+      } catch {
+        // Missing metadata is acceptable; rely on fallback if needed
+      }
+    }));
+
+    const edges = dependents.map(dep => {
+      const dependentNode = ucg.getNode(dep);
+      return {
+        from: dep,
+        to: targetPath,
+        type: 'dependency',
+        metadata: dependentNode?.topology
+          ? {
+              topology: dependentNode.topology,
+              lod: dependentNode.lod,
+              symbols: dependentNode.topology.topLevelSymbols?.map((symbol: any) => symbol.name).slice(0, 5)
+            }
+          : undefined
+      };
+    });
+
+    return { success: true, edges };
   }
 
   private toImpactReport(impact: any, deps: any, targetPath: string, hotSpots: any) {

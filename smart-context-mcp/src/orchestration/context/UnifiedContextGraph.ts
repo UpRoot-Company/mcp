@@ -10,6 +10,7 @@ import { AstManager } from '../../ast/AstManager.js';
 import { FeatureFlags } from '../../config/FeatureFlags.js';
 import { ModuleResolver } from '../../ast/ModuleResolver.js';
 import { FileWatcher } from './FileWatcher.js';
+import { AdaptiveFlowMetrics } from '../../utils/AdaptiveFlowMetrics.js';
 
 /**
  * Unified Context Graph: Centralized state for all file analysis.
@@ -25,6 +26,8 @@ export class UnifiedContextGraph {
     private moduleResolver: ModuleResolver;
     private rootPath: string;
     private fileWatcher?: FileWatcher;
+    private persistPath: string;
+    private saveTimeout?: NodeJS.Timeout;
     
     private stats = {
         promotions: { l0_to_l1: 0, l1_to_l2: 0, l2_to_l3: 0 },
@@ -42,11 +45,65 @@ export class UnifiedContextGraph {
         this.skeletonCache = new SkeletonCache(rootPath);
         this.astManager = AstManager.getInstance();
         this.moduleResolver = new ModuleResolver(rootPath);
+        this.persistPath = path.join(rootPath, '.smart-context', 'data', 'ucg.json');
         
         if (enableWatcher) {
             this.fileWatcher = new FileWatcher(this, rootPath);
             this.fileWatcher.start();
         }
+
+        this.load().catch(() => {});
+    }
+
+    private async save() {
+        if (this.saveTimeout) clearTimeout(this.saveTimeout);
+        this.saveTimeout = setTimeout(() => {
+            try {
+                const data = {
+                    nodes: Array.from(this.nodes.entries()).map(([path, node]) => ({
+                        path,
+                        lod: node.lod,
+                        topology: node.topology,
+                        structure: node.structure,
+                        lastModified: node.lastModified,
+                        size: node.size,
+                        dependencies: Array.from(node.dependencies),
+                        dependents: Array.from(node.dependents)
+                    })),
+                    lruQueue: this.lruQueue
+                };
+                if (!fs.existsSync(path.dirname(this.persistPath))) {
+                    fs.mkdirSync(path.dirname(this.persistPath), { recursive: true });
+                }
+                fs.writeFileSync(this.persistPath, JSON.stringify(data, null, 2));
+            } catch (e) {
+                console.error('[UCG] Failed to save graph state:', e);
+            }
+        }, 2000);
+    }
+
+    private async load() {
+        try {
+            if (!fs.existsSync(this.persistPath)) return;
+            const content = fs.readFileSync(this.persistPath, 'utf-8');
+            const data = JSON.parse(content);
+            
+            for (const n of data.nodes) {
+                const node = new ContextNode(n.path, n.lod);
+                node.topology = n.topology;
+                node.structure = n.structure;
+                node.lastModified = n.lastModified;
+                node.size = n.size;
+                node.dependencies = new Set(n.dependencies);
+                node.dependents = new Set(n.dependents);
+                this.nodes.set(n.path, node);
+            }
+            this.lruQueue = data.lruQueue || [];
+            console.log(`[UCG] Loaded ${this.nodes.size} nodes from persistence.`);
+        } catch (e) {
+            console.error('[UCG] Failed to load graph state:', e);
+        }
+        this.reportMetrics();
     }
     
     async ensureLOD(request: AnalysisRequest): Promise<LODResult> {
@@ -67,6 +124,7 @@ export class UnifiedContextGraph {
             let fallbackUsed = false;
             let confidence = 1.0;
             for (let targetLOD = node.lod + 1; targetLOD <= request.minLOD; targetLOD++) {
+                const beforePromotion = node.lod;
                 if (targetLOD === 1) {
                     const res = await this.promoteToLOD1(node);
                     fallbackUsed = res.fallbackUsed;
@@ -79,8 +137,13 @@ export class UnifiedContextGraph {
                     await this.promoteToLOD3(node);
                     this.stats.promotions.l2_to_l3++;
                 }
+                if (node.lod > beforePromotion) {
+                    AdaptiveFlowMetrics.recordPromotion(beforePromotion, node.lod);
+                }
             }
             this.evictIfNeeded();
+            this.save();
+            this.reportMetrics();
             return { path: request.path, previousLOD, currentLOD: node.lod, requestedLOD: request.minLOD, promoted: true, durationMs: performance.now() - startTime, fallbackUsed, confidence };
         } catch (error) {
             node.metadata.lastError = error instanceof Error ? error.message : String(error);
@@ -100,15 +163,17 @@ export class UnifiedContextGraph {
     }
     
     private async promoteToLOD2(node: ContextNode) {
+        const content = fs.readFileSync(node.path, 'utf-8');
         const skeleton = await this.skeletonCache.getSkeleton(
             node.path,
             { detailLevel: 'standard' },
             async (f, opts) => {
-                const content = fs.readFileSync(f, 'utf-8');
                 return this.skeletonGenerator.generateSkeleton(f, content, opts);
             }
         );
-        node.setSkeleton(skeleton);
+        const structure = await this.skeletonGenerator.generateStructureJson(node.path, content);
+        node.setSkeleton(skeleton, structure);
+        this.stats.promotions.l1_to_l2++;
     }
     
     private async promoteToLOD3(node: ContextNode) {
@@ -149,6 +214,8 @@ export class UnifiedContextGraph {
                 }
             }
         }
+        this.save();
+        this.reportMetrics();
     }
     
     getNode(path: string) { return this.nodes.get(path); }
@@ -170,6 +237,8 @@ export class UnifiedContextGraph {
         if (idx !== -1) this.lruQueue.splice(idx, 1);
         
         this.nodes.delete(path);
+        this.save();
+        this.reportMetrics();
     }
 
     async dispose(): Promise<void> {
@@ -196,6 +265,7 @@ export class UnifiedContextGraph {
                 this.stats.evictions++;
             }
         }
+        this.reportMetrics();
     }
     
     getStats() {
@@ -206,5 +276,16 @@ export class UnifiedContextGraph {
         this.nodes.clear();
         this.lruQueue = [];
         this.stats = { promotions: { l0_to_l1: 0, l1_to_l2: 0, l2_to_l3: 0 }, evictions: 0, cascadeInvalidations: 0 };
+        this.reportMetrics();
+    }
+
+    private reportMetrics(): void {
+        const stats = this.getStats();
+        AdaptiveFlowMetrics.captureUcgSnapshot({
+            node_count: stats.nodes,
+            evictions: stats.evictions,
+            cascade_invalidations: stats.cascadeInvalidations,
+            memory_estimate_mb: stats.memoryEstimateMB ?? 0
+        });
     }
 }

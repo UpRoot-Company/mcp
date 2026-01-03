@@ -1,5 +1,6 @@
 import * as path from 'path';
 import * as fs from 'fs';
+import { createHash } from 'crypto';
 import { performance } from 'perf_hooks';
 import { AstBackend, AstDocument } from './AstBackend.js';
 import { WebTreeSitterBackend } from './WebTreeSitterBackend.js';
@@ -10,6 +11,9 @@ import { LanguageConfigLoader } from '../config/LanguageConfig.js';
 import { AdaptiveAstManager } from './AdaptiveAstManager.js';
 import { FeatureFlags } from '../config/FeatureFlags.js';
 import { UnifiedContextGraph } from '../orchestration/context/UnifiedContextGraph.js';
+import { AdaptiveFlowMetrics } from '../utils/AdaptiveFlowMetrics.js';
+import { SkeletonCache } from './SkeletonCache.js';
+import { SkeletonGenerator } from './SkeletonGenerator.js';
 
 export class AstManager implements AdaptiveAstManager {
     private static instance: AstManager | undefined;
@@ -19,6 +23,8 @@ export class AstManager implements AdaptiveAstManager {
     private activeBackend?: string;
     private languageConfig?: LanguageConfigLoader;
     private ucg?: UnifiedContextGraph;
+    private skeletonCache?: SkeletonCache;
+    private skeletonGenerator?: SkeletonGenerator;
 
     // NEW: LOD promotion statistics
     private lodStats: LODPromotionStats = {
@@ -28,6 +34,12 @@ export class AstManager implements AdaptiveAstManager {
         fallback_rate: 0,
         avg_promotion_time_ms: { l0_to_l1: 0, l1_to_l2: 0, l2_to_l3: 0 },
         total_files: 0
+    };
+
+    private dualWriteStats = {
+        total: 0,
+        mismatches: 0,
+        samples: [] as Array<{ path: string; lod: LOD_LEVEL; ucgHash: string; legacyHash: string; timestamp: number }>
     };
 
     private constructor() {
@@ -170,7 +182,7 @@ export class AstManager implements AdaptiveAstManager {
         
         // Dual-write validation (if enabled)
         if (FeatureFlags.isEnabled(FeatureFlags.DUAL_WRITE_VALIDATION)) {
-            this.validateDualWrite(request.path, result);
+            await this.validateDualWrite(request.path, result);
         }
         
         return result;
@@ -203,14 +215,73 @@ export class AstManager implements AdaptiveAstManager {
         }
     }
 
-    private validateDualWrite(path: string, result: LODResult) {
-        if (result.currentLOD >= 2) {
-            const ucgNode = this.getUCG().getNode(path);
-            // skeletonCache is managed by UCG internally
-            if (ucgNode?.skeleton) {
-                console.debug(`[DualWrite] Validating consistency for ${path}`);
-            }
+    private async validateDualWrite(path: string, result: LODResult): Promise<void> {
+        if (result.currentLOD < 2) {
+            return;
         }
+
+        const ucgNode = this.getUCG().getNode(path);
+        const ucgSkeleton = ucgNode?.skeleton;
+        if (!ucgSkeleton) {
+            return;
+        }
+
+        try {
+            const cache = this.getSkeletonCache();
+            const generator = this.getSkeletonGenerator();
+            const legacySkeleton = await cache.getSkeleton(
+                path,
+                { detailLevel: 'standard', includeComments: false },
+                async (filePath, options) => {
+                    const content = await fs.promises.readFile(filePath, 'utf-8');
+                    return generator.generateSkeleton(filePath, content, options);
+                }
+            );
+
+            const ucgHash = this.hashSkeleton(ucgSkeleton);
+            const legacyHash = this.hashSkeleton(legacySkeleton);
+
+            this.dualWriteStats.total++;
+            if (ucgHash !== legacyHash) {
+                this.dualWriteStats.mismatches++;
+                this.dualWriteStats.samples.unshift({
+                    path,
+                    lod: result.currentLOD,
+                    ucgHash,
+                    legacyHash,
+                    timestamp: Date.now()
+                });
+                this.dualWriteStats.samples = this.dualWriteStats.samples.slice(0, 10);
+                console.warn(`[DualWrite] Skeleton mismatch detected for ${path}`, {
+                    lod: result.currentLOD,
+                    ucgHash,
+                    legacyHash
+                });
+            } else if (this.dualWriteStats.total % 100 === 0) {
+                console.info(`[DualWrite] ${this.dualWriteStats.total} validations executed (${this.dualWriteStats.mismatches} mismatches).`);
+            }
+        } catch (error) {
+            console.warn(`[DualWrite] Failed to validate ${path}:`, error);
+        }
+    }
+
+    private getSkeletonCache(): SkeletonCache {
+        if (!this.skeletonCache) {
+            const root = this.engineConfig.rootPath ?? process.cwd();
+            this.skeletonCache = new SkeletonCache(root);
+        }
+        return this.skeletonCache;
+    }
+
+    private getSkeletonGenerator(): SkeletonGenerator {
+        if (!this.skeletonGenerator) {
+            this.skeletonGenerator = new SkeletonGenerator();
+        }
+        return this.skeletonGenerator;
+    }
+
+    private hashSkeleton(content: string): string {
+        return createHash('sha1').update(content).digest('hex').slice(0, 12);
     }
     
     getFileNode(path: string) {
@@ -233,6 +304,7 @@ export class AstManager implements AdaptiveAstManager {
         const content = fs.existsSync(path) ? fs.readFileSync(path, 'utf-8') : '';
         await this.parseFile(path, content);
         const durationMs = performance.now() - startTime;
+        AdaptiveFlowMetrics.recordPromotion(0, 3);
         
         return {
             path, previousLOD: 0, currentLOD: 3, requestedLOD: 3,

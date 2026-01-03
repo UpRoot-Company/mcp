@@ -1,4 +1,4 @@
-import { LOD_LEVEL, TopologyInfo } from '../../types.js';
+import { LOD_LEVEL, TopologyInfo, SymbolInfo } from '../../types.js';
 
 /**
  * Node in the Unified Context Graph.
@@ -11,6 +11,7 @@ export class ContextNode {
     public size: number;
     public topology?: TopologyInfo;
     public skeleton?: string;
+    public structure?: SymbolInfo[]; // NEW: LOD 2 structured metadata
     public astDocId?: string;
     public dependencies: Set<string>;
     public dependents: Set<string>;
@@ -39,8 +40,9 @@ export class ContextNode {
         this.metadata.promotions++;
     }
     
-    setSkeleton(skeleton: string): void {
+    setSkeleton(skeleton: string, structure?: SymbolInfo[]): void {
         this.skeleton = skeleton;
+        this.structure = structure;
         this.lod = Math.max(this.lod, 2) as LOD_LEVEL;
         this.lodUpdatedAt = Date.now();
         this.metadata.promotions++;
@@ -58,7 +60,10 @@ export class ContextNode {
             this.lod = newLod;
             this.lodUpdatedAt = Date.now();
             if (newLod < 3) this.astDocId = undefined;
-            if (newLod < 2) this.skeleton = undefined;
+            if (newLod < 2) {
+                this.skeleton = undefined;
+                this.structure = undefined;
+            }
             if (newLod < 1) {
                 this.topology = undefined;
                 this.dependencies.clear();

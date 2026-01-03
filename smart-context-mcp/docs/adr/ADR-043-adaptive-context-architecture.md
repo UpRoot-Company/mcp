@@ -2611,10 +2611,10 @@ export class AstManager implements AdaptiveAstManager {
 ```
 
 **Checklist for 2.3:**
-- [ ] Implement complete `ensureLOD()` in AstManager
-- [ ] Add UCG lazy initialization in AstManager
-- [ ] Implement dual-write validation logic
-- [ ] Update LOD promotion stats tracking
+- [x] Implement complete `ensureLOD()` in AstManager
+- [x] Add UCG lazy initialization in AstManager
+- [x] Implement dual-write validation logic
+- [x] Update LOD promotion stats tracking
 - [ ] Add integration test: UCG + legacy caches side-by-side
 - [ ] Verify dual-write logs inconsistencies correctly
 - [ ] Test feature flag combinations (UCG only, TopologyScanner only, both)
@@ -2889,12 +2889,16 @@ async function benchmarkLOD1(): Promise<BenchmarkResult> {
 }
 ```
 
+**Latest Runs (2026-01-04):**
+1. `npm run benchmark:lod` → LOD 3 total 551.46ms (11.03ms/file) vs LOD 1 total 76.08ms (1.52ms/file), improvement $7.25\times$, report `benchmarks/reports/lod-final-1767453006357.md`.
+2. `npm run benchmark:lod` → LOD 3 total 540.71ms (10.81ms/file) vs LOD 1 total 69.12ms (1.38ms/file), improvement $7.82\times$, report `benchmarks/reports/lod-final-1767453340537.md`.
+
 **Checklist for 4.1:**
-- [ ] Run full benchmark suite: `npm run benchmark:lod`
-- [ ] Verify LOD 1 extraction <2ms per file
+- [x] Run full benchmark suite: `npm run benchmark:lod`
+- [x] Verify LOD 1 extraction <2ms per file
 - [ ] Verify LOD promotion latency: <100ms (L1→L2), <500ms (L2→L3)
 - [ ] Verify memory usage <500MB for 10,000 files
-- [ ] Document results in `benchmarks/reports/lod-final-$(date +%s).md`
+- [x] Document results in `benchmarks/reports/lod-final-$(date +%s).md`
 - [ ] Compare with baseline (Phase 1): Should meet or exceed all targets
 
 ---
@@ -2973,15 +2977,19 @@ export class AdaptiveFlowMetrics {
 }
 ```
 
+**Implementation Notes (2026-01-04):**
+- `src/utils/AdaptiveFlowMetrics.ts` now ships with the exact interface above.
+- `TopologyScanner`, `UnifiedContextGraph`, and `AstManager` publish scan durations, promotion events, and snapshot stats directly into this singleton so Phase 4 rollout can stream real-time observability data.
+
 **Alert Conditions:**
 - [ ] TopologyScanner success_rate < 0.95 → Email alert + Slack notification
 - [ ] UCG memory > 500MB → Auto-trigger LRU eviction audit
 - [ ] LOD promotion L1→L3 > 50% → Log warning (LOD 1 not effective)
 
 **Checklist for 4.3:**
-- [ ] Implement AdaptiveFlowMetrics class
-- [ ] Add metrics recording to UCG, TopologyScanner, AstManager
-- [ ] Set up alert thresholds in monitoring system
+- [x] Implement AdaptiveFlowMetrics class
+- [x] Add metrics recording to UCG, TopologyScanner, AstManager
+- [ ] Set up alert thresholds in monitoring system *(pending — metrics now emitted via `AdaptiveFlowMetrics`, need wiring into alerting stack)*
 - [ ] Create dashboard: Grafana/Datadog for real-time metrics
 - [ ] Export metrics daily: `logs/adaptive-flow-$(date +%Y%m%d).json`
 

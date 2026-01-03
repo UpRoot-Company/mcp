@@ -1,11 +1,11 @@
 
-import { AstManager } from '../../ast/AstManager.js';
 import { InternalToolRegistry } from '../InternalToolRegistry.js';
 import { OrchestrationContext } from '../OrchestrationContext.js';
 import { ParsedIntent } from '../IntentRouter.js';
 import { BudgetManager } from '../BudgetManager.js';
 import { analyzeQuery, isStrongQuery } from '../../engine/search/QueryMetrics.js';
 import { IntegrityEngine } from '../../integrity/IntegrityEngine.js';
+import { UnifiedContextGraph } from '../context/UnifiedContextGraph.js';
 
 
 export class UnderstandPillar {
@@ -27,6 +27,7 @@ export class UnderstandPillar {
     const integrityOptions = IntegrityEngine.resolveOptions(constraints.integrity, "understand");
 
     this.progressLog(progressEnabled, `Start subject="${subject}" depth=${depth}.`);
+    const ucg = context.getState<UnifiedContextGraph>('ucg');
 
     // 1. 초기 검색 수행
     let searchResult = { results: [] as any[] };
@@ -146,28 +147,10 @@ export class UnderstandPillar {
     }
 
     if (includeDependencies && allowGraphs) {
-      // ADR-043: Directly use UCG for dependency analysis
-      const manager = AstManager.getInstance();
-      await manager.ensureLOD({ path: filePath, minLOD: 1 }); // Ensure base topology
-      const node = manager.getUCG().getNode(filePath);
-      
-            if (node) {
-        // Collect LOD 1 info for all direct dependencies
-        const directDeps = [...node.dependencies];
-        await Promise.all(directDeps.map(dep => manager.ensureLOD({ path: dep, minLOD: 1 })));
-        
-        deps = {
-          success: true,
-          edges: directDeps.map(dep => ({
-            from: filePath,
-            to: dep,
-            type: 'dependency',
-            metadata: (manager.getUCG().getNode(dep) as any)?.topology ?? {}
-          }))
-        };
-      }
- else {
-        // Fallback to legacy tool if UCG node missing
+      deps = await this.collectDependenciesFromGraph(ucg, filePath);
+
+      if (!deps || !Array.isArray(deps.edges) || deps.edges.length === 0) {
+        // Fallback to legacy tool if shared graph is unavailable or cold
         deps = await this.runTool(context, 'analyze_relationship', {
           target: filePath,
           mode: 'dependencies',
@@ -426,6 +409,54 @@ export class UnderstandPillar {
       }
     }
     return null;
+  }
+
+  private async collectDependenciesFromGraph(
+    ucg: UnifiedContextGraph | undefined,
+    filePath: string
+  ): Promise<{ success: boolean; edges: Array<{ from: string; to: string; type: string; metadata?: Record<string, unknown> }> } | undefined> {
+    if (!ucg || !filePath) {
+      return undefined;
+    }
+
+    try {
+      await ucg.ensureLOD({ path: filePath, minLOD: 1 });
+    } catch (error) {
+      console.debug('[UnderstandPillar] Failed to promote primary file for shared graph:', error);
+      return undefined;
+    }
+
+    const node = ucg.getNode(filePath);
+    if (!node) {
+      return undefined;
+    }
+
+    const dependencies = [...node.dependencies];
+    if (dependencies.length === 0) {
+      return { success: true, edges: [] };
+    }
+
+    await Promise.all(dependencies.map(async (dep) => {
+      try {
+        await ucg.ensureLOD({ path: dep, minLOD: 1 });
+      } catch {
+        // Non-fatal: dependency remains but without enriched metadata
+      }
+    }));
+
+    const edges = dependencies.map(dep => {
+      const dependencyNode = ucg.getNode(dep);
+      return {
+        from: filePath,
+        to: dep,
+        type: 'dependency',
+        metadata: dependencyNode?.topology
+          ? { topology: dependencyNode.topology, lod: dependencyNode.lod }
+          : undefined
+      };
+    });
+
+    return { success: true, edges };
   }
 
   private async runTool(

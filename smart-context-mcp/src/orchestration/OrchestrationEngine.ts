@@ -14,6 +14,9 @@ import { GuidanceGenerator } from './GuidanceGenerator.js';
 import { AutoCorrectionStrategy } from './AutoCorrectionStrategy.js';
 import { EagerLoadingStrategy } from './EagerLoadingStrategy.js';
 import { CachingStrategy } from './CachingStrategy.js';
+import { FeatureFlags } from '../config/FeatureFlags.js';
+import { AstManager } from '../ast/AstManager.js';
+import { UnifiedContextGraph } from './context/UnifiedContextGraph.js';
 
 
 export class OrchestrationEngine {
@@ -57,6 +60,7 @@ export class OrchestrationEngine {
 
   private async executePillarInternal(category: string, args: any): Promise<any> {
     const context = new OrchestrationContext();
+    this.seedUnifiedContext(context);
     const intent = typeof args === 'string'
       ? this.intentRouter.parse(args)
       : this.mapArgsToIntent(category, args);
@@ -435,4 +439,22 @@ export class OrchestrationEngine {
     return category === 'explore' || category === 'read' || category === 'navigate' || category === 'understand';
   }
 
+  private seedUnifiedContext(context: OrchestrationContext): void {
+    if (!FeatureFlags.isEnabled(FeatureFlags.ADAPTIVE_FLOW_ENABLED) ||
+        !FeatureFlags.isEnabled(FeatureFlags.UCG_ENABLED)) {
+      return;
+    }
+
+    const existing = context.getState<UnifiedContextGraph>('ucg');
+    if (existing) {
+      return;
+    }
+
+    try {
+      const ucg = AstManager.getInstance().getUCG();
+      context.setState('ucg', ucg);
+    } catch (error) {
+      console.warn('[OrchestrationEngine] Failed to seed UnifiedContextGraph:', error);
+    }
+  }
 }

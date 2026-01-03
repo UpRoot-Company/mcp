@@ -108,6 +108,63 @@ describe('UnifiedContextGraph', () => {
             const nodeB = ucg.getNode(fileB);
             expect(nodeB?.lod).toBe(0);
         });
+
+        it('should handle circular dependencies during invalidation', async () => {
+            const fileA = path.join(tempDir, 'a.ts');
+            const fileB = path.join(tempDir, 'b.ts');
+            // Circular: A -> B, B -> A
+            fs.writeFileSync(fileA, 'import { b } from "./b";');
+            fs.writeFileSync(fileB, 'import { a } from "./a";');
+            
+            await ucg.ensureLOD({ path: fileA, minLOD: 2 });
+            await ucg.ensureLOD({ path: fileB, minLOD: 2 });
+            
+            // Invalidate A, should not loop forever
+            ucg.invalidate(fileA, true);
+            
+            expect(ucg.getNode(fileA)?.lod).toBe(0);
+            expect(ucg.getNode(fileB)?.lod).toBe(1);
+        });
+    });
+
+    describe('Persistence', () => {
+        it('should save and load graph state', async () => {
+            const testFile = path.join(tempDir, 'persist.ts');
+            fs.writeFileSync(testFile, 'export const p = 1;');
+            
+            await ucg.ensureLOD({ path: testFile, minLOD: 1 });
+            
+            // Force immediate save for test
+            const ucgAny = ucg as any;
+            if (ucgAny.saveTimeout) clearTimeout(ucgAny.saveTimeout);
+            
+            const data = {
+                nodes: Array.from(ucgAny.nodes.entries()).map((entry: any) => ({
+                    path: entry[0],
+                    lod: entry[1].lod,
+                    topology: entry[1].topology,
+                    structure: entry[1].structure,
+                    lastModified: entry[1].lastModified,
+                    size: entry[1].size,
+                    dependencies: Array.from(entry[1].dependencies),
+                    dependents: Array.from(entry[1].dependents)
+                })),
+                lruQueue: ucgAny.lruQueue
+            };
+            fs.mkdirSync(path.dirname(ucgAny.persistPath), { recursive: true });
+            fs.writeFileSync(ucgAny.persistPath, JSON.stringify(data, null, 2));
+            
+            expect(fs.existsSync(ucgAny.persistPath)).toBe(true);
+            
+            // Create new UCG instance pointing to same root
+            const ucg2 = new UnifiedContextGraph(tempDir);
+            await (ucg2 as any).load();
+            
+            const node = ucg2.getNode(testFile);
+            expect(node).toBeDefined();
+            expect(node?.lod).toBe(1);
+            expect(node?.topology).toBeDefined();
+        });
     });
     
     describe('LRU Eviction', () => {

@@ -45,6 +45,35 @@ describe('TopologyScanner', () => {
             expect(result.imports[0].isDefault).toBe(true);
             expect(result.imports[0].namedImports).toContain('React');
         });
+
+        it('should extract type-only imports', async () => {
+            const testFile = path.join(tempDir, 'types.ts');
+            fs.writeFileSync(testFile, 'import type { Foo } from "types";\nimport { type Bar } from "module";');
+
+            const result = await scanner.extract(testFile);
+            expect(result.imports[0].isTypeOnly).toBe(true);
+        });
+
+        it('should extract namespace imports and re-exports', async () => {
+            const testFile = path.join(tempDir, 'namespace.ts');
+            fs.writeFileSync(testFile, 'import * as Utils from "./utils";\nexport * from "./shared";');
+
+            const result = await scanner.extract(testFile);
+            const namespaceImport = result.imports.find(imp => imp.namedImports.includes('* as Utils'));
+            expect(namespaceImport).toBeDefined();
+            const reExport = result.exports.find(exp => exp.reExportFrom === './shared');
+            expect(reExport).toBeDefined();
+        });
+
+        it('should extract dynamic imports', async () => {
+            const testFile = path.join(tempDir, 'dynamic.ts');
+            fs.writeFileSync(testFile, 'async function load() { return import("./feature"); }');
+
+            const result = await scanner.extract(testFile);
+            const dynamicEntries = result.imports.filter(imp => imp.isDynamic);
+            expect(dynamicEntries).toHaveLength(1);
+            expect(dynamicEntries[0].source).toBe('./feature');
+        });
         
         it('should extract top-level symbols', async () => {
             const testFile = path.join(tempDir, 'test.ts');

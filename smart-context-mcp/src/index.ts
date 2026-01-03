@@ -60,6 +60,7 @@ import { EmbeddingProviderFactory } from "./embeddings/EmbeddingProviderFactory.
 import { resolveEmbeddingConfigFromEnv } from "./embeddings/EmbeddingConfig.js";
 import { metrics } from "./utils/MetricsCollector.js";
 import { VectorIndexManager } from "./vector/VectorIndexManager.js";
+import { AdaptiveFlowReporter } from "./utils/AdaptiveFlowReporter.js";
 
 // Orchestration Imports
 import { OrchestrationEngine } from "./orchestration/OrchestrationEngine.js";
@@ -120,6 +121,7 @@ export class SmartContextServer {
     private heartbeatTimer?: NodeJS.Timeout;
     private shutdownRequested = false;
     private shutdownTimer?: NodeJS.Timeout;
+    private metricsReporter?: AdaptiveFlowReporter;
 
     constructor(rootPath: string) {
         this.server = new Server({
@@ -240,6 +242,7 @@ export class SmartContextServer {
         this.setupHandlers();
         this.setupShutdownHooks();
         this.startHeartbeat();
+        this.initMetricsReporter();
     }
 
     private isTestEnv(): boolean {
@@ -440,6 +443,33 @@ export class SmartContextServer {
         if (!this.heartbeatTimer) return;
         clearInterval(this.heartbeatTimer);
         this.heartbeatTimer = undefined;
+    }
+
+    private initMetricsReporter(): void {
+        if (this.isTestEnv()) return;
+        const enabled = process.env.SMART_CONTEXT_METRICS_ENABLED !== "false";
+        if (!enabled) return;
+        const reporter = new AdaptiveFlowReporter({
+            rootPath: this.rootPath,
+            exportDir: process.env.SMART_CONTEXT_METRICS_DIR ?? path.join(this.rootPath, "logs"),
+            exportIntervalMs: this.parseNumberEnv(process.env.SMART_CONTEXT_METRICS_INTERVAL_MS, 60_000),
+            alertThresholds: {
+                topologySuccessRate: this.parseNumberEnv(process.env.SMART_CONTEXT_TOPOLOGY_SUCCESS_MIN, 0.95),
+                ucgMemoryMb: this.parseNumberEnv(process.env.SMART_CONTEXT_UCG_MEMORY_MAX_MB, 500),
+                l3PromotionRatio: this.parseNumberEnv(process.env.SMART_CONTEXT_L3_PROMOTION_RATIO_MAX, 0.5)
+            },
+            onAlert: payload => {
+                console.warn(`[AdaptiveFlowReporter] ${payload.type}: ${payload.message}`);
+            }
+        });
+        reporter.start();
+        this.metricsReporter = reporter;
+    }
+
+    private parseNumberEnv(raw: string | undefined, fallback: number): number {
+        if (!raw) return fallback;
+        const value = Number(raw);
+        return Number.isFinite(value) ? value : fallback;
     }
 
     private setupShutdownHooks(): void {
