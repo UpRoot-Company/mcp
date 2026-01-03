@@ -18,6 +18,8 @@ import { DependencyGraph } from "../ast/DependencyGraph.js";
 import { QueryIntentDetector } from './search/QueryIntent.js';
 import { createLogger } from "../utils/StructuredLogger.js";
 import { metrics } from "../utils/MetricsCollector.js";
+import { SymbolEmbeddingIndex } from '../indexing/SymbolEmbeddingIndex.js';
+import { IntentToSymbolMapper } from './IntentToSymbolMapper.js';
 
 const execAsync = promisify(exec);
 
@@ -59,6 +61,7 @@ export interface SearchEngineOptions {
     maxMatchesPerFile?: number;
     trigram?: TrigramIndexOptions;
     symbolIndex?: SymbolIndex;
+    symbolEmbeddingIndex?: SymbolEmbeddingIndex;
     fieldWeights?: BM25FConfig["fieldWeights"];
     callGraphBuilder?: CallGraphBuilder;
     dependencyGraph?: DependencyGraph;
@@ -91,6 +94,8 @@ export class SearchEngine {
     private filenameScorer: FilenameScorer;
     private commentParser: CommentParser;
     private queryIntentDetector: QueryIntentDetector;
+    private readonly symbolEmbeddingIndex?: SymbolEmbeddingIndex;
+    private readonly intentToSymbolMapper?: IntentToSymbolMapper;
 
     constructor(rootPath: string, fileSystem: IFileSystem, initialExcludeGlobs: string[] = [], options: SearchEngineOptions = {}) {
         this.rootPath = path.resolve(rootPath);
@@ -155,6 +160,13 @@ export class SearchEngine {
         this.filenameScorer = new FilenameScorer();
         this.commentParser = new CommentParser();
         this.queryIntentDetector = new QueryIntentDetector();
+        
+        // Initialize symbol embedding components for Phase 1 Smart Fuzzy Match
+        this.symbolEmbeddingIndex = options.symbolEmbeddingIndex;
+        if (this.symbolEmbeddingIndex) {
+            this.intentToSymbolMapper = new IntentToSymbolMapper(this.symbolEmbeddingIndex);
+            this.logger.info('[Search] Symbol embedding search enabled');
+        }
         
         this.hybridScorer = new HybridScorer(
             this.rootPath,
@@ -281,6 +293,37 @@ export class SearchEngine {
 
         const stopCollectCandidates = metrics.startTimer("search.scout.collect_candidates_ms");
         let candidates = await this.candidateCollector.collectHybridCandidates(normalizedKeywords);
+
+        // Phase 1 Smart Fuzzy Match: Symbol-based search for symbol queries
+        if (intent === "symbol" && this.intentToSymbolMapper && this.symbolEmbeddingIndex) {
+            try {
+                const stopSymbolSearch = metrics.startTimer("search.scout.symbol_search_ms");
+                const symbolResults = await this.intentToSymbolMapper.mapToSymbols(effectiveQuery, {
+                    maxResults: args.maxResults ?? 20,
+                    minConfidence: 0.3,
+                });
+                stopSymbolSearch();
+
+                if (symbolResults.length > 0) {
+                    this.logger.debug(`[Search] Symbol search found ${symbolResults.length} results, adding to candidates`);
+                    
+                    // Add symbol file locations to candidates
+                    for (const result of symbolResults) {
+                        const relativePath = path.relative(this.rootPath, result.symbol.filePath);
+                        candidates.add(relativePath);
+                    }
+                    
+                    // Log top symbol results for debugging
+                    symbolResults.slice(0, 3).forEach(r => {
+                        this.logger.debug(`  - ${r.symbol.name} (${r.symbol.type}) in ${r.symbol.filePath} [score: ${r.relevanceScore.toFixed(3)}]`);
+                    });
+                }
+            } catch (error) {
+                this.logger.warn(`[Search] Symbol search failed, falling back to text search`, { 
+                    error: error instanceof Error ? error.message : String(error) 
+                });
+            }
+        }
 
         if (candidates.size === 0) {
             const fallbackCandidates = await this.candidateCollector.collectFilesystemCandidates(

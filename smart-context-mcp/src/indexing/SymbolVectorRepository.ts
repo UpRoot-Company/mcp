@@ -16,6 +16,14 @@ export interface CodeSymbol {
 }
 
 /**
+ * Symbol search result with similarity score
+ */
+export interface SymbolWithSimilarity {
+    symbol: CodeSymbol;
+    similarity: number;
+}
+
+/**
  * Bridge between SymbolIndex and VectorIndexManager
  * Enables embedding-based symbol search for Layer 3
  */
@@ -119,7 +127,7 @@ export class SymbolVectorRepository {
     /**
      * Search symbols by natural language query
      */
-    async searchSymbols(query: string, topK = 3): Promise<CodeSymbol[]> {
+    async searchSymbols(query: string, topK = 3): Promise<SymbolWithSimilarity[]> {
         // Embed query
         const queryEmbeddings = await this.embeddingProvider.embed([query]);
         if (queryEmbeddings.length === 0) {
@@ -137,15 +145,18 @@ export class SymbolVectorRepository {
             return [];
         }
 
-        // Convert IDs back to CodeSymbols
+        // Convert IDs back to CodeSymbols with similarity scores
         // Note: In a real implementation, we'd need to store metadata
         // For now, return partial results
-        return results.ids.map(id => ({
-            symbolId: id,
-            name: id.split('::').pop() ?? id,
-            type: 'function' as const,
-            filePath: '',
-            lineRange: { start: 0, end: 0 },
+        return results.ids.map((id, index) => ({
+            symbol: {
+                symbolId: id,
+                name: id.split('::').pop() ?? id,
+                type: 'function' as const,
+                filePath: '',
+                lineRange: { start: 0, end: 0 },
+            },
+            similarity: results.scores.get(id) ?? 0,
         }));
     }
 
