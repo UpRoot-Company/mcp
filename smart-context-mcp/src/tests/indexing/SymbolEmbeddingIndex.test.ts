@@ -65,6 +65,7 @@ describe('SymbolEmbeddingIndex - Phase 1 Smart Fuzzy Match', () => {
                 type: 'function',
                 filePath: 'test.ts',
                 lineRange: { start: 1, end: 5 },
+                range: { startByte: 0, endByte: 100 },
             };
 
             await disabledIndex.indexSymbol(symbol);
@@ -81,6 +82,7 @@ describe('SymbolEmbeddingIndex - Phase 1 Smart Fuzzy Match', () => {
                 type: 'function',
                 filePath: 'src/calc.ts',
                 lineRange: { start: 10, end: 15 },
+                range: { startByte: 100, endByte: 200 },
                 signature: '(a: number, b: number): number',
             };
 
@@ -105,6 +107,7 @@ describe('SymbolEmbeddingIndex - Phase 1 Smart Fuzzy Match', () => {
                 name: 'MyClass',
                 type: 'class',
                 filePath: 'src/class.ts',
+                range: { startByte: 0, endByte: 500 },
                 lineRange: { start: 1, end: 50 },
             };
 
@@ -127,22 +130,19 @@ describe('SymbolEmbeddingIndex - Phase 1 Smart Fuzzy Match', () => {
                     name: 'func1',
                     type: 'function',
                     filePath: 'a.ts',
-                    lineRange: { start: 1, end: 5 },
-                },
+                    lineRange: { start: 1, end: 5 },                    range: { startByte: 0, endByte: 100 },                },
                 {
                     symbolId: 'func2',
                     name: 'func2',
                     type: 'function',
                     filePath: 'b.ts',
-                    lineRange: { start: 1, end: 5 },
-                },
+                    lineRange: { start: 1, end: 5 },                    range: { startByte: 100, endByte: 200 },                },
                 {
                     symbolId: 'func3',
                     name: 'func3',
                     type: 'function',
                     filePath: 'c.ts',
-                    lineRange: { start: 1, end: 5 },
-                },
+                    lineRange: { start: 1, end: 5 },                    range: { startByte: 200, endByte: 300 },                },
             ];
 
             mockEmbeddingProvider.embed.mockResolvedValue(
@@ -279,6 +279,7 @@ describe('SymbolEmbeddingIndex - Phase 1 Smart Fuzzy Match', () => {
                 type: 'method',
                 filePath: 'test.ts',
                 lineRange: { start: 5, end: 10 },
+                range: { startByte: 100, endByte: 200 },
                 signature: '(): void',
             };
 

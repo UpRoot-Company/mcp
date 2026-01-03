@@ -11,6 +11,7 @@ export interface CodeSymbol {
     type: 'class' | 'function' | 'method' | 'interface' | 'type';
     filePath: string;
     lineRange: { start: number; end: number };
+    range: { startByte: number; endByte: number }; // For indexRange resolution
     signature?: string;
     content?: string; // For embedding
 }
@@ -155,6 +156,7 @@ export class SymbolVectorRepository {
                 type: 'function' as const,
                 filePath: '',
                 lineRange: { start: 0, end: 0 },
+                range: { startByte: 0, endByte: 0 },
             },
             similarity: results.scores.get(id) ?? 0,
         }));

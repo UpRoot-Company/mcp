@@ -871,7 +871,7 @@ export interface ResolvedEdit {
     expectedHash?: { algorithm: "xxhash" | "sha256"; value: string };
     replacementString: string;
     diagnostics?: {
-        resolvedBy: "indexRange" | "lineRange" | "context" | "ast" | "fuzzy";
+        resolvedBy: "indexRange" | "lineRange" | "context" | "ast" | "fuzzy" | "embedding";
         candidateCount?: number;
         timingMs?: number;
         notes?: string[];

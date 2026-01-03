@@ -1,17 +1,30 @@
 // ADR-042-005: Phase A3 - EditResolver
+// ADR-042-006: Phase 1 - Smart Fuzzy Match Integration
 import { IFileSystem } from "../platform/FileSystem.js";
 import { EditorEngine, PlannedMatch } from "./Editor.js";
 import { Edit, ResolvedEdit, ResolveError, ResolveResult, ResolveOptions } from "../types.js";
 import { ConfigurationManager } from "../config/ConfigurationManager.js";
+import { IntentToSymbolMapper } from "./IntentToSymbolMapper.js";
+import type { SymbolEmbeddingIndex } from "../indexing/SymbolEmbeddingIndex.js";
 import * as path from "path";
 
 export class EditResolver {
     private readonly fileSystem: IFileSystem;
     private readonly editor: EditorEngine;
+    private readonly intentMapper?: IntentToSymbolMapper;
 
-    constructor(fileSystem: IFileSystem, editor: EditorEngine) {
+    constructor(
+        fileSystem: IFileSystem,
+        editor: EditorEngine,
+        symbolEmbeddingIndex?: SymbolEmbeddingIndex
+    ) {
         this.fileSystem = fileSystem;
         this.editor = editor;
+        
+        // Phase 1: Optional IntentToSymbolMapper for smart matching
+        if (symbolEmbeddingIndex) {
+            this.intentMapper = new IntentToSymbolMapper(symbolEmbeddingIndex);
+        }
     }
 
     /**
@@ -77,6 +90,23 @@ export class EditResolver {
                 const edit = edits[i];
 
                 try {
+                    // Phase 1: Try embedding-based match if smartMatch enabled and intent provided
+                    if (options?.smartMatch && edit.intent && this.intentMapper) {
+                        const embeddingResult = await this.tryEmbeddingMatch(
+                            edit.intent,
+                            absPath,
+                            edit,
+                            i
+                        );
+                        if (embeddingResult.success) {
+                            resolvedEdits.push(embeddingResult.edit!);
+                            continue;
+                        } else if (embeddingResult.degraded) {
+                            // Log degradation but continue with traditional matching
+                            console.warn(`Embedding match degraded for edit ${i}, falling back to traditional matching`);
+                        }
+                    }
+
                     // Apply cost guardrails for levenshtein
                     if (edit.fuzzyMode === "levenshtein") {
                         const targetLen = edit.targetString?.length ?? 0;
@@ -200,11 +230,74 @@ export class EditResolver {
     /**
      * Determines how the edit was resolved (for diagnostics)
      */
-    private getResolveMethod(edit: Edit, match: any): "indexRange" | "lineRange" | "context" | "ast" | "fuzzy" {
+    private getResolveMethod(edit: Edit, match: any): "indexRange" | "lineRange" | "context" | "ast" | "fuzzy" | "embedding" {
         if (edit.indexRange) return "indexRange";
         if (edit.lineRange && (edit.beforeContext || edit.afterContext)) return "context";
         if (edit.lineRange) return "lineRange";
         if (edit.fuzzyMode === "levenshtein" || edit.fuzzyMode === "whitespace") return "fuzzy";
         return "indexRange"; // default
+    }
+
+    /**
+     * Phase 1: Try embedding-based symbol match
+     * 
+     * @returns Success indicator and resolved edit (if successful)
+     */
+    private async tryEmbeddingMatch(
+        intent: string,
+        filePath: string,
+        edit: Edit,
+        editIndex: number
+    ): Promise<{ success: boolean; degraded: boolean; edit?: ResolvedEdit }> {
+        try {
+            const mapResult = await this.intentMapper!.mapToSymbols(intent, {
+                maxResults: 3,
+                minConfidence: 0.85,
+            });
+
+            if (!mapResult || mapResult.length === 0) {
+                return { success: false, degraded: false };
+            }
+
+            // Use top match if confidence is high enough
+            const topMatch = mapResult[0];
+            if (topMatch.relevanceScore >= 0.85) {
+                const relPath = path.relative(process.cwd(), filePath).replace(/\\/g, '/');
+                
+                // Read actual content at the resolved location
+                const content = await this.fileSystem.readFile(filePath);
+                const targetString = content.substring(
+                    topMatch.symbol.range.startByte,
+                    topMatch.symbol.range.endByte
+                );
+
+                return {
+                    success: true,
+                    degraded: false,
+                    edit: {
+                        filePath: relPath,
+                        indexRange: {
+                            start: topMatch.symbol.range.startByte,
+                            end: topMatch.symbol.range.endByte,
+                        },
+                        targetString,
+                        replacementString: edit.replacementString,
+                        diagnostics: {
+                            resolvedBy: "embedding",
+                            candidateCount: mapResult.length,
+                            notes: [
+                                `Resolved via embedding: ${topMatch.symbol.name}`,
+                                `Confidence: ${topMatch.relevanceScore.toFixed(2)}`,
+                            ],
+                        },
+                    },
+                };
+            }
+
+            return { success: false, degraded: false };
+        } catch (error) {
+            console.error(`Embedding match failed for edit ${editIndex}:`, error);
+            return { success: false, degraded: true };
+        }
     }
 }
