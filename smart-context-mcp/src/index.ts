@@ -45,7 +45,7 @@ import { PathNormalizer } from "./utils/PathNormalizer.js";
 import { AstAwareDiff } from "./engine/AstAwareDiff.js";
 import { NodeFileSystem } from "./platform/FileSystem.js";
 import { ErrorEnhancer } from "./errors/ErrorEnhancer.js";
-import { ResourceUsage, DocumentKind } from "./types.js";
+import { ResourceUsage, DocumentKind, DocumentSection } from "./types.js";
 import { GhostInterfaceBuilder } from "./resolution/GhostInterfaceBuilder.js";
 import { FallbackResolver } from "./resolution/FallbackResolver.js";
 import { CallSiteAnalyzer } from "./ast/analysis/CallSiteAnalyzer.js";
@@ -1301,24 +1301,50 @@ export class SmartContextServer {
             reasons.push(profile.parser.reason);
         }
 
-        let sectionIndex = -1;
-        if (sectionId) {
-            sectionIndex = outline.findIndex(section => section.id === sectionId);
-        } else if (headingPath && headingPath.length > 0) {
-            sectionIndex = outline.findIndex(section =>
-                matchesHeadingPath(section.path, headingPath)
-            );
-        }
+        const lines = extracted.content.split(/\r?\n/);
+        const wantsWholeDocument = !sectionId && (!headingPath || headingPath.length === 0);
+        let section: DocumentSection | undefined;
+        let range: { startLine: number; endLine: number };
+        let rawSectionContent: string;
 
-        if (sectionIndex === -1) {
-            let suggestions = outline.slice(0, 5).map(section => section.path);
-            if (headingPath && headingPath.length > 0) {
-                const ranked = rankSectionsByHeadingPath(outline, headingPath, 5);
-                suggestions = ranked.map(entry => outline[entry.index].path);
-                const best = ranked[0];
-                if (best && best.score >= 2) {
-                    sectionIndex = best.index;
-                    reasons.push("closest_match");
+        if (wantsWholeDocument || outline.length === 0) {
+            range = { startLine: 1, endLine: Math.max(1, lines.length) };
+            section = buildWholeDocumentSection({
+                filePath,
+                kind: profile.kind,
+                title: profile.title,
+                totalLines: range.endLine,
+                content: extracted.content
+            });
+            rawSectionContent = extracted.content;
+        } else {
+            let sectionIndex = -1;
+            if (sectionId) {
+                sectionIndex = outline.findIndex(item => item.id === sectionId);
+            } else if (headingPath && headingPath.length > 0) {
+                sectionIndex = outline.findIndex(item =>
+                    matchesHeadingPath(item.path, headingPath)
+                );
+            }
+
+            if (sectionIndex === -1) {
+                let suggestions = outline.slice(0, 5).map(item => item.path);
+                if (headingPath && headingPath.length > 0) {
+                    const ranked = rankSectionsByHeadingPath(outline, headingPath, 5);
+                    suggestions = ranked.map(entry => outline[entry.index].path);
+                    const best = ranked[0];
+                    if (best && best.score >= 2) {
+                        sectionIndex = best.index;
+                        reasons.push("closest_match");
+                    } else {
+                        return {
+                            success: false,
+                            status: 'no_results',
+                            message: 'Section not found.',
+                            suggestions,
+                            ...buildDegradation(reasons)
+                        };
+                    }
                 } else {
                     return {
                         success: false,
@@ -1328,21 +1354,22 @@ export class SmartContextServer {
                         ...buildDegradation(reasons)
                     };
                 }
-            } else {
-                return {
-                    success: false,
-                    status: 'no_results',
-                    message: 'Section not found.',
-                    suggestions,
-                    ...buildDegradation(reasons)
-                };
             }
+
+            section = outline[sectionIndex];
+            range = computeSectionRange(outline, sectionIndex, includeSubsections);
+            rawSectionContent = lines.slice(range.startLine - 1, range.endLine).join("\n");
         }
 
-        const section = outline[sectionIndex];
-        const range = computeSectionRange(outline, sectionIndex, includeSubsections);
-        const lines = extracted.content.split(/\r?\n/);
-        const rawSectionContent = lines.slice(range.startLine - 1, range.endLine).join("\n");
+        if (!section) {
+            return {
+                success: false,
+                status: 'no_results',
+                message: 'Section not found.',
+                ...buildDegradation(reasons)
+            };
+        }
+
         const sectionContent = profile.kind === "html"
             ? extractHtmlTextPreserveLines(rawSectionContent)
             : rawSectionContent;
@@ -2793,6 +2820,35 @@ const isDirectRun = (() => {
         return false;
     }
 })();
+
+function buildWholeDocumentSection(params: {
+    filePath: string;
+    kind: DocumentKind;
+    title?: string;
+    totalLines: number;
+    content: string;
+}): DocumentSection {
+    const { filePath, kind, title, totalLines, content } = params;
+    const safeTitle = (title && title.trim()) || path.basename(filePath) || filePath;
+    const normalizedLines = Math.max(1, totalLines);
+    const contentHash = crypto.createHash("sha256").update(content ?? "").digest("hex");
+    const documentId = crypto.createHash("sha256").update(`${filePath}:document`).digest("hex");
+    return {
+        id: documentId,
+        filePath,
+        kind,
+        title: safeTitle,
+        level: 0,
+        path: [safeTitle],
+        range: {
+            startLine: 1,
+            endLine: normalizedLines,
+            startByte: 0,
+            endByte: Buffer.byteLength(content ?? "", "utf-8")
+        },
+        contentHash
+    };
+}
 
 function parseRootFromArgv(argv: string[]): string | undefined {
     // Supports:
