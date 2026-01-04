@@ -38,6 +38,10 @@ export class BruteforceVectorIndex implements VectorIndex {
     public async save(_dir: string): Promise<void> {}
 
     public async load(_dir: string): Promise<void> {}
+
+    public dispose(): void {
+        this.vectors.clear();
+    }
 }
 
 function cosineSimilarity(a: Float32Array, b: Float32Array): number {

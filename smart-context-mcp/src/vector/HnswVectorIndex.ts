@@ -19,6 +19,9 @@ type HnswIndex = {
     markDelete?: (label: number) => void;
     deletePoint?: (label: number) => void;
     getCurrentCount?: () => number;
+    dispose?: () => void;
+    delete?: () => void;
+    free?: () => void;
 };
 
 export class HnswVectorIndex implements VectorIndex {
@@ -140,6 +143,7 @@ export class HnswVectorIndex implements VectorIndex {
     }
 
     public async load(dir: string): Promise<void> {
+        this.releaseIndex();
         await fs.mkdir(dir, { recursive: true });
         const indexPath = path.join(dir, "index.bin");
         const idsPath = path.join(dir, "ids.json");
@@ -165,9 +169,18 @@ export class HnswVectorIndex implements VectorIndex {
     }
 
     public async initializeEmpty(): Promise<void> {
+        this.releaseIndex();
         this.index = await createIndex(this.space, this.dims);
         this.initIndex(this.index);
         this.applySearchParams(this.index);
+    }
+
+    public dispose(): void {
+        this.releaseIndex();
+        this.idToLabel.clear();
+        this.labelToId.clear();
+        this.deletedLabels.clear();
+        this.nextLabel = 0;
     }
 
     private applySearchParams(index: HnswIndex): void {
@@ -202,6 +215,12 @@ export class HnswVectorIndex implements VectorIndex {
         this.labelToId.set(label, id);
         return label;
     }
+
+    private releaseIndex(): void {
+        if (!this.index) return;
+        disposeHnswIndex(this.index);
+        this.index = undefined;
+    }
 }
 
 async function createIndex(space: string, dims: number): Promise<HnswIndex> {
@@ -230,6 +249,36 @@ function normalizeSearchOutput(raw: any): { labels: number[]; distances: number[
         labels: Array.isArray(labels) ? labels : Array.from(labels ?? []),
         distances: Array.isArray(distances) ? distances : Array.from(distances ?? [])
     };
+}
+
+function disposeHnswIndex(index?: HnswIndex): void {
+    if (!index) return;
+    const maybeDispose = (index as { dispose?: () => void }).dispose;
+    if (typeof maybeDispose === "function") {
+        try {
+            maybeDispose.call(index);
+        } catch {
+            // ignore disposal failures
+        }
+        return;
+    }
+    const maybeDelete = (index as { delete?: () => void }).delete;
+    if (typeof maybeDelete === "function") {
+        try {
+            maybeDelete.call(index);
+        } catch {
+            // ignore disposal failures
+        }
+        return;
+    }
+    const maybeFree = (index as { free?: () => void }).free;
+    if (typeof maybeFree === "function") {
+        try {
+            maybeFree.call(index);
+        } catch {
+            // ignore disposal failures
+        }
+    }
 }
 
 async function readJson<T>(filePath: string, fallback: T): Promise<T> {
@@ -400,5 +449,12 @@ class PersistedBruteforceIndex implements HnswIndex {
         offset += normsBytes;
         const deleted = new Uint8Array(raw.buffer, raw.byteOffset + offset, storedMax);
         this.deleted.set(deleted);
+    }
+
+    public dispose(): void {
+        this.maxElements = 0;
+        this.vectors = new Float32Array(0);
+        this.norms = new Float32Array(0);
+        this.deleted = new Uint8Array(0);
     }
 }

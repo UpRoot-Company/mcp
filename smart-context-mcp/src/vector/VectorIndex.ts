@@ -14,4 +14,5 @@ export interface VectorIndex {
     search(query: Float32Array, k: number): VectorIndexResult[];
     save(dir: string): Promise<void>;
     load(dir: string): Promise<void>;
+    dispose(): void;
 }

@@ -98,6 +98,25 @@ export class TransformersEmbeddingProvider implements EmbeddingProviderClient {
         const candidate = path.join(projectRoot, "models");
         return candidate;
     }
+
+    public async dispose(): Promise<void> {
+        if (this.pipelinePromise) {
+            try {
+                const pipeline = await this.pipelinePromise;
+                // Try to dispose the model if supported by the library wrapper
+                if (pipeline && typeof (pipeline as any).dispose === 'function') {
+                    await (pipeline as any).dispose();
+                } else if (pipeline && (pipeline as any).model && typeof (pipeline as any).model.dispose === 'function') {
+                    await (pipeline as any).model.dispose();
+                }
+            } catch (error) {
+                // Ignore disposal errors
+                console.warn("[TransformersEmbeddingProvider] Error disposing pipeline:", error);
+            } finally {
+                this.pipelinePromise = undefined;
+            }
+        }
+    }
 }
 
 function tensorToVectors(output: any, expectedCount: number): Float32Array[] {

@@ -98,6 +98,10 @@ export class VectorIndexManager {
             throw new Error("Vector index is disabled.");
         }
         const state = await this.buildIndex(provider, model);
+        if (state) {
+            this.disposeState(state.key);
+            this.states.set(state.key, state);
+        }
         return state?.meta ?? null;
     }
 
@@ -253,6 +257,19 @@ export class VectorIndexManager {
         }
         // >>> 0 to force uint32
         return (hash >>> 0) % shardCount;
+    }
+
+    private disposeState(key: string): void {
+        const state = this.states.get(key);
+        if (!state) return;
+        for (const index of state.indexes) {
+            try {
+                index.dispose();
+            } catch {
+                // ignore dispose errors
+            }
+        }
+        this.states.delete(key);
     }
 
     private async ensureIndex(provider: string, model: string, options: { allowRebuild: boolean }): Promise<VectorIndexState | null> {

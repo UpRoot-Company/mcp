@@ -12,3 +12,6 @@ dist/
 
 # bundled models (local only)
 models/
+
+# python environment files
+.venv/
